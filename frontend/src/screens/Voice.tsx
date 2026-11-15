@@ -1,3 +1,4 @@
+import { speakable } from "../voice";
 import { useState } from "react";
 import { AlertTriangle, Ear, Mic, MicOff, Plus, Repeat, SendHorizontal, Square, Volume2, VolumeX } from "lucide-react";
 import { api } from "../api";
@@ -127,7 +128,7 @@ export function Voice() {
               {v.turns.map((t, i) => (
                 <div key={i} className={`voice-turn ${t.role}`}>
                   <span className="label">{t.role === "user" ? "You" : "JARVIS"}</span>
-                  <span className="truncate-3">{t.text}</span>
+                  <span className="truncate-3">{t.role === "user" ? t.text : speakable(t.text)}</span>
                 </div>
               ))}
             </div>

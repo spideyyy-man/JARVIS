@@ -49,8 +49,12 @@ are never readable; anything that looks like a secret is redacted before it reac
 ```bash
 cd backend && .venv/bin/python -m pytest -q          # unit + integration tests
 backend/.venv/bin/python scripts/acceptance.py       # the ten acceptance workflows -> docs/ACCEPTANCE.md
-node frontend/e2e/smoke.mjs                          # browser end-to-end (needs the server running)
+# browser end-to-end: start the server with JARVIS_API_TOKEN=dev-token, then
+E2E_HOME=<a folder inside JARVIS_ALLOWED_ROOTS> node frontend/e2e/smoke.mjs      # -> docs/E2E.md, frontend/e2e/screenshots/
 ```
+
+Current results: 49 backend tests pass; 30/30 browser checks pass; 9 of 10 acceptance workflows pass and
+web research is recorded as blocked (not live-tested) because the build sandbox could not reach a search engine.
 
 ## Known limits
 

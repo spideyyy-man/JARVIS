@@ -57,7 +57,7 @@ export interface Task {
 }
 export interface AgentMessage { id: string; task_id: string; sender: string; recipient: string; type: string; content: string; data: Record<string, unknown>; created: number }
 export interface TaskDetail extends Task { messages: AgentMessage[]; subtasks: Task[] }
-export interface Conversation extends ConversationSummary { messages: Message[]; tasks: Task[] }
+export interface Conversation extends Omit<ConversationSummary, "messages"> { messages: Message[]; tasks: Task[] }
 export interface SearchHit { id: string; conversation_id: string; role: string; created: number; title: string; snippet: string }
 export interface AgentInfo {
   name: string; title: string; responsibility: string; status: string; active: RunningAgent[];
