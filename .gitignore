@@ -8,3 +8,4 @@ dist/
 .env
 *.egg-info/
 .pytest_cache/
+jarvis.zip
