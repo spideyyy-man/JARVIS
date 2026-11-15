@@ -6,6 +6,7 @@ an explicit permission model, remembers context, and runs automations.
 - **Backend**: Python 3.11+, FastAPI, SQLite. `backend/`
 - **Frontend**: React + TypeScript (Vite), served by the backend. `frontend/`
 - **Design and trade-offs**: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- **Windows laptop setup, desktop control, no GPU**: [docs/WINDOWS.md](docs/WINDOWS.md)
 - **Using local models (no API key)**: [docs/LOCAL_MODELS.md](docs/LOCAL_MODELS.md)
 - **Evidence for the ten acceptance workflows**: [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)
 
@@ -54,8 +55,9 @@ backend/.venv/bin/python scripts/acceptance.py       # the ten acceptance workfl
 E2E_HOME=<a folder inside JARVIS_ALLOWED_ROOTS> node frontend/e2e/smoke.mjs      # -> docs/E2E.md, frontend/e2e/screenshots/
 ```
 
-Current results: 49 backend tests pass; 30/30 browser checks pass; 9 of 10 acceptance workflows pass and
-web research is recorded as blocked (not live-tested) because the build sandbox could not reach a search engine.
+Current results (Linux): 61 backend tests pass (run under `xvfb-run -a` for the two that need a display);
+32/32 browser checks and 7/7 local-model checks pass; 9 of 10 acceptance workflows pass and web research is
+recorded as blocked (not live-tested). Nothing has been run on Windows yet.
 
 ## Known limits
 

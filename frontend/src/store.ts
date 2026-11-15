@@ -105,6 +105,7 @@ export async function bootstrap() {
     voice.configure(settings.voice);
     // Local speech models, if the backend has them configured, replace the browser's speech service.
     await installServerSpeech().then(() => voice.detect(), () => undefined);
+    if (settings.voice.wake_on_start) voice.setWakeMode(true);
     setState({ auth: "ok", settings, approvals: { ...state.approvals, ...map }, notifications, history: hist.points.slice(-150) });
     applyStatus(status);
     bus.connect();
@@ -176,6 +177,7 @@ export function initStore() {
     setState({ notifications: [n, ...state.notifications.filter((x) => x.id !== n.id)].slice(0, 40), rev: bump("notification") });
     pushToast(n.level === "error" ? "error" : n.level === "warning" ? "warning" : "info", n.title, n.body);
   });
+  bus.on("assistant.announce", (e) => voice.announce(String(e.text ?? "")));
   bus.on("llm.failover", (e) => pushToast("warning", `Language model '${String(e.provider)}' failed`, `${String(e.error ?? "")}${e.next ? ` — switching to '${String(e.next)}'` : ""}`));
   void bootstrap();
 }

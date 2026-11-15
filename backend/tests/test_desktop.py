@@ -214,3 +214,23 @@ def test_real_screen_read_click_by_label_and_typing(jarvis):
         out = run(jarvis.chat("approve", "c1"))
         assert "not visible on screen" in out["text"]
         browser.close()
+
+
+def test_desktop_launcher_pieces(jarvis, monkeypatch, tmp_path):
+    import urllib.request
+
+    from jarvis import desktop_app
+
+    cmd = desktop_app.window_command(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe", "http://127.0.0.1:8765/x", tmp_path / "ui")
+    assert cmd[1] == "--app=http://127.0.0.1:8765/x" and cmd[2].startswith("--user-data-dir=")
+    assert "/api/auth?token=" in desktop_app.app_url(jarvis, "voice") and desktop_app.app_url(jarvis, "voice").endswith("next=/%23/voice")
+    script = desktop_app.autostart_script(r"C:\jarvis\backend\.venv\Scripts\python.exe", r"C:\jarvis")
+    assert r"C:\jarvis\backend\.venv\Scripts\pythonw.exe" in script and "-m jarvis.desktop_app" in script and 'CurrentDirectory = "C:\\jarvis"' in script
+
+    jarvis.settings.port = 8791
+    server, thread = desktop_app.start_server(jarvis)  # the embedded server really serves
+    try:
+        assert urllib.request.urlopen("http://127.0.0.1:8791/api/health", timeout=5).status == 200
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)

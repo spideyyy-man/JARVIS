@@ -189,6 +189,13 @@ try {
   await page.waitForSelector('[data-testid="audit-row"]');
   const audit = await page.textContent('[data-testid="audit-log"]');
   check("settings: audit log records the approval decision", /organize_folder/.test(audit) && /approved/.test(audit));
+  const cap = page.locator('[data-testid="capability"][data-cap="screen_access"] [role="switch"]');
+  check("settings: high-impact capabilities are off by default", (await page.locator('[data-testid="capability"] [role="switch"][aria-checked="true"]').count()) === 0 && (await page.locator('[data-testid="capability"]').count()) === 3);
+  await cap.click();
+  await page.waitForFunction(() => document.querySelector('[data-testid="capability"][data-cap="screen_access"] [role="switch"]')?.getAttribute("aria-checked") === "true");
+  await cap.click();
+  await page.waitForFunction(() => document.querySelector('[data-testid="capability"][data-cap="screen_access"] [role="switch"]')?.getAttribute("aria-checked") === "false");
+  check("settings: a capability can be switched on and off by the user", true);
   check("settings: degraded model state disclosed", await page.isVisible('[data-testid="llm-degraded"]'));
   await shot("10-settings");
 

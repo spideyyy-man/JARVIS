@@ -95,6 +95,7 @@ any cited URL that was never retrieved are flagged on the task and appended to t
 | Wake word | Browser recognition running continuously; audio goes to the browser vendor's speech service | For fully local wake word: a server-side STT provider |
 | Neural semantic search | Default embedder is lexical | An embeddings endpoint |
 | Web research | Needs outbound access to the search engine | Network access to `html.duckduckgo.com` / `en.wikipedia.org` |
-| Native desktop shell, global hotkey | Not built | Tauri wrapper |
+| Desktop app (tray, hotkey, autostart) | Python launcher + Edge app window; untested on Windows | First run on a Windows machine |
+| Screen reading, mouse/keyboard, browser control | Built; tested on a Linux virtual display. CPU text recognition, so only text-labelled targets can be clicked | Capabilities switched on in Settings |
 | Email, calendar, purchases | Not built, by design | Would be CONFIRM-level tools |
 | Multi-user | Not supported; single local user | - |

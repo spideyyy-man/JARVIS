@@ -17,7 +17,7 @@ PASS  voice: recognition + synthesis detected
 PASS  voice: speech without the wake word is ignored
 PASS  voice: wake-word utterance sent as a voice request, wake word stripped  ({"text":"how is my computer performing","source":"voice"})
 PASS  voice: reply streamed into the voice screen
-PASS  voice: reply spoken aloud with Markdown stripped  (System performance - Linux 6.18.44-fc-v470 (x8664), up 0.1 h)
+PASS  voice: reply spoken aloud with Markdown stripped  (System performance - Linux 6.18.44-fc-v470 (x8664), up 0.0 h)
 PASS  voice: barge-in cancels speech
 PASS  agents: all seven agents listed
 PASS  agents: structured inter-agent messages shown
@@ -32,8 +32,10 @@ PASS  automation: workflow created, run, and per-step log shown
 PASS  settings: destructive tools cannot be allowlisted
 PASS  settings: low-risk tool allowlisted for trusted automation
 PASS  settings: audit log records the approval decision
+PASS  settings: high-impact capabilities are off by default
+PASS  settings: a capability can be switched on and off by the user
 PASS  settings: degraded model state disclosed
 PASS  no console errors or failed API requests during the run
 
-30/30 checks passed
+32/32 checks passed
 ```

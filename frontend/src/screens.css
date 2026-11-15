@@ -118,3 +118,4 @@ input[type="range"] { width: 100%; accent-color: var(--cyan); }
 .toggle-row { justify-content: flex-start; }
 .toggle-row > :last-child { text-align: left; }
 .md img { max-width: min(100%, 520px); border-radius: 10px; border: 1px solid var(--line); display: block; margin: 8px 0; }
+.cap-row { padding: 10px 0; border-top: 1px solid rgba(56, 189, 248, 0.08); gap: 16px; } .cap-row b { text-transform: capitalize; }

@@ -11,7 +11,7 @@ export interface LlmInfo {
 }
 export interface RunningAgent { task_id: string; agent: string; title: string; started: number; parent_id?: string | null }
 export interface ActiveTask { conversation_id: string; title: string; started: number }
-export interface VoiceSettings { wake_word: string; continuous: boolean; voice_name: string; rate: number; speak_replies: boolean; pitch?: number }
+export interface VoiceSettings { wake_word: string; continuous: boolean; voice_name: string; rate: number; speak_replies: boolean; pitch?: number; wake_on_start?: boolean }
 export interface Status {
   state: AssistantState;
   active_task: ActiveTask | null;
@@ -76,6 +76,8 @@ export interface Settings {
   trusted_tools: string[]; default_project: string; voice: VoiceSettings; allowed_roots: string[]; data_dir: string; llm: LlmInfo;
   embedder: string; search_provider: string; speech: { stt: string; tts: string }; image_provider: string;
   levels: { read: number; confirm: number; trust_eligible: string[] };
+  capabilities: Record<string, { enabled: boolean; description: string }>;
+  proactive: { briefing_time: string };
 }
 export interface Schedule { type: "interval" | "cron" | "once" | "manual"; seconds?: number; expr?: string; at?: number }
 export interface WorkflowStep { id?: string; tool?: string; args?: Record<string, unknown>; notify?: string; agent_prompt?: string; [k: string]: unknown }
@@ -212,7 +214,7 @@ export const api = {
   audit: (limit = 100) => req<AuditEntry[]>("GET", `/api/audit${q({ limit })}`),
   tools: () => req<ToolInfo[]>("GET", "/api/tools"),
   settings: () => req<Settings>("GET", "/api/settings"),
-  putSettings: (body: { trusted_tools?: string[]; default_project?: string; voice?: Partial<VoiceSettings> }) => req<Settings>("PUT", "/api/settings", body),
+  putSettings: (body: { trusted_tools?: string[]; default_project?: string; voice?: Partial<VoiceSettings>; capabilities?: Record<string, boolean>; proactive?: { briefing_time: string } }) => req<Settings>("PUT", "/api/settings", body),
   kbSpaces: () => req<KbSpace[]>("GET", "/api/knowledge/spaces"),
   kbDocuments: (space?: string) => req<KbDocument[]>("GET", `/api/knowledge/documents${q({ space })}`),
   kbIngest: (path: string, space: string) => req<Record<string, unknown>>("POST", "/api/knowledge/ingest", { path, space }),

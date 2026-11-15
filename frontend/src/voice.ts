@@ -170,6 +170,12 @@ export class VoiceEngine {
     }
   }
   /** Typed input (also the fallback when speech recognition is unavailable). */
+  /** JARVIS speaks first (a due reminder, the daily briefing). Never talks over an ongoing exchange. */
+  announce(text: string) {
+    if (this.busy) return;
+    const say = speakable(text);
+    if (say) this.speak(say);
+  }
   sendText(text: string) {
     const t = text.trim();
     if (t) this.submit(t);

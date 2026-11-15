@@ -69,6 +69,16 @@ export function SettingsScreen() {
           <p className="soft">Only low-risk Confirm tools can be allowlisted. Deleting, overwriting, running commands and committing can never be.</p>
         </Panel>
 
+        <Panel className="s12" title="Capabilities" icon={<ShieldQuestion size={14} />} testid="capabilities">
+          <p className="soft">High-impact abilities. All are off until you switch them on here; JARVIS cannot switch them on itself. Even when on, every click, keystroke and form entry still waits for your approval.</p>
+          {Object.entries(s?.capabilities ?? {}).map(([name, c]) => (
+            <div key={name} className="row between cap-row" data-testid="capability" data-cap={name}>
+              <div><b>{name.replace(/_/g, " ")}</b><div className="soft">{c.description}</div></div>
+              <Switch checked={c.enabled} label={`Allow ${name.replace(/_/g, " ")}`} onChange={(v) => void put({ capabilities: { [name]: v } }, `${name.replace(/_/g, " ")} ${v ? "enabled" : "disabled"}.`)} />
+            </div>
+          ))}
+        </Panel>
+
         <Panel className="s8" title="Tool permissions" icon={<ShieldCheck size={14} />} testid="tool-permissions">
           <Loading error={tools.error} loading={tools.loading} empty={!tools.data} />
           {tools.data && (
@@ -129,6 +139,11 @@ export function SettingsScreen() {
                   <input type="range" min={0.6} max={1.6} step={0.05} defaultValue={s.voice.rate} onMouseUp={(e) => voice({ rate: Number(e.currentTarget.value) })} onKeyUp={(e) => voice({ rate: Number(e.currentTarget.value) })} aria-label="Speaking rate" />
                 </label>
                 <div className="row between"><span>Speak replies aloud</span><Switch checked={s.voice.speak_replies} label="Speak replies aloud" onChange={(v) => voice({ speak_replies: v })} /></div>
+                <div className="row between"><span>Listen for the wake word as soon as JARVIS opens</span><Switch checked={!!s.voice.wake_on_start} label="Wake word on startup" onChange={(v) => voice({ wake_on_start: v })} /></div>
+                <label className="field"><span>Daily spoken briefing at (HH:MM, empty = off)</span>
+                  <input className="input num" defaultValue={s.proactive.briefing_time} placeholder="08:30" data-testid="briefing-time"
+                    onBlur={(e) => { if (e.target.value.trim() !== s.proactive.briefing_time) void put({ proactive: { briefing_time: e.target.value.trim() } }, "Briefing time saved."); }} />
+                </label>
                 <div className="row between"><span>Continuous conversation</span><Switch checked={s.voice.continuous} label="Continuous conversation" onChange={(v) => voice({ continuous: v })} /></div>
               </div>
             )}
