@@ -132,7 +132,7 @@ class ToolExecutor:
             preview = tool.preview(args) if tool.preview else f"{name}({json.dumps(args, default=str)})"
         except Exception as e:  # preview validates paths etc.; failure means the action is not viable
             self.app.audit.record(actor=actor, tool=name, level=tool.level.value, decision="rejected-invalid", args=args, outcome="error", detail=str(e))
-            return ToolResult(False, error=str(e))
+            return ToolResult(False, error=f"Blocked by security policy: {e}" if isinstance(e, SecurityError) else str(e))
         approval = {"id": new_id("ap_"), "tool": name, "args": args, "preview": preview, "agent": ctx.agent,
                     "task_id": ctx.task_id, "conversation_id": ctx.conversation_id, "origin": ctx.origin,
                     "status": "pending", "result": "", "created": time.time(), "decided": None}

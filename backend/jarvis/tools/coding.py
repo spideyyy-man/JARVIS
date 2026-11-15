@@ -54,7 +54,7 @@ def _repo(ctx: ToolContext, path: str) -> Path:
     return p
 
 
-def detect_test_command(repo: Path) -> list[str] | None:
+def _detect_in(repo: Path) -> list[str] | None:
     if (repo / "pyproject.toml").exists() or (repo / "pytest.ini").exists() or (repo / "tests").is_dir() or list(repo.glob("test_*.py")):
         # the project's own virtualenv if it has one, otherwise the interpreter JARVIS runs on
         venv = next((v for v in (repo / ".venv/bin/python", repo / "venv/bin/python", repo / ".venv/Scripts/python.exe") if v.exists()), None)
@@ -70,6 +70,24 @@ def detect_test_command(repo: Path) -> list[str] | None:
     if (repo / "go.mod").exists():
         return ["go", "test", "./..."]
     return None
+
+
+def detect_test_command(repo: Path) -> tuple[list[str], Path] | None:
+    """Returns (command, working directory). Looks one level down too, for monorepos (backend/, frontend/)."""
+    for candidate in [repo, *sorted(d for d in repo.iterdir() if d.is_dir() and d.name not in SKIP_DIRS and not d.name.startswith("."))]:
+        cmd = _detect_in(candidate)
+        if cmd:
+            return cmd, candidate
+    return None
+
+
+def _test_label(repo: Path) -> str | None:
+    found = detect_test_command(repo)
+    if not found:
+        return None
+    cmd, cwd = found
+    shown = " ".join(["python -m pytest" if cmd[1:3] == ["-m", "pytest"] else cmd[0], *cmd[3 if cmd[1:3] == ["-m", "pytest"] else 1:]])
+    return shown + (f" (in {cwd.relative_to(repo)}/)" if cwd != repo else "")
 
 
 def repo_overview(ctx: ToolContext, path: str = "") -> dict:
@@ -113,8 +131,7 @@ def repo_overview(ctx: ToolContext, path: str = "") -> dict:
     out["manifests"] = manifests
     readme = next((f for f in repo.iterdir() if f.name.lower().startswith("readme")), None)
     out["readme_excerpt"] = readme.read_text(errors="ignore")[:1500] if readme else None
-    cmd = detect_test_command(repo)
-    out["test_command"] = " ".join(cmd) if cmd else None
+    out["test_command"] = _test_label(repo)
     out["entry_points"] = [str(p.relative_to(repo)) for p in walk(repo, ctx.app.guard, max_files=4000)
                            if p.name in ("main.py", "app.py", "__main__.py", "manage.py", "index.ts", "index.js", "main.ts", "main.tsx", "main.go", "main.rs", "server.py")][:15]
     return out
@@ -179,10 +196,10 @@ def _exec(cmd: list[str], cwd: Path, timeout: int) -> dict:
 
 def run_tests(ctx: ToolContext, path: str = "") -> dict:
     repo = _repo(ctx, path)
-    cmd = detect_test_command(repo)
-    if not cmd:
+    found = detect_test_command(repo)
+    if not found:
         raise RuntimeError("Could not detect a test command for this project")
-    res = _exec(cmd, repo, 300)
+    res = _exec(found[0], found[1], 300)
     res["passed"] = res.get("exit_code") == 0
     res["failures"] = re.findall(r"^(?:FAILED|ERROR) (\S+)(?: - (.*))?$", res["output"], re.M)[:20]
     return res
@@ -244,7 +261,7 @@ def register(reg: ToolRegistry, app) -> None:
 
     C = Level.CONFIRM
     reg.register(Tool("run_tests", "Run the project's detected test suite and report failures.", {"path": P}, run_tests, level=C, trust_eligible=True, timeout=320,
-                      preview=lambda a: f"Run tests in {app.guard.resolve(a.get('path') or '.')}: {' '.join(detect_test_command(app.guard.resolve(a.get('path') or '.')) or ['<no test command detected>'])}"))
+                      preview=lambda a: f"Run tests in {app.guard.resolve(a.get('path') or '.')}: {_test_label(app.guard.resolve(a.get('path') or '.')) or '<no test command detected>'}"))
     reg.register(Tool("run_command", "Run a single program (no shell, no pipes) inside a project directory. Administrator commands are refused.", {"command": S, "path": P, "timeout_s": I}, run_command, required=["command"], level=C, timeout=620,
                       preview=lambda a: (_check_command(shlex.split(a["command"])), f"Run command in {app.guard.resolve(a.get('path') or '.')}:\n$ {a['command']}")[1]))
     reg.register(Tool("git_commit", "Create a git commit.", {"message": S, "path": P, "add_all": B}, git_commit, required=["message"], level=C,
