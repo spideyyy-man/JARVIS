@@ -117,3 +117,4 @@ input[type="range"] { width: 100%; accent-color: var(--cyan); }
 .home-task { display: flex; gap: 8px; align-items: baseline; }
 .toggle-row { justify-content: flex-start; }
 .toggle-row > :last-child { text-align: left; }
+.md img { max-width: min(100%, 520px); border-radius: 10px; border: 1px solid var(--line); display: block; margin: 8px 0; }

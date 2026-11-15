@@ -30,8 +30,8 @@ class TTSProvider(Protocol):
 class OpenAICompatSpeech:
     name = "openai_compat"
 
-    def __init__(self, base_url: str, api_key: str | None, stt_model: str = "whisper-1", tts_model: str = "tts-1", transport: httpx.AsyncBaseTransport | None = None):
-        self.base_url, self.api_key, self.stt_model, self.tts_model, self.transport = base_url.rstrip("/"), api_key, stt_model, tts_model, transport
+    def __init__(self, base_url: str, api_key: str | None, stt_model: str = "whisper-1", tts_model: str = "tts-1", transport: httpx.AsyncBaseTransport | None = None, voice: str = "alloy"):
+        self.base_url, self.api_key, self.stt_model, self.tts_model, self.transport, self.voice = base_url.rstrip("/"), api_key, stt_model, tts_model, transport, voice
 
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
@@ -46,7 +46,7 @@ class OpenAICompatSpeech:
     async def synthesize(self, text: str, voice: str | None = None) -> tuple[bytes, str]:
         async with httpx.AsyncClient(timeout=120, transport=self.transport) as c:
             r = await c.post(f"{self.base_url}/audio/speech", headers=self._headers(),
-                             json={"model": self.tts_model, "input": text, "voice": voice or "alloy", "response_format": "mp3"})
+                             json={"model": self.tts_model, "input": text, "voice": voice or self.voice, "response_format": "mp3"})
         r.raise_for_status()
         return r.content, r.headers.get("content-type", "audio/mpeg")
 
@@ -55,5 +55,6 @@ def build_voice(settings: Settings) -> tuple[STTProvider | None, TTSProvider | N
     """Returns (stt, tts); None means 'handled in the browser'."""
     server = None
     if "openai_compat" in (settings.stt_provider, settings.tts_provider) and settings.voice_base_url:
-        server = OpenAICompatSpeech(settings.voice_base_url, get_secret("JARVIS_VOICE_API_KEY") or get_secret("OPENAI_API_KEY"))
+        server = OpenAICompatSpeech(settings.voice_base_url, get_secret("JARVIS_VOICE_API_KEY") or get_secret("OPENAI_API_KEY"),
+                                    settings.stt_model, settings.tts_model, voice=settings.tts_voice)
     return (server if settings.stt_provider == "openai_compat" else None, server if settings.tts_provider == "openai_compat" else None)

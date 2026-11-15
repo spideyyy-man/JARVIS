@@ -74,7 +74,7 @@ export interface AuditEntry { id: number; ts: number; actor: string; tool: strin
 export interface ToolInfo { name: string; description: string; level: Level; trust_eligible: boolean; trusted: boolean; agents: string[] }
 export interface Settings {
   trusted_tools: string[]; default_project: string; voice: VoiceSettings; allowed_roots: string[]; data_dir: string; llm: LlmInfo;
-  embedder: string; search_provider: string; speech: { stt: string; tts: string };
+  embedder: string; search_provider: string; speech: { stt: string; tts: string }; image_provider: string;
   levels: { read: number; confirm: number; trust_eligible: string[] };
 }
 export interface Schedule { type: "interval" | "cron" | "once" | "manual"; seconds?: number; expr?: string; at?: number }

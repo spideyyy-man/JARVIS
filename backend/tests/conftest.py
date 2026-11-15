@@ -28,6 +28,7 @@ def make(home: Path, tmp_path: Path, providers=None) -> Jarvis:
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     settings.trash_dir.mkdir(exist_ok=True)
     settings.reports_dir.mkdir(exist_ok=True)
+    settings.images_dir.mkdir(exist_ok=True)
     return Jarvis(settings, providers=providers)
 
 

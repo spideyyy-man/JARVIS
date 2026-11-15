@@ -6,6 +6,7 @@ an explicit permission model, remembers context, and runs automations.
 - **Backend**: Python 3.11+, FastAPI, SQLite. `backend/`
 - **Frontend**: React + TypeScript (Vite), served by the backend. `frontend/`
 - **Design and trade-offs**: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- **Using local models (no API key)**: [docs/LOCAL_MODELS.md](docs/LOCAL_MODELS.md)
 - **Evidence for the ten acceptance workflows**: [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)
 
 ## Run it

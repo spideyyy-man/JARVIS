@@ -153,6 +153,8 @@ RULES: list[Rule] = [
     R("automation", r"\brun (?:the )?(?:workflow|automation)\s+(.+)$", _run_workflow, whole=True),
     R("automation", r"\b(list|show|what).*(workflows?|automations?|scheduled tasks?)\b", lambda t, m, e: ("list_workflows", {})),
     # orchestrator-level
+    R("orchestrator", r"\b(?:generate|create|make|draw|paint|render)\b\s+(?:me\s+)?(?:an?\s+|the\s+)?(?:image|picture|photo|illustration|drawing|logo|wallpaper|icon)\s+(?:of|for|showing|with)?\s*(.+)$|^\s*(?:jarvis[,\s]+)?(?:draw|paint)\s+(?:me\s+)?(.+)$",
+      lambda t, m, e: ("generate_image", {"prompt": (m.group(1) or m.group(2)).strip(" .")}), whole=True),
     R("orchestrator", r"\b(what (did|have) i (do|done|accomplish)|accomplished|daily summary|summar\w+ (of )?(my|the) day|productivity)\b", lambda t, m, e: ("daily_summary", {})),
     R("orchestrator", r"\bremember (?:that|this:?)\s+(.+)$", lambda t, m, e: ("remember", {"content": m.group(1).strip(), "kind": "preference" if re.search(r"\b(prefer|like|always|never)\b", t, re.I) else "fact"})),
     R("orchestrator", r"\bwhat do you (know|remember) about\s+(.+)$", lambda t, m, e: ("recall", {"query": m.group(2)})),
@@ -541,6 +543,7 @@ def _r_workflows(d, q, t):
 
 
 RENDERERS: dict[str, Callable] = {
+    "generate_image": lambda d, q, t: f"Here is the image ({d['width']}x{d['height']}, {d['provider']}):\n\n![{d['prompt'][:80]}]({d['url']})\n\nSaved to `{d['file']}`.",
     "delegate": lambda d, q, t: d.get("result", ""),
     "system_stats": _r_stats, "search_files": _r_search, "recent_files": _r_search, "repo_overview": _r_repo, "kb_search": _r_kb,
     "web_search": _r_web, "fetch_url": lambda d, q, t: (f"**{d['title']}** ({d['url']})\n\n{' '.join(d['content'].split())[:900]}..." if "web_search" not in [c.name for m in t if m["role"] == "assistant" for c in m.get("tool_calls", [])] else ""),

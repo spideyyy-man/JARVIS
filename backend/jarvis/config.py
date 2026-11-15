@@ -45,6 +45,13 @@ class Settings:
     tts_provider: str = "browser"
     voice_base_url: str = ""
     wake_word: str = "jarvis"
+    stt_model: str = "whisper-1"
+    tts_model: str = "tts-1"
+    tts_voice: str = "alloy"
+    # Image generation (optional, local): automatic1111 | openai_compat | none
+    image_provider: str = "none"
+    image_base_url: str = ""
+    image_model: str = ""
     # Embeddings
     embedder: str = "hashing"
 
@@ -55,6 +62,10 @@ class Settings:
     @property
     def trash_dir(self) -> Path:
         return self.data_dir / "trash"
+
+    @property
+    def images_dir(self) -> Path:
+        return self.data_dir / "images"
 
     @property
     def reports_dir(self) -> Path:
@@ -94,8 +105,14 @@ def load_settings(env_file: Path | None = None) -> Settings:
         voice_base_url=env("JARVIS_VOICE_BASE_URL", ""),
         wake_word=env("JARVIS_WAKE_WORD", "jarvis"),
         embedder=env("JARVIS_EMBEDDER", "hashing"),
+        stt_model=env("JARVIS_STT_MODEL", "whisper-1"),
+        tts_model=env("JARVIS_TTS_MODEL", "tts-1"),
+        tts_voice=env("JARVIS_TTS_VOICE", "alloy"),
+        image_provider=env("JARVIS_IMAGE_PROVIDER", "none"),
+        image_base_url=env("JARVIS_IMAGE_BASE_URL", ""),
+        image_model=env("JARVIS_IMAGE_MODEL", ""),
     )
-    for d in (s.trash_dir, s.reports_dir):
+    for d in (s.trash_dir, s.reports_dir, s.images_dir):
         d.mkdir(parents=True, exist_ok=True)
     return s
 

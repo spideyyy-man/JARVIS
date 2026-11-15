@@ -159,3 +159,36 @@ def test_server_side_speech_provider_protocol():
     s = OpenAICompatSpeech("http://voice/v1", None, transport=httpx.MockTransport(handler))
     assert run(s.transcribe(b"RIFFdata", "a.wav")) == "jarvis what time is it"
     assert run(s.synthesize("Hello")) == (b"ID3audio", "audio/mpeg")
+
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 32
+
+
+def test_local_image_generation_both_protocols(jarvis, home):
+    import base64
+
+    from conftest import run as _run
+
+    r = _run(jarvis.chat("draw me a red fox in the snow"))
+    assert "not configured" in r["text"]  # honest when no image server is set
+
+    seen = {}
+
+    def a1111(request: httpx.Request) -> httpx.Response:
+        seen["path"], seen["body"] = request.url.path, json.loads(request.content)
+        return httpx.Response(200, json={"images": [base64.b64encode(PNG).decode()]})
+
+    jarvis.settings.image_provider, jarvis.settings.image_base_url = "automatic1111", "http://127.0.0.1:7860"
+    jarvis.http_transport = httpx.MockTransport(a1111)
+    r = _run(jarvis.chat("generate an image of a red fox in the snow"))
+    assert seen["path"] == "/sdapi/v1/txt2img" and seen["body"]["prompt"] == "a red fox in the snow"
+    files = list(jarvis.settings.images_dir.iterdir())
+    assert len(files) == 1 and files[0].read_bytes() == PNG and f"](/api/images/{files[0].name})" in r["text"]
+
+    jarvis.settings.image_provider, jarvis.settings.image_base_url = "openai_compat", "http://127.0.0.1:8080/v1"
+    jarvis.http_transport = httpx.MockTransport(lambda req: httpx.Response(200, json={"data": [{"b64_json": base64.b64encode(PNG).decode()}]}) if req.url.path == "/v1/images/generations" else httpx.Response(404))
+    assert _run(jarvis.executor.call("generate_image", {"prompt": "a lighthouse", "width": 5000}, __import__("jarvis.tools.registry", fromlist=["ToolContext"]).ToolContext(jarvis))).data["width"] == 1536
+
+    jarvis.http_transport = httpx.MockTransport(lambda req: httpx.Response(200, json={"data": [{"b64_json": base64.b64encode(b"<html>not an image</html>").decode()}]}))
+    bad = _run(jarvis.chat("generate an image of a cat"))
+    assert "did not return" in bad["text"] and len(list(jarvis.settings.images_dir.iterdir())) == 2

@@ -101,7 +101,7 @@ export function SettingsScreen() {
                 {s.llm.degraded
                   ? <div className="note note-warning" data-testid="llm-degraded">Running on the offline rule engine only. It handles a fixed set of requests and cannot reason. Set <span className="num">ANTHROPIC_API_KEY</span> (or a local model URL) and restart.</div>
                   : <div className="note note-success">A language model is configured. The offline engine is the automatic fallback.</div>}
-                <dl className="kv"><dt>Embeddings</dt><dd className="num">{s.embedder}</dd><dt>Web search</dt><dd className="num">{s.search_provider}</dd><dt>Speech</dt><dd className="num">stt {s.speech.stt} · tts {s.speech.tts}</dd></dl>
+                <dl className="kv"><dt>Embeddings</dt><dd className="num">{s.embedder}</dd><dt>Web search</dt><dd className="num">{s.search_provider}</dd><dt>Speech</dt><dd className="num" data-testid="speech-providers">stt {s.speech.stt} · tts {s.speech.tts}</dd><dt>Images</dt><dd className="num">{s.image_provider}</dd></dl>
               </>
             )}
           </Panel>

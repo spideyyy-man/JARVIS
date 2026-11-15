@@ -17,7 +17,7 @@ from .knowledge import KnowledgeBase, Memory, make_embedder
 from .llm.base import LLMProvider, LLMRouter
 from .llm.offline import Env, OfflineProvider
 from .security import AuditLog, PathGuard
-from .tools import coding, files, research, system
+from .tools import coding, files, images, research, system
 from .tools.registry import ToolExecutor, ToolRegistry, ToolResult
 from .voice import build_voice
 
@@ -46,6 +46,7 @@ class Jarvis:
         files.register(self.tools, self)
         coding.register(self.tools, self)
         research.register(self.tools)
+        images.register(self.tools)
         automation_mod.register(self.tools, self)
         agents_mod.register(self.tools, self)
         self.offline = OfflineProvider(Env(home=self.settings.allowed_roots[0], default_project=lambda: self.db.get_setting("default_project", ""),

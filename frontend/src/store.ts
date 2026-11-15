@@ -1,4 +1,5 @@
 // Small global store (useSyncExternalStore). Fed by the REST bootstrap and by live WebSocket events.
+import { installServerSpeech } from "./serverSpeech";
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { api, ApiError, newConversationId, setUnauthorizedHandler } from "./api";
 import type { Approval, AssistantState, AgentMessage, Message, MetricPoint, Metrics, Notification, RunningAgent, Settings, Status } from "./api";
@@ -102,6 +103,8 @@ export async function bootstrap() {
     const map: Record<string, Approval> = {};
     approvals.forEach((a) => (map[a.id] = a));
     voice.configure(settings.voice);
+    // Local speech models, if the backend has them configured, replace the browser's speech service.
+    await installServerSpeech().then(() => voice.detect(), () => undefined);
     setState({ auth: "ok", settings, approvals: { ...state.approvals, ...map }, notifications, history: hist.points.slice(-150) });
     applyStatus(status);
     bus.connect();
