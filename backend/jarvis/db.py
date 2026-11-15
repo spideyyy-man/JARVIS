@@ -46,6 +46,9 @@ class Database:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(SCHEMA)
+        for table, column, ddl in [("dev_tasks", "reminded", "INTEGER DEFAULT 0")]:  # additive migrations
+            if column not in {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})")}:
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
     def execute(self, sql: str, params: tuple | list = ()) -> sqlite3.Cursor:
         with self._lock:

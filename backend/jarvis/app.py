@@ -9,7 +9,7 @@ from pathlib import Path
 from . import agents as agents_mod
 from . import automation as automation_mod
 from .agents import AgentRuntime
-from .automation import AutomationEngine, Monitor
+from .automation import AutomationEngine, Monitor, Proactive
 from .config import Settings, get_secret, load_settings
 from .db import Database, new_id
 from .events import EventBus
@@ -17,7 +17,7 @@ from .knowledge import KnowledgeBase, Memory, make_embedder
 from .llm.base import LLMProvider, LLMRouter
 from .llm.offline import Env, OfflineProvider
 from .security import AuditLog, PathGuard
-from .tools import coding, files, images, research, system
+from .tools import browser, coding, desktop, files, images, research, system
 from .tools.registry import ToolExecutor, ToolRegistry, ToolResult
 from .voice import build_voice
 
@@ -37,6 +37,9 @@ class Jarvis:
         self.kb = KnowledgeBase(self.db, self.embedder)
         self.memory = Memory(self.db, self.embedder)
         self.http_transport = None  # injectable for tests
+        self.capture_screen = desktop.capture_screen  # injectable for tests
+        self.browser = browser.BrowserSession(self)
+        self.proactive = Proactive(self)
         self.monitor = Monitor(self)
         self.automation = AutomationEngine(self)
         self.agents = AgentRuntime(self)
@@ -47,6 +50,8 @@ class Jarvis:
         coding.register(self.tools, self)
         research.register(self.tools)
         images.register(self.tools)
+        desktop.register(self.tools, self)
+        browser.register(self.tools, self)
         automation_mod.register(self.tools, self)
         agents_mod.register(self.tools, self)
         self.offline = OfflineProvider(Env(home=self.settings.allowed_roots[0], default_project=lambda: self.db.get_setting("default_project", ""),
@@ -76,6 +81,15 @@ class Jarvis:
             note = self.db.notify("warning", f"Language model '{data['provider']}' failed", f"{data['error']}" + (f" Falling back to '{data['next']}'." if data.get("next") else ""))
             self.bus.emit("notification", notification=note)
 
+    CAPABILITIES = {"screen_access": "Read the screen (JARVIS sees whatever is visible, including anything sensitive on screen)",
+                    "desktop_control": "Move the mouse and type (each action still asks for approval)",
+                    "browser_control": "Drive JARVIS's own browser window (clicks and form input still ask for approval)"}
+
+    def capabilities(self) -> dict:
+        """High-impact abilities, all off by default. Only the user (Settings / API) can change them - no tool can."""
+        stored = self.db.get_setting("capabilities", {})
+        return {name: bool(stored.get(name, False)) for name in self.CAPABILITIES}
+
     def provider_info(self) -> dict:
         return {"chain": [{"name": p.name, "model": p.model} for p in self.llm.providers], "last_used": self.llm.last_used,
                 "degraded": self.llm.primary.name == "offline", "recent_failures": self.llm.failures[-5:]}
@@ -83,10 +97,13 @@ class Jarvis:
     # -- lifecycle -----------------------------------------------------------------
     async def start(self) -> None:
         self.monitor.start()
+        self.proactive.start()
         self.automation.start()
 
     async def stop(self) -> None:
         await self.monitor.stop()
+        await self.proactive.stop()
+        await self.browser.close()
         await self.automation.stop()
         self.db.close()
 

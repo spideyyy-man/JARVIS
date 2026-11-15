@@ -20,7 +20,7 @@ TYPE_EXT = {"pdf": [".pdf"], "spreadsheet": [".xlsx", ".xls", ".csv"], "csv": ["
 FILLER = set("find locate search look where is are the a an my me for file files document documents named called about that which with in on of to "
              "please jarvis can you could would folder directory from any all some show get i need want recent recently latest last this week today "
              "yesterday month modified changed containing contains mentions mention script scripts notes note".split()) | set(TYPE_EXT)
-_PATH = re.compile(r"""(?:["'`])((?:~|/)[^"'`]+)(?:["'`])|((?:~|/)[^\s,;"'`]*[^\s,;"'`.?!:])""")
+_PATH = re.compile(r"""(?:["'`])((?:~|/|[A-Za-z]:[\\/])[^"'`]+)(?:["'`])|((?:~|/|[A-Za-z]:[\\/])[^\s,;"'`]*[^\s,;"'`.?!:])""")
 _QUOTED = re.compile(r"""["'`]([^"'`]{2,})["'`]""")
 
 
@@ -152,7 +152,33 @@ RULES: list[Rule] = [
     R("automation", r"\b(every\s+(\d+\s*)?(second|minute|hour|day)s?|every (day|morning|evening)|daily|schedule\b.*\bin \d+)", _workflow, whole=True),
     R("automation", r"\brun (?:the )?(?:workflow|automation)\s+(.+)$", _run_workflow, whole=True),
     R("automation", r"\b(list|show|what).*(workflows?|automations?|scheduled tasks?)\b", lambda t, m, e: ("list_workflows", {})),
+    # desktop control: must win over later rules ("click Run the tests" is a click, not a test run)
+    R("computer", r"^\s*(?:jarvis[,\s]+)?(?:please\s+)?(?:double[- ]click|click)\s+(?:on\s+)?(?:the\s+)?[\"'“]?(.+?)[\"'”]?(?:\s+(?:button|link|tab|menu|icon))?\s*[.!]?$",
+      lambda t, m, e: ("click_text", {"text": m.group(1), **({"double": True} if re.search(r"double", t, re.I) else {})}), whole=True),
+    R("computer", r"^\s*(?:jarvis[,\s]+)?(?:please\s+)?type\s+[\"'“]?(.+?)[\"'”]?(\s+and\s+(?:press|hit)\s+enter)?\s*$",
+      lambda t, m, e: ("type_text", {"text": m.group(1), **({"press_enter": True} if m.group(2) else {})}), whole=True),
+    R("computer", r"^\s*(?:jarvis[,\s]+)?(?:please\s+)?(?:press|hit)\s+((?:(?:ctrl|control|alt|shift|win|cmd|enter|esc|escape|tab|space|backspace|delete|up|down|left|right|home|end|f\d{1,2}|[a-z0-9])\s*\+?\s*)+)\s*$",
+      lambda t, m, e: ("press_keys", {"keys": re.sub(r"\s+", "", m.group(1)).strip("+") if "+" in m.group(1) else "+".join(m.group(1).split())}), whole=True),
+    R("computer", r"\b(what'?s|what is|read|show)\b.*\b(on|in)\b.*\bclipboard\b|\bwhat (did )?i (just )?cop(y|ied)\b|\bsummari[sz]e what i (just )?copied\b", lambda t, m, e: ("clipboard_read", {})),
+    R("computer", r"^\s*(?:jarvis[,\s]+)?(?:please\s+)?copy\s+[\"'“]?(.+?)[\"'”]?\s+to\s+(?:the\s+|my\s+)?clipboard", lambda t, m, e: ("clipboard_write", {"text": m.group(1)}), whole=True),
+    R("computer", r"\b(what'?s|what is|read|describe)\b.*\bon\b.*\bscreen\b|\bwhat am i looking at\b|\b(explain|read)\b.*\b(error|dialog|message)\b.*\bscreen\b|\bread (my |the )?screen\b", lambda t, m, e: ("screen_read", {})),
+    R("computer", r"\b(which|what) (window|app|application|program)\b.*\b(active|open|focused|using|in front)\b|\bactive window\b", lambda t, m, e: ("active_window", {})),
+    R("computer", r"^\s*(?:jarvis[,\s]+)?(?:please\s+)?(un)?mute\b", lambda t, m, e: ("system_control", {"action": "volume_mute"}), whole=True),
+    R("computer", r"\b(volume|sound)\b.*\b(up|louder|higher|increase|raise)\b|\b(louder|turn it up|increase the volume|raise the volume)\b", lambda t, m, e: ("system_control", {"action": "volume_up", "value": int(n.group(1)) if (n := re.search(r"\bby (\d+)", t)) else 5})),
+    R("computer", r"\b(volume|sound)\b.*\b(down|quieter|lower|decrease|reduce)\b|\b(quieter|turn it down|lower the volume|decrease the volume)\b", lambda t, m, e: ("system_control", {"action": "volume_down", "value": int(n.group(1)) if (n := re.search(r"\bby (\d+)", t)) else 5})),
+    R("computer", r"\bbrightness\b.*?(\d{1,3})\s*(?:%|percent)?", lambda t, m, e: ("system_control", {"action": "set_brightness", "value": min(int(m.group(1)), 100)})),
+    R("computer", r"\block (my |the )?(screen|computer|laptop|pc)\b", lambda t, m, e: ("system_control", {"action": "lock_screen"})),
+    R("computer", r"\b(pause|resume|play)\b.*\b(music|song|video|playback|media)\b", lambda t, m, e: ("system_control", {"action": "media_play_pause"})),
+    R("computer", r"\b(next|skip)\b.*\b(song|track)\b", lambda t, m, e: ("system_control", {"action": "media_next"})),
+    R("computer", r"\bprevious (song|track)\b", lambda t, m, e: ("system_control", {"action": "media_previous"})),
+    R("computer", r"^\s*(?:jarvis[,\s]+)?(?:please\s+)?(?:open|go to|browse to|navigate to|visit)\s+((?:https?://|www\.)\S+|[\w\-]+(?:\.[\w\-]+)*\.(?:com|org|net|io|dev|ai|app|co|edu|gov|in|uk)(?:/\S*)?)(?:\s+in\s+(?:the|my)\s+browser)?\s*[.!]?$",
+      lambda t, m, e: ("browser_open", {"url": m.group(1)}), whole=True),
+    R("computer", r"\b(read|what'?s on|summari[sz]e) (the |this )?(current )?(web ?page|page in the browser|browser page)\b", lambda t, m, e: ("browser_read", {})),
+    R("computer", r"\bclose (the )?browser\b", lambda t, m, e: ("browser_close", {})),
     # orchestrator-level
+    R("orchestrator", r"\b(brief me|briefing|what'?s on (today|my plate)|morning report)\b", lambda t, m, e: ("daily_briefing", {})),
+    R("orchestrator", r"\bremind me\s+in\s+(\d+)\s*(minute|min|hour|hr)s?\s+(?:to|about|that)\s+(.+)$|\bremind me\s+(?:to|about)\s+(.+?)\s+in\s+(\d+)\s*(minute|min|hour|hr)s?\s*[.!]?$",
+      lambda t, m, e: ("add_dev_task", {"title": (m.group(3) or m.group(4)).strip(" ."), "due_in_minutes": int(m.group(1) or m.group(5)) * (60 if (m.group(2) or m.group(6)).startswith("h") else 1)}), whole=True),
     R("orchestrator", r"\b(?:generate|create|make|draw|paint|render)\b\s+(?:me\s+)?(?:an?\s+|the\s+)?(?:image|picture|photo|illustration|drawing|logo|wallpaper|icon)\s+(?:of|for|showing|with)?\s*(.+)$|^\s*(?:jarvis[,\s]+)?(?:draw|paint)\s+(?:me\s+)?(.+)$",
       lambda t, m, e: ("generate_image", {"prompt": (m.group(1) or m.group(2)).strip(" .")}), whole=True),
     R("orchestrator", r"\b(what (did|have) i (do|done|accomplish)|accomplished|daily summary|summar\w+ (of )?(my|the) day|productivity)\b", lambda t, m, e: ("daily_summary", {})),
@@ -161,7 +187,7 @@ RULES: list[Rule] = [
     R("orchestrator", r"\b(remind me (about|of)|unfinished|open tasks?|pending tasks?|my tasks|to-?do list|what.*\btasks\b)", lambda t, m, e: ("list_dev_tasks", {})),
     R("orchestrator", r"\b(?:remind me to|add (?:a )?(?:task|todo|reminder)(?: to)?:?|todo:)\s+(.+)$", lambda t, m, e: ("add_dev_task", {"title": m.group(1).strip(" .")})),
     # knowledge
-    R("knowledge", r"\b(index|ingest|import)\b.*(~|/)|\badd\b.*(~|/).*\b(knowledge|index)", lambda t, m, e: ("kb_ingest", {"path": find_path(t, e, False), **({"space": s.group(1)} if (s := re.search(r"\b(?:into|to|in)\s+(?:the\s+)?[\"']?([\w\-]+)[\"']?\s+space", t, re.I)) else {})}) if find_path(t, e, False) else None),
+    R("knowledge", r"\b(index|ingest|import)\b.*(~|/|[A-Za-z]:[\\/])|\badd\b.*(~|/|[A-Za-z]:[\\/]).*\b(knowledge|index)", lambda t, m, e: ("kb_ingest", {"path": find_path(t, e, False), **({"space": s.group(1)} if (s := re.search(r"\b(?:into|to|in)\s+(?:the\s+)?[\"']?([\w\-]+)[\"']?\s+space", t, re.I)) else {})}) if find_path(t, e, False) else None),
     R("knowledge", r"\b(my|the|indexed) (docs|documents?|notes|knowledge ?base|papers|files|documentation)\b.*\b(say|explain|about|describe|what|how|why)\b|\b(according to|based on|using|from) (my|the) (indexed |own )?(docs|documents?|notes|knowledge ?base|documentation)\b",
       lambda t, m, e: ("kb_search", {"query": _clean(t, r"\b(according to|based on|using|from|in) (my|the) (indexed |own )?(docs|documents?|notes|knowledge ?base|documentation)\b", r"\bindexed\b", r"^(please )?(explain|describe|tell me)( about)?\b")})),
     R("knowledge", r"\bwhat (documents|spaces|knowledge)\b|\blist\b.*\b(knowledge|indexed)", lambda t, m, e: ("kb_list", {})),
@@ -187,14 +213,14 @@ RULES: list[Rule] = [
     # computer
     R("computer", r"\b(development|dev) environment\b|\btoolchains?\b", lambda t, m, e: ("dev_environment", {})),
     R("computer", r"\binstalled (apps?|applications?|software|programs?)\b", lambda t, m, e: ("list_installed_apps", {})),
-    R("computer", r"\b(organi[sz]e|tidy|clean up|sort)\b.*\b(folder|directory|downloads|desktop|documents|files)\b|\b(organi[sz]e|tidy)\b.*(~|/)", lambda t, m, e: ("organize_folder_plan", {"path": find_path(t, e, False)}) if find_path(t, e, False) else None),
-    R("computer", r"\b(delete|remove|trash)\b.*?((?:~|/)\S+)", lambda t, m, e: ("delete_path", {"path": m.group(2).rstrip(".,")})),
-    R("computer", r"\b(move|rename)\b\s+((?:~|/)\S+)\s+(?:to|into)\s+((?:~|/)\S+)", lambda t, m, e: ("move_path", {"source": m.group(2), "destination": m.group(3).rstrip(".,")})),
-    R("computer", r"\bcopy\b\s+((?:~|/)\S+)\s+(?:to|into)\s+((?:~|/)\S+)", lambda t, m, e: ("copy_path", {"source": m.group(1), "destination": m.group(2).rstrip(".,")})),
-    R("computer", r"\b(create|make)\b.*\b(folder|directory)\b.*?((?:~|/)\S+)", lambda t, m, e: ("create_directory", {"path": m.group(3).rstrip(".,")})),
+    R("computer", r"\b(organi[sz]e|tidy|clean up|sort)\b.*\b(folder|directory|downloads|desktop|documents|files)\b|\b(organi[sz]e|tidy)\b.*(~|/|[A-Za-z]:[\\/])", lambda t, m, e: ("organize_folder_plan", {"path": find_path(t, e, False)}) if find_path(t, e, False) else None),
+    R("computer", r"\b(delete|remove|trash)\b.*?((?:~|/|[A-Za-z]:[\\/])\S+)", lambda t, m, e: ("delete_path", {"path": m.group(2).rstrip(".,")})),
+    R("computer", r"\b(move|rename)\b\s+((?:~|/|[A-Za-z]:[\\/])\S+)\s+(?:to|into)\s+((?:~|/|[A-Za-z]:[\\/])\S+)", lambda t, m, e: ("move_path", {"source": m.group(2), "destination": m.group(3).rstrip(".,")})),
+    R("computer", r"\bcopy\b\s+((?:~|/|[A-Za-z]:[\\/])\S+)\s+(?:to|into)\s+((?:~|/|[A-Za-z]:[\\/])\S+)", lambda t, m, e: ("copy_path", {"source": m.group(1), "destination": m.group(2).rstrip(".,")})),
+    R("computer", r"\b(create|make)\b.*\b(folder|directory)\b.*?((?:~|/|[A-Za-z]:[\\/])\S+)", lambda t, m, e: ("create_directory", {"path": m.group(3).rstrip(".,")})),
     R("computer", r"\b(find|locate|search for|look for|where (is|are))\b", _search_files),
-    R("computer", r"\b(list|show|what'?s in)\b.*\b(folder|directory|files)\b|\b(list|show)\b.*(~|/)", _p("list_dir")),
-    R("computer", r"\b(read|show|print|cat)\b.*?((?:~|/)\S+\.\w+)", lambda t, m, e: ("read_file", {"path": m.group(2)})),
+    R("computer", r"\b(list|show|what'?s in)\b.*\b(folder|directory|files)\b|\b(list|show)\b.*(~|/|[A-Za-z]:[\\/])", _p("list_dir")),
+    R("computer", r"\b(read|show|print|cat)\b.*?((?:~|/|[A-Za-z]:[\\/])\S+\.\w+)", lambda t, m, e: ("read_file", {"path": m.group(2)})),
     R("computer", r"^\s*(?:hey\s+)?(?:jarvis[,\s]+)?(?:please\s+)?(?:open|launch|start)\s+(?:the\s+|my\s+)?(.+?)\s*(?:app|application)?[.!]?$", lambda t, m, e: ("open_application", {"name": m.group(1)})),
 ]
 
@@ -210,7 +236,8 @@ CAPABILITIES = ("Here's what I can do right now:\n"
                 "- **Code**: inspect a repository, git status/log/diff, search code, run tests, build a development plan\n"
                 "- **Knowledge**: index PDF/DOCX/TXT/Markdown and answer from them with citations\n"
                 "- **Research**: web search with tracked sources, GitHub repository evaluation\n"
-                "- **Automation**: scheduled and conditional workflows, reminders, a daily summary")
+                "- **Automation**: scheduled and conditional workflows, timed reminders, a daily briefing and summary\n"
+                "- **Desktop** (when enabled in Settings): read the screen, click things by name, type, clipboard, volume/brightness, drive a browser")
 OFFLINE_NOTE = ("I'm running on the built-in offline engine (no language model is configured), so I can only handle requests I can map to a "
                 "concrete capability. Set ANTHROPIC_API_KEY, or point JARVIS at a local model, for open-ended conversation and reasoning.")
 
@@ -542,7 +569,24 @@ def _r_workflows(d, q, t):
     return "**Workflows**\n" + "\n".join(f"- {w['name']} (`{w['id']}`): {w['schedule']}, {'enabled' if w['enabled'] else 'disabled'}" for w in d["workflows"])
 
 
+def _r_page(d, q, t):
+    els = "\n".join(f"{x['index']}. [{x['kind']}] {x['label']}" for x in d.get("elements", [])[:14])
+    return f"**{d.get('title') or d.get('url')}** ({d.get('url')})\n\n{' '.join(d.get('text', '').split())[:700]}" + (f"\n\nYou can interact with:\n{els}" if els else "")
+
+
 RENDERERS: dict[str, Callable] = {
+    "clipboard_read": lambda d, q, t: (f"Your clipboard holds {d['chars']} characters:\n```\n{d['text'][:1500]}\n```" if d["text"].strip() else "Your clipboard is empty (or holds something that is not text)."),
+    "clipboard_write": lambda d, q, t: f"Copied {d['copied_chars']} characters to the clipboard.",
+    "screen_read": lambda d, q, t: (f"Here is the text on your screen" + (f" (active window: {d['active_window']})" if d.get("active_window") else "") + f":\n```\n{d['text'][:1800]}\n```" if d["text"].strip() else "I captured the screen but could not recognise any text on it."),
+    "active_window": lambda d, q, t: f"The active window is \"{d['title']}\"." if d.get("title") else "No window is focused right now.",
+    "click_text": lambda d, q, t: f"Clicked \"{d['clicked']}\".",
+    "mouse_click": lambda d, q, t: f"Clicked at {d['clicked_at']}.",
+    "type_text": lambda d, q, t: f"Typed {d['typed_chars']} characters" + (" and pressed Enter." if d["pressed_enter"] else "."),
+    "press_keys": lambda d, q, t: f"Pressed {d['pressed']}.",
+    "system_control": lambda d, q, t: f"Done: {d['done'].replace('_', ' ')}" + (f" ({d['value']})." if d.get("value") else "."),
+    "browser_open": _r_page, "browser_read": _r_page, "browser_click": _r_page, "browser_fill": _r_page,
+    "browser_close": lambda d, q, t: "Closed the browser.",
+    "daily_briefing": lambda d, q, t: d["text"],
     "generate_image": lambda d, q, t: f"Here is the image ({d['width']}x{d['height']}, {d['provider']}):\n\n![{d['prompt'][:80]}]({d['url']})\n\nSaved to `{d['file']}`.",
     "delegate": lambda d, q, t: d.get("result", ""),
     "system_stats": _r_stats, "search_files": _r_search, "recent_files": _r_search, "repo_overview": _r_repo, "kb_search": _r_kb,
@@ -551,7 +595,7 @@ RENDERERS: dict[str, Callable] = {
     "dev_environment": _r_devenv, "run_tests": _r_tests, "list_workflows": _r_workflows,
     "organize_folder_plan": lambda d, q, t: (f"`{d['path']}` has no loose files to organize." if not d.get("files") else ""),
     "organize_folder": lambda d, q, t: f"Organized `{d['path']}`: moved {d['moved']} file(s) into category folders.",
-    "add_dev_task": lambda d, q, t: f"Noted. I'll track: \"{d['title']}\" (`{d['id']}`).",
+    "add_dev_task": lambda d, q, t: f"Noted. I'll track: \"{d['title']}\"" + (f" and remind you at {time.strftime('%H:%M', time.localtime(d['due']))}." if d.get("due") else ".") + f" (`{d['id']}`)",
     "remember": lambda d, q, t: f"I'll remember that: \"{d['content']}\".",
     "recall": lambda d, q, t: ("Here's what I have:\n" + "\n".join(f"- {m['content']}" for m in d["memories"])) if d["memories"] else "I don't have anything stored about that.",
     "kb_ingest": lambda d, q, t: (f"Indexed {d.get('indexed')} document(s) into the '{d.get('space')}' space ({d.get('new_or_updated')} new or updated)." if "indexed" in d else f"\"{d['title']}\" is {d['status']}" + (f" ({d['chunks']} passages, space '{d['space']}')." if d.get("chunks") else ".")),

@@ -378,4 +378,78 @@ def register(reg: ToolRegistry, app: "Jarvis") -> None:
                       {"name": S, "description": S, "schedule": sched_schema, "steps": {"type": "array", "items": step_schema}},
                       create_workflow, required=["name", "schedule", "steps"], level=Level.CONFIRM, trust_eligible=True, preview=_preview))
     reg.register(Tool("daily_summary", "Factual summary of today's activity: conversations, executed actions, approved changes, tasks, commits.", {}, daily_summary))
+    reg.register(Tool("daily_briefing", "Spoken-style briefing: time, open/overdue/due-today tasks, pending approvals, next workflow, system health.", {}, lambda ctx: {"text": briefing_text(app)}))
     reg.register(Tool("metrics_history", "Rolling CPU/memory statistics collected by the background monitor.", {}, lambda ctx: app.monitor.summary()))
+
+
+def briefing_text(app: "Jarvis") -> str:
+    """Spoken-style status built only from recorded facts."""
+    db, now = app.db, time.time()
+    snap = snapshot()
+    tasks = db.query("SELECT title, due FROM dev_tasks WHERE status!='done' ORDER BY COALESCE(due, 9e18)")
+    overdue = [t["title"] for t in tasks if t["due"] and t["due"] < now]
+    end_of_day = datetime.now().replace(hour=23, minute=59, second=59).timestamp()
+    today = [t["title"] for t in tasks if t["due"] and now <= t["due"] <= end_of_day]
+    parts = [f"It's {datetime.now().strftime('%A, %d %B, %H:%M')}."]
+    if tasks:
+        parts.append(f"You have {len(tasks)} open task{'s' if len(tasks) != 1 else ''}" + (f", {len(overdue)} overdue: {'; '.join(overdue[:3])}" if overdue else "") + ".")
+        if today:
+            parts.append("Due today: " + "; ".join(today[:4]) + ".")
+    else:
+        parts.append("You have no open tasks.")
+    pending = db.one("SELECT COUNT(*) AS n FROM approvals WHERE status='pending'")["n"]
+    if pending:
+        parts.append(f"{pending} action{'s are' if pending != 1 else ' is'} waiting for your approval.")
+    nxt = db.one("SELECT name, next_run FROM workflows WHERE enabled=1 AND next_run IS NOT NULL ORDER BY next_run LIMIT 1")
+    if nxt:
+        parts.append(f"Next scheduled workflow: {nxt['name']} at {datetime.fromtimestamp(nxt['next_run']).strftime('%H:%M')}.")
+    health = [f"CPU {snap['cpu']['percent']:.0f}%", f"memory {snap['memory']['percent']:.0f}%", f"{snap['disk']['free_gb']:.0f} GB disk free"]
+    parts.append("System: " + ", ".join(health) + ("." if snap["disk"]["percent"] < 90 else ". Disk space is running low."))
+    return " ".join(parts)
+
+
+class Proactive:
+    """Lets JARVIS speak first: due reminders and an optional daily briefing. It only announces -
+    it never executes anything on its own."""
+
+    def __init__(self, app: "Jarvis", interval: float = 15.0):
+        self.app, self.interval = app, interval
+        self._task: asyncio.Task | None = None
+
+    def start(self) -> None:
+        self._task = asyncio.create_task(self._loop())
+
+    async def stop(self) -> None:
+        if self._task:
+            self._task.cancel()
+
+    async def _loop(self) -> None:
+        while True:
+            try:
+                self.check()
+            except Exception as e:
+                self.app.db.notify("error", "Proactive check failed", str(e))
+            await asyncio.sleep(self.interval)
+
+    def announce(self, title: str, text: str, kind: str) -> None:
+        note = self.app.db.notify("info", title, text)
+        self.app.bus.emit("notification", notification=note)
+        self.app.bus.emit("assistant.announce", text=text, kind=kind, title=title)
+
+    def check(self, now: float | None = None) -> list[str]:
+        now = now or time.time()
+        db, said = self.app.db, []
+        for t in db.query("SELECT id, title FROM dev_tasks WHERE due IS NOT NULL AND due<=? AND status!='done' AND COALESCE(reminded,0)=0", (now,)):
+            db.update("dev_tasks", t["id"], reminded=1)  # mark first: a reminder must never repeat every tick
+            text = f"Reminder: {t['title']}"
+            self.announce("Reminder", text, "reminder")
+            said.append(text)
+        cfg = db.get_setting("proactive", {})
+        at = cfg.get("briefing_time") or ""
+        today = datetime.fromtimestamp(now).strftime("%Y-%m-%d")
+        if at and datetime.fromtimestamp(now).strftime("%H:%M") >= at and db.get_setting("last_briefing") != today:
+            db.set_setting("last_briefing", today)
+            text = "Good morning. " + briefing_text(self.app)
+            self.announce("Daily briefing", text, "briefing")
+            said.append(text)
+        return said

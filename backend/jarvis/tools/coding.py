@@ -218,10 +218,11 @@ def git_commit(ctx: ToolContext, message: str, path: str = "", add_all: bool = F
 
 
 # -------------------------------------------------------------- dev task tracking
-def add_dev_task(ctx: ToolContext, title: str, project: str = "", notes: str = "", due_in_days: float = 0) -> dict:
+def add_dev_task(ctx: ToolContext, title: str, project: str = "", notes: str = "", due_in_days: float = 0, due_in_minutes: float = 0) -> dict:
     now = time.time()
+    delay = due_in_days * 86400 + due_in_minutes * 60
     row = {"id": new_id("dt_"), "project": project, "title": title, "status": "open", "notes": notes,
-           "due": now + due_in_days * 86400 if due_in_days else None, "created": now, "updated": now}
+           "due": now + delay if delay else None, "created": now, "updated": now}
     ctx.app.db.insert("dev_tasks", row)
     return row
 
@@ -256,7 +257,7 @@ def register(reg: ToolRegistry, app) -> None:
     reg.register(Tool("git_diff", "Uncommitted (or staged) changes as a patch.", {"path": P, "staged": B, "file": S}, git_diff))
     reg.register(Tool("search_code", "Regex search across a project's source files.", {"pattern": S, "path": P, "file_glob": S, "limit": I}, search_code, required=["pattern"]))
     reg.register(Tool("list_dev_tasks", "List tracked development tasks.", {"status": {"type": "string", "enum": ["open", "in_progress", "done"]}, "project": S}, list_dev_tasks))
-    reg.register(Tool("add_dev_task", "Track a development task/reminder in JARVIS's own task list.", {"title": S, "project": S, "notes": S, "due_in_days": {"type": "number"}}, add_dev_task, required=["title"]))
+    reg.register(Tool("add_dev_task", "Track a task or reminder in JARVIS's own task list. With due_in_minutes/due_in_days JARVIS announces it aloud when it is due.", {"title": S, "project": S, "notes": S, "due_in_days": {"type": "number"}, "due_in_minutes": {"type": "number"}}, add_dev_task, required=["title"]))
     reg.register(Tool("update_dev_task", "Update a tracked task's status or notes.", {"id": S, "status": {"type": "string", "enum": ["open", "in_progress", "done"]}, "notes": S}, update_dev_task, required=["id"]))
 
     C = Level.CONFIRM

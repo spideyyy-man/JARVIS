@@ -42,6 +42,8 @@ class SettingsIn(BaseModel):
     trusted_tools: list[str] | None = None
     default_project: str | None = None
     voice: dict | None = None
+    capabilities: dict | None = None
+    proactive: dict | None = None
 
 
 class IngestIn(BaseModel):
@@ -269,7 +271,9 @@ def create_app(jarvis: Jarvis | None = None) -> FastAPI:
 
     def settings_payload() -> dict:
         return {"trusted_tools": j.executor.trusted_tools(), "default_project": j.db.get_setting("default_project", ""),
-                "voice": {"wake_word": j.settings.wake_word, "continuous": False, "voice_name": "", "rate": 1.0, "speak_replies": True, **j.db.get_setting("voice", {})},
+                "voice": {"wake_word": j.settings.wake_word, "continuous": False, "voice_name": "", "rate": 1.0, "speak_replies": True, "wake_on_start": False, **j.db.get_setting("voice", {})},
+                "capabilities": {name: {"enabled": on, "description": j.CAPABILITIES[name]} for name, on in j.capabilities().items()},
+                "proactive": {"briefing_time": "", **j.db.get_setting("proactive", {})},
                 "allowed_roots": [str(r) for r in j.settings.allowed_roots], "data_dir": str(j.settings.data_dir),
                 "llm": j.provider_info(), "embedder": j.embedder.name, "search_provider": j.settings.search_provider,
                 "speech": {"stt": j.settings.stt_provider, "tts": j.settings.tts_provider}, "image_provider": j.settings.image_provider,
@@ -288,8 +292,20 @@ def create_app(jarvis: Jarvis | None = None) -> FastAPI:
             if body.default_project:
                 j.guard.resolve(body.default_project)
             j.db.set_setting("default_project", body.default_project)
+        if body.capabilities is not None:
+            unknown = set(body.capabilities) - set(j.CAPABILITIES)
+            if unknown:
+                raise ValueError(f"Unknown capability: {', '.join(sorted(unknown))}")
+            new = {**j.capabilities(), **{k: bool(v) for k, v in body.capabilities.items()}}
+            j.db.set_setting("capabilities", new)
+            j.audit.record(actor="user", tool="settings.capabilities", level="confirm", decision="user-action", args=new, outcome="ok")
+        if body.proactive is not None:
+            at = str(body.proactive.get("briefing_time", "")).strip()
+            if at and not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", at):
+                raise ValueError("briefing_time must be HH:MM (24-hour) or empty")
+            j.db.set_setting("proactive", {"briefing_time": at})
         if body.voice is not None:
-            allowed = {"wake_word", "continuous", "voice_name", "rate", "speak_replies", "pitch"}
+            allowed = {"wake_word", "continuous", "voice_name", "rate", "speak_replies", "pitch", "wake_on_start"}
             j.db.set_setting("voice", {**j.db.get_setting("voice", {}), **{k: v for k, v in body.voice.items() if k in allowed}})
         return settings_payload()
 

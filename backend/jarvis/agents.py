@@ -45,11 +45,11 @@ AGENTS: dict[str, AgentSpec] = {a.name: a for a in [
               "schedules, call `delegate` with a self-contained task description for the right specialist. Independent subtasks can "
               "be delegated in parallel; dependent ones in sequence. For multi-step goals, call `create_plan` first.\n"
               "Specialists: research (web research, GitHub evaluation), coding (repositories, git, tests, code edits), "
-              "computer (files, folders, applications), knowledge (the user's indexed documents and notes, past conversations), "
+              "computer (files, folders, applications, clipboard, screen reading, mouse/keyboard, system settings, browser automation), knowledge (the user's indexed documents and notes, past conversations), "
               "automation (scheduled/conditional workflows), monitoring (CPU, memory, disk, processes).\n"
               "You can create pictures yourself with `generate_image` (the user's local image model).\n"
               "After delegation, check the result actually answers the request before replying; if it does not, try another route or say so.",
-              ["delegate", "create_plan", "generate_image", "remember", "recall", "conversation_search", "daily_summary", "list_dev_tasks", "add_dev_task", "update_dev_task"]),
+              ["delegate", "create_plan", "generate_image", "remember", "recall", "conversation_search", "daily_briefing", "daily_summary", "list_dev_tasks", "add_dev_task", "update_dev_task"]),
     AgentSpec("research", "Research Agent", "Web research, technology comparison, GitHub repository evaluation, sourced reports",
               "You are JARVIS's research agent. Search, read the most relevant pages, then write a structured answer. Every factual claim "
               "from the web must cite a URL that you actually retrieved in this task (check with list_sources). If search is unavailable, "
@@ -63,9 +63,13 @@ AGENTS: dict[str, AgentSpec] = {a.name: a for a in [
                "run_tests", "run_command", "git_commit", "list_dev_tasks", "add_dev_task", "update_dev_task", "create_plan", "kb_search"]),
     AgentSpec("computer", "Computer Agent", "Authorized local operations: files, folders, applications, dev environment",
               "You are JARVIS's computer agent. Explore and search the user's files; for natural-language file requests translate the "
-              "description into search_files filters. Before any change, show what will change (e.g. organize_folder_plan before organize_folder).",
+              "description into search_files filters. Before any change, show what will change (e.g. organize_folder_plan before organize_folder). "
+              "To operate an application: screen_read to see it, click_text to press what is labelled, type_text / press_keys to enter input, then "
+              "screen_read again to confirm the result - one step at a time. For websites prefer browser_open / browser_click / browser_fill.",
               ["list_dir", "read_file", "file_info", "search_files", "recent_files", "organize_folder_plan", "organize_folder", "write_file", "create_directory",
-               "move_path", "copy_path", "delete_path", "open_application", "list_installed_apps", "dev_environment", "disk_usage"]),
+               "move_path", "copy_path", "delete_path", "open_application", "list_installed_apps", "dev_environment", "disk_usage",
+               "clipboard_read", "clipboard_write", "active_window", "system_control", "screen_read", "click_text", "mouse_click", "type_text", "press_keys",
+               "browser_open", "browser_read", "browser_click", "browser_fill", "browser_close"]),
     AgentSpec("knowledge", "Knowledge Agent", "Indexes documents and answers from them with citations; searches notes and past conversations",
               "You are JARVIS's knowledge agent. Answer from the user's indexed material using kb_search, citing passages as [n] with a "
               "source list. If retrieval returns nothing relevant, say so instead of answering from general knowledge.",
