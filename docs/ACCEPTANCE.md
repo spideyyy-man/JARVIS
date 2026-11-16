@@ -1,6 +1,6 @@
 # JARVIS - final acceptance evidence
 
-Generated 2026-11-15 07:19:38 by `scripts/acceptance.py`. Language model chain for this run: `offline`. Transcripts below are verbatim program output.
+Generated 2026-11-16 18:18:42 by `scripts/acceptance.py`. Language model chain for this run: `offline`. Transcripts below are verbatim program output.
 
 ## Summary
 
@@ -11,7 +11,7 @@ Generated 2026-11-15 07:19:38 by `scripts/acceptance.py`. Language model chain f
 | 3. Find a file using natural language | PASS |  |
 | 4. Inspect an existing software repository | PASS |  |
 | 5. Explain a technical concept using indexed documents | PASS |  |
-| 6. Research a technical topic and cite sources | BLOCKED | live web search hosts are not reachable from this sandbox; pipeline verified against a stand-in server |
+| 6. Research a technical topic and cite sources | BLOCKED | not verified against the live internet; pipeline verified against a stand-in server |
 | 7. Create a multi-step development plan | PASS |  |
 | 8. Execute an approved file-management task | PASS |  |
 | 9. Run a scheduled task | PASS |  |
@@ -60,11 +60,11 @@ _(interrupted)_
 
 ```text
 **System performance** - Linux 6.18.44-fc-v470 (x86_64), up 0.1 h.
-- CPU: **0.0%** across 4 cores (load 0.1, 0.08, 0.03)
-- Memory: **4.6%** used (0.73 of 15.71 GB, 14.98 GB available)
-- Disk: **23.7%** used, 29.3 GB free of 252.0 GB
+- CPU: **0.0%** across 4 cores (load 0.97, 0.78, 0.35)
+- Memory: **4.7%** used (0.73 of 15.71 GB, 14.98 GB available)
+- Disk: **25.6%** used, 28.6 GB free of 252.0 GB
 - Busiest by CPU: process_api (0%), kthreadd (0%), pool_workqueue_release (0%)
-- Largest by memory: claude (2.06%), node (0.62%), python (0.54%)
+- Largest by memory: claude (1.91%), python (0.65%), node (0.62%)
 
 No performance problems detected.
 ```
@@ -78,15 +78,15 @@ No performance problems detected.
 **User (text): find my budget spreadsheet**
 
 ```text
-Found 1 match(es) under `/tmp/jarvis-acceptance-raod3yca/home` (9 files scanned). Best matches:
-- `/tmp/jarvis-acceptance-raod3yca/home/Downloads/q3_budget_report.xlsx` (0 KB, modified 2026-11-15T07:19:38)
+Found 1 match(es) under `/tmp/jarvis-acceptance-j8eeaabj/home` (9 files scanned). Best matches:
+- `/tmp/jarvis-acceptance-j8eeaabj/home/Downloads/q3_budget_report.xlsx` (0 KB, modified 2026-11-16T18:18:42)
 ```
 
 **User (text): where is the pdf about my tax return in documents**
 
 ```text
-Found 1 match(es) under `/tmp/jarvis-acceptance-raod3yca/home/Documents` (3 files scanned). Best matches:
-- `/tmp/jarvis-acceptance-raod3yca/home/Documents/finance/tax-return-2025.pdf` (0 KB, modified 2026-11-15T07:19:38)
+Found 1 match(es) under `/tmp/jarvis-acceptance-j8eeaabj/home/Documents` (3 files scanned). Best matches:
+- `/tmp/jarvis-acceptance-j8eeaabj/home/Documents/finance/tax-return-2025.pdf` (0 KB, modified 2026-11-16T18:18:42)
 ```
 
 - PASS - found the spreadsheet
@@ -98,14 +98,18 @@ Found 1 match(es) under `/tmp/jarvis-acceptance-raod3yca/home/Documents` (3 file
 
 ```text
 **Repository `jarvis`** at `/home/user/jarvis`
-- Languages: Python (5072 lines in 31 files), TypeScript (1114 lines in 6 files), Markdown (499 lines in 3 files), HTML (15 lines in 1 files)
-- Git: branch `main`, 10 uncommitted change(s)
+- Languages: Python (8731 lines in 45 files), TypeScript (3947 lines in 26 files), Markdown (703 lines in 6 files), CSS (573 lines in 3 files)
+- Git: branch `main`, 2 uncommitted change(s)
 - Recent commits:
-  - e43bf22 2026-11-15 Claude: JARVIS backend: agents, tools, security, knowledge, automation, API, tests
-- Layout: README.md, backend/, docs/, frontend/, scripts/
-- Entry points: backend/jarvis/__main__.py, backend/jarvis/app.py
+  - fcd1e54 2026-11-16 Claude: Window listing/switching, routing regression table
+  - fad60a8 2026-11-16 Claude: Test: multi-step agentic desktop task with task approval and continuation
+  - 9957a7c 2026-11-16 Claude: Stream filter for text-form tool calls; stand-in model server and model-in-the-loop browser test
+  - 346d0a3 2026-11-16 Claude: UI: approve-for-task, untrusted warning, behaviour switches, diagnostics, grants, calendar panel
+  - 7e24082 2026-11-16 Claude: Diagnostics (doctor) with model tool-calling probe, behaviour settings
+- Layout: README.md, backend/, docs/, frontend/, jarvis.zip, scripts/
+- Entry points: frontend/src/main.tsx, backend/jarvis/__main__.py, backend/jarvis/app.py
 - Tests: `python -m pytest -q --no-header --maxfail=5 (in backend/)`
-- 12 TODO/FIXME marker(s)
+- 13 TODO/FIXME marker(s)
 - README: JARVIS - personal AI operating system
 ```
 
@@ -115,7 +119,7 @@ Found 1 match(es) under `/tmp/jarvis-acceptance-raod3yca/home/Documents` (3 file
 
 ## 5. Explain a technical concept using indexed documents
 
-**User (text): index /tmp/jarvis-acceptance-raod3yca/home/Documents/kb into the tech space**
+**User (text): index /tmp/jarvis-acceptance-j8eeaabj/home/Documents/kb into the tech space**
 
 ```text
 Indexed 2 document(s) into the 'tech' space (2 new or updated).
@@ -129,8 +133,8 @@ From your indexed documents:
 A follower becomes a candidate when its election timeout expires without hearing from a leader; it increments its term and requests votes from its peers. [1] Raft elects a single leader per term. [1] A candidate that receives votes from a majority of the cluster becomes the leader for that term. [1] The leader appends client commands to its log and replicates them to followers with AppendEntries RPCs. [2]
 
 **Sources**
-[1] raft.md (Leader election) - `/tmp/jarvis-acceptance-raod3yca/home/Documents/kb/raft.md`
-[2] raft.md (Log replication) - `/tmp/jarvis-acceptance-raod3yca/home/Documents/kb/raft.md`
+[1] raft.md (Leader election) - `/tmp/jarvis-acceptance-j8eeaabj/home/Documents/kb/raft.md`
+[2] raft.md (Log replication) - `/tmp/jarvis-acceptance-j8eeaabj/home/Documents/kb/raft.md`
 
 _Extractive answer (offline engine): these are the most relevant passages, quoted rather than synthesised._
 ```
@@ -148,13 +152,19 @@ Nothing in your indexed documents matches that question, and without a language 
 
 ## 6. Research a technical topic and cite sources
 
+_Live web access was not attempted in this run (ACCEPTANCE_SKIP_LIVE). The first transcript shows JARVIS's behaviour when search is unavailable._
+
 **User (text): research the Model Context Protocol and cite sources**
 
 ```text
-I could not complete the web lookup, so I have **no** web findings to report and won't guess. Reason: RuntimeError: Web search is unavailable (duckduckgo: ProxyError: 403 Forbidden; wikipedia: ProxyError: 403 Forbidden). No search was performed - do not present any web findings.
+I could not complete the web lookup, so I have **no** web findings to report and won't guess. Reason: RuntimeError: Web search is unavailable (duckduckgo: HTTPStatusError: Server error '503 Service Unavailable' for url 'https://html.duckduckgo.com/html/'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/503; wikipedia: HTTPStatusError: Server error '503 Service Unavailable' for url 'https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=the+Model+Context+Protocol&format=json&srlimit=6'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/503). No search was performed - do not present any web findings.
+
+> Warning: these cited URLs were not retrieved during this research and are unverified: https://html.duckduckgo.com/html/, https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/503, https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=the+Model+Context+Protocol&format=json&srlimit=6
 ```
 
-The live search was refused by this environment's network policy. JARVIS reported that honestly instead of inventing findings (above). To prove the pipeline itself, the same request is repeated against a local stand-in web server:
+Live search was unavailable. JARVIS reported that honestly instead of inventing findings (above). To prove the pipeline itself, the same request is repeated against a local stand-in web server:
 
 **User (text): research the Model Context Protocol and cite sources**
 
@@ -185,10 +195,10 @@ _Offline engine: this lists and quotes what was retrieved; it is not a synthesis
 
 ```text
 **Development plan: jarvis**
-1. **Baseline the repository** - Stack: Python, TypeScript, Markdown. Top-level layout: README.md, backend/, docs/, frontend/, scripts/.
-2. **Stabilise the working tree** - 10 uncommitted change(s) on main: review, then commit or stash before new work.
+1. **Baseline the repository** - Stack: Python, TypeScript, Markdown. Top-level layout: README.md, backend/, docs/, frontend/, jarvis.zip, scripts/.
+2. **Stabilise the working tree** - 2 uncommitted change(s) on main: review, then commit or stash before new work.
 3. **Establish a test baseline** - Run `python -m pytest -q --no-header --maxfail=5 (in backend/)` and record failures.
-4. **Triage known debt** - 12 TODO/FIXME marker(s) in the code: convert the real ones into tracked tasks.
+4. **Triage known debt** - 13 TODO/FIXME marker(s) in the code: convert the real ones into tracked tasks.
 5. **Design: the next milestone** - Break the goal into components and interfaces; identify the riskiest assumption and plan to test it first.
 6. **Implement in vertical slices** - Deliver the smallest end-to-end path first, then widen. Keep each slice behind a passing test.
 7. **Verify** - Run the full test suite, exercise failure paths, and review the diff before merging.
@@ -208,15 +218,15 @@ The plan is saved with this task; tell me which step to start on.
 ```text
 I've prepared this action, but it changes your system, so it's waiting for your approval:
 
-> Organize /tmp/jarvis-acceptance-raod3yca/home/Downloads: move 6 files into category subfolders (backup.zip -> Archives/, installer.dmg -> Installers/, invoice-march.pdf -> Documents/, meeting-notes.txt -> Documents/, q3_budget_report.xlsx -> Spreadsheets/, team-photo.png -> Images/)
+> Organize /tmp/jarvis-acceptance-j8eeaabj/home/Downloads: move 6 files into category subfolders (backup.zip -> Archives/, installer.dmg -> Installers/, invoice-march.pdf -> Documents/, meeting-notes.txt -> Documents/, q3_budget_report.xlsx -> Spreadsheets/, team-photo.png -> Images/)
 
-Approve or deny it in the Command Center, or just say "approve" (request `ap_e38cf13c62fa`).
+Approve or deny it in the Command Center, or just say "approve" (request `ap_c13cbc0af405`).
 ```
 
 **Approval request shown to the user**
 
 ```text
-Organize /tmp/jarvis-acceptance-raod3yca/home/Downloads: move 6 files into category subfolders (backup.zip -> Archives/, installer.dmg -> Installers/, invoice-march.pdf -> Documents/, meeting-notes.txt -> Documents/, q3_budget_report.xlsx -> Spreadsheets/, team-photo.png -> Images/)
+Organize /tmp/jarvis-acceptance-j8eeaabj/home/Downloads: move 6 files into category subfolders (backup.zip -> Archives/, installer.dmg -> Installers/, invoice-march.pdf -> Documents/, meeting-notes.txt -> Documents/, q3_budget_report.xlsx -> Spreadsheets/, team-photo.png -> Images/)
 ```
 
 **User (text): approve**
@@ -256,7 +266,7 @@ I've prepared this action, but it changes your system, so it's waiting for your 
 
 > Create workflow 'Check my computer's performance' - schedule {'type': 'interval', 'seconds': 5}
 
-Approve or deny it in the Command Center, or just say "approve" (request `ap_a3e3b7ac888a`).
+Approve or deny it in the Command Center, or just say "approve" (request `ap_df0c961accb8`).
 ```
 
 **User (text): approve**
@@ -276,16 +286,16 @@ Waiting for the real scheduler loop to fire it...
  {
   "step": "s1",
   "kind": "system_stats",
-  "started": 1794727185.4279668,
+  "started": 1794853129.4387174,
   "attempts": 1,
-  "duration_s": 0.682,
+  "duration_s": 0.678,
   "status": "ok",
-  "detail": "{\"ts\": 1794727185.4294603, \"cpu\": {\"percent\": 0.0, \"cores\": 4, \"load_avg\": [0.08, 0.08, 0.03]}, \"memory\": {\"percent\": 4.6, \"used_gb\": 0.72, \"total_gb\": 15.71, \"available_gb\": 14.99}, \"swap\": {\"percent\": 0.0, \"used_gb\": 0.0}, \"disk\": {\"percent\": 23.7, \"free_gb\": 29.3, \"total_gb\": 252.0}, \"net\": {\"sen... [truncated 2028 chars]"
+  "detail": "{\"ts\": 1794853129.441187, \"cpu\": {\"percent\": 0.0, \"cores\": 4, \"load_avg\": [0.82, 0.75, 0.34]}, \"memory\": {\"percent\": 4.6, \"used_gb\": 0.72, \"total_gb\": 15.71, \"available_gb\": 14.99}, \"swap\": {\"percent\": 0.0, \"used_gb\": 0.0}, \"disk\": {\"percent\": 25.6, \"free_gb\": 28.6, \"total_gb\": 252.0}, \"net\": {\"sent... [truncated 2024 chars]"
  },
  {
   "step": "notify",
   "kind": "notify",
-  "started": 1794727186.1102347,
+  "started": 1794853130.1171458,
   "attempts": 0,
   "status": "skipped",
   "detail": "condition not met"
@@ -303,11 +313,11 @@ Waiting for the real scheduler loop to fire it...
 
 ```text
 **System performance** - Linux 6.18.44-fc-v470 (x86_64), up 0.1 h.
-- CPU: **0.0%** across 4 cores (load 0.08, 0.08, 0.03)
+- CPU: **1.2%** across 4 cores (load 0.82, 0.75, 0.34)
 - Memory: **4.6%** used (0.72 of 15.71 GB, 14.99 GB available)
-- Disk: **23.7%** used, 29.3 GB free of 252.0 GB
+- Disk: **25.6%** used, 28.6 GB free of 252.0 GB
 - Busiest by CPU: process_api (0%), kthreadd (0%), pool_workqueue_release (0%)
-- Largest by memory: claude (2.07%), node (0.62%), python (0.54%)
+- Largest by memory: claude (1.91%), python (0.65%), node (0.62%)
 
 No performance problems detected.
 ```
@@ -318,10 +328,10 @@ No performance problems detected.
 Language model 'hosted-model' failed: Cannot reach API: connection refused Falling back to 'offline'.
 ```
 
-**User (text): read /tmp/jarvis-acceptance-raod3yca/home/Documents/does-not-exist.txt**
+**User (text): read /tmp/jarvis-acceptance-j8eeaabj/home/Documents/does-not-exist.txt**
 
 ```text
-I couldn't complete `read_file`: FileNotFoundError: No such file: /tmp/jarvis-acceptance-raod3yca/home/Documents/does-not-exist.txt
+I couldn't complete `read_file`: FileNotFoundError: No such file: /tmp/jarvis-acceptance-j8eeaabj/home/Documents/does-not-exist.txt
 ```
 
 **User (text): delete /etc/hosts**

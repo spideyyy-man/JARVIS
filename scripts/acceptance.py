@@ -156,7 +156,13 @@ async def main() -> int:
 
     # 6 ---------------------------------------------------------------------------------------
     section(6, "Research a technical topic and cite sources")
+    import os
+
+    if os.environ.get("ACCEPTANCE_SKIP_LIVE"):  # do not touch the network at all in this run
+        j.http_transport = httpx.MockTransport(lambda req: httpx.Response(503))
+        say("_Live web access was not attempted in this run (ACCEPTANCE_SKIP_LIVE). The first transcript shows JARVIS's behaviour when search is unavailable._\n")
     r = await ask(j, "research the Model Context Protocol and cite sources", "c6")
+    j.http_transport = None
     live = not r["errors"] and "Sources" in r["text"]
     if live:
         task = j.db.one("SELECT * FROM tasks WHERE agent='research' ORDER BY created DESC LIMIT 1")
@@ -165,7 +171,7 @@ async def main() -> int:
         ok = all([check("live web search returned results", len(srcs) > 0, f"{len(srcs)} sources"), check("every cited URL was actually retrieved", task["evaluation"]["citations"]["unverified"] == [])])
         done(6, "Research a technical topic and cite sources", ok)
     else:
-        say("The live search was refused by this environment's network policy. JARVIS reported that honestly instead of inventing findings (above). "
+        say("Live search was unavailable. JARVIS reported that honestly instead of inventing findings (above). "
             "To prove the pipeline itself, the same request is repeated against a local stand-in web server:\n")
         pages = {"example.org": "<html><title>MCP overview</title><body><main><p>The Model Context Protocol is an open standard that lets assistants connect to tools and data sources through servers.</p></main></body></html>",
                  "example.net": "<html><title>MCP spec</title><body><p>MCP uses JSON-RPC messages between hosts, clients and servers.</p></body></html>"}
@@ -183,7 +189,7 @@ async def main() -> int:
         check("no fabricated findings when search was unavailable", True, "see first transcript")
         check("pipeline (stand-in server): search -> read pages -> cited report", "https://example.org/mcp" in r["text"] and "open standard" in r["text"])
         check("pipeline (stand-in server): every cited URL was retrieved", task["evaluation"]["citations"]["unverified"] == [])
-        done(6, "Research a technical topic and cite sources", False, "live web search hosts are not reachable from this sandbox; pipeline verified against a stand-in server")
+        done(6, "Research a technical topic and cite sources", False, "not verified against the live internet; pipeline verified against a stand-in server")
 
     # 7 ---------------------------------------------------------------------------------------
     section(7, "Create a multi-step development plan")

@@ -82,6 +82,18 @@ async def diagnose(app, online: bool = True) -> list[dict]:
         except Exception as e:
             out.append(_r(f"Model: {p.name}", FAIL, f"{p.model}: {type(e).__name__}: {str(e)[:200]}",
                           "Is the model server running? For Ollama: start it and run `ollama list` to confirm the model name."))
+    if chain[0].name == "openai_compat":
+        from .agents import AGENTS, COMMON_RULES, lean_spec
+        from .robust import select_tools
+
+        tools = [t for t in app.tools.all() if t.name != "delegate"]
+        shown = select_tools("check my computer and my files", tools, app.embedder, s.max_tools, {"list_tools", "create_plan", "update_plan"})
+        chars = len(AGENTS["assistant"].prompt) + len(COMMON_RULES) + sum(len(json.dumps(lean_spec(t))) for t in shown)
+        tokens = int(chars / 3.3)
+        out.append(_r("Prompt size", OK if tokens < 2500 else WARN,
+                      f"about {tokens} tokens of instructions and tool definitions before the conversation starts. Your model's context window must be clearly larger "
+                      f"(8192 recommended). Ollama's default can be as low as 2048-4096, which silently cuts the prompt off.",
+                      "Create a larger-context model: see docs/WINDOWS.md, or lower JARVIS_MAX_TOOLS."))
     mode = app.root_agent()
     out.append(_r("Agent mode", OK, f"{'flat (single agent, fewer model calls)' if mode == 'assistant' else 'team (orchestrator + specialists)'}; "
                                     f"tool shortlist {s.max_tools}; embedder {app.embedder.name}"))

@@ -6,6 +6,7 @@ an explicit permission model, remembers context, and runs automations.
 - **Backend**: Python 3.11+, FastAPI, SQLite. `backend/`
 - **Frontend**: React + TypeScript (Vite), served by the backend. `frontend/`
 - **Design and trade-offs**: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- **What was missing for agentic use and what closed it**: [docs/GAP_ANALYSIS.md](docs/GAP_ANALYSIS.md)
 - **Windows laptop setup, desktop control, no GPU**: [docs/WINDOWS.md](docs/WINDOWS.md)
 - **Using local models (no API key)**: [docs/LOCAL_MODELS.md](docs/LOCAL_MODELS.md)
 - **Evidence for the ten acceptance workflows**: [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)
@@ -50,14 +51,16 @@ are never readable; anything that looks like a secret is redacted before it reac
 
 ```bash
 cd backend && .venv/bin/python -m pytest -q          # unit + integration tests
+backend/.venv/bin/python -m jarvis.doctor            # what works on THIS machine, incl. whether the model can call tools
 backend/.venv/bin/python scripts/acceptance.py       # the ten acceptance workflows -> docs/ACCEPTANCE.md
 # browser end-to-end: start the server with JARVIS_API_TOKEN=dev-token, then
 E2E_HOME=<a folder inside JARVIS_ALLOWED_ROOTS> node frontend/e2e/smoke.mjs      # -> docs/E2E.md, frontend/e2e/screenshots/
 ```
 
-Current results (Linux): 61 backend tests pass (run under `xvfb-run -a` for the two that need a display);
-32/32 browser checks and 7/7 local-model checks pass; 9 of 10 acceptance workflows pass and web research is
-recorded as blocked (not live-tested). Nothing has been run on Windows yet.
+Current results (Linux): 168 backend tests pass under `xvfb-run -a` (97 behavioural + 71 routing-table cases);
+browser checks pass 37/37 (UI), 7/7 (local speech and image models) and 9/9 (model in the loop, against a
+stand-in model server); 9 of 10 acceptance workflows pass and web research is not verified against the live
+internet. Nothing has been run on Windows or with a real language model yet - run `python -m jarvis.doctor` first.
 
 ## Known limits
 

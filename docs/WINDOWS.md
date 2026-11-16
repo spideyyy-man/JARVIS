@@ -28,6 +28,16 @@ Windows:
 backend\.venv\Scripts\python.exe -m jarvis.desktop_app --install-autostart
 ```
 
+Then check what actually works on your machine:
+
+```powershell
+backend\.venv\Scripts\python.exe -m jarvis.doctor
+```
+
+It tests the model (including whether it can really call tools, and how long that takes), screen reading,
+mouse/keyboard, browser, speech, calendar and email, and prints a fix for anything that fails. The same
+report is in Settings > Diagnostics. **Send me this output if something does not work.**
+
 ## 2. Choosing a model without a GPU
 
 | Model | Download | RAM needed | Speed on a laptop CPU | Use it when |
@@ -35,6 +45,13 @@ backend\.venv\Scripts\python.exe -m jarvis.desktop_app --install-autostart
 | `qwen2.5:3b` (default) | ~2 GB | 8 GB | usable | you want replies in seconds; expect tool-calling mistakes |
 | `qwen2.5:7b` | ~4.7 GB | 16 GB | slow (often 10-40 s per step) | accuracy matters more than speed |
 | `llama3.2:3b` | ~2 GB | 8 GB | usable | alternative if qwen misbehaves |
+
+**Context window.** An agent's prompt carries tool definitions, so it needs more room than a chat prompt.
+Ollama's default context can be as small as 2048-4096 tokens, which cuts the prompt off without any error
+and makes the model behave erratically. The setup script therefore builds `jarvis-model` (your model with
+`num_ctx 8192`) and points `.env` at it. To do it by hand: put `FROM qwen2.5:3b` and `PARAMETER num_ctx 8192`
+in a file called `Modelfile`, then run `ollama create jarvis-model -f Modelfile`. JARVIS also keeps its own
+prompt lean for local models (12 shortlisted tools, short descriptions, trimmed history and tool results).
 
 The model must support tool calling; all three do. Change it with `JARVIS_OPENAI_MODEL` in `.env`.
 Be realistic: a 3B model on CPU handles one- or two-step requests. Long multi-step jobs ("open the report,
@@ -64,6 +81,23 @@ It then clicks things **by the words on them**. Consequences:
   password or key is masked before the model sees it, but ordinary private content is not.
 - The screen is re-read at the moment of the click, after you approve. If the label is gone, nothing is clicked.
 
+### Multi-step tasks
+
+- With a model configured, JARVIS keeps going after you approve a step instead of stopping.
+- On an approval card, **"Approve all ... for this task"** stops it asking again for that one tool in that
+  conversation for 30 minutes (say "approve all" by voice). Delete, run-command, git-commit and send-email
+  always ask every time. Revoke in Settings.
+- Simple commands ("turn the volume up") skip the model and run instantly.
+- "Do that every day at 9" saves what JARVIS just did as a scheduled workflow. "Undo that" restores a delete.
+- An approval that follows a web page, email, clipboard or screen read carries a warning: that content can
+  contain planted instructions.
+
+### Calendar and email (optional)
+
+Set `JARVIS_CALENDAR_ICS` to your calendar's secret iCal link, and the `JARVIS_EMAIL_*` values in `.env`
+(use an app password). Then: "what's on my calendar today", "schedule a meeting with Priya tomorrow at 3pm",
+"check my email", "email sam@example.com saying ...". Sending always shows you the full message first.
+
 ## 4. Safety switches
 
 - **Settings > Capabilities**: screen access, desktop control and browser control are all off until you
@@ -83,4 +117,4 @@ For fully local speech, see [LOCAL_MODELS.md](LOCAL_MODELS.md).
 
 ## 6. Not included
 
-Email, calendar and contacts; controlling JARVIS from a phone; a packaged installer (.exe/.msi).
+Contacts; writing to your external calendar (JARVIS keeps its own events); controlling JARVIS from a phone; a packaged installer (.exe/.msi).

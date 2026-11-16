@@ -109,6 +109,15 @@ ALWAYS_SHOWN: dict[str, set[str]] = {
 }
 
 
+def lean_spec(tool) -> dict:
+    """A tool definition trimmed for a small context window: first sentence(s) of the description only."""
+    spec = tool.spec()
+    if len(spec["description"]) > 170:
+        cut = spec["description"][:170]
+        spec["description"] = cut[: cut.rfind(". ") + 1] if ". " in cut[60:] else cut.rsplit(" ", 1)[0] + "..."
+    return spec
+
+
 @dataclass
 class AgentResult:
     text: str
@@ -154,7 +163,7 @@ class AgentRuntime:
         messages = [*(history or []), {"role": "user", "content": task}]
         ctx = ToolContext(app, agent=agent, actor=actor, task_id=task_id, conversation_id=conversation_id)
         result = AgentResult("", agent, task_id)
-        status = "done"
+        status, local = "done", False
         try:
             for step in range(app.settings.max_agent_steps):
                 result.steps = step + 1
@@ -162,11 +171,12 @@ class AgentRuntime:
                 # re-rank every step on the request plus what the model just said, so follow-up tools surface as the task unfolds
                 focus = task + " " + " ".join(m.get("content") or "" for m in messages[-2:] if m["role"] == "assistant")[:300]
                 shown = select_tools(focus, tools, app.embedder, app.settings.max_tools, ALWAYS_SHOWN.get(agent, set()) | used_names | hinted) if weak else tools
-                if weak and app.llm.current().name == "openai_compat":
+                local = weak and app.llm.current().name == "openai_compat"  # small context window: keep everything lean
+                if local:
                     compact_history(messages)
                 stream = StreamFilter(on_text) if on_text and weak else None
                 try:
-                    resp = await app.llm.complete(system, messages, [t.spec() for t in shown], stream.feed if stream else on_text, {"agent": agent})
+                    resp = await app.llm.complete(system, messages, [lean_spec(t) if local else t.spec() for t in shown], stream.feed if stream else on_text, {"agent": agent})
                 except asyncio.CancelledError:
                     if stream:  # interrupted mid-sentence: deliver what was held back so the partial reply is complete
                         stream.finish(stream.buffer, False)
@@ -221,7 +231,7 @@ class AgentRuntime:
                         result.errors += res.data.get("errors", [])
                         result.tools_used += res.data.get("tools_used", [])
                     result.tools_used.append({"agent": agent, "tool": call.name, "ok": res.ok, "pending": res.pending})
-                    tool_results.append({"id": call.id, "name": call.name, "content": res.to_model(), "is_error": not res.ok})
+                    tool_results.append({"id": call.id, "name": call.name, "content": res.to_model(3000 if local else 12000), "is_error": not res.ok})
                 messages.append({"role": "tool", "results": tool_results})
                 app.bus.set_state("thinking")
             else:

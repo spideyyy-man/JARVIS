@@ -56,6 +56,16 @@ Communication is structured: every delegation writes `request` / `result` / `err
 Self-evaluation is deliberately mechanical: failed tool calls, empty answers, and - for research -
 any cited URL that was never retrieved are flagged on the task and appended to the answer.
 
+### Agent modes
+
+| Mode | Shape | Model calls per action | When |
+|---|---|---|---|
+| team | Orchestrator delegates to a specialist that holds only its own tools | 4+ | Hosted or fast models; keeps content-reading agents away from modifying tools |
+| flat | One `assistant` agent; each step it is shown the ~12 most relevant of all tools, plus `list_tools` to find others | 2 | Default for local models (`JARVIS_AGENT_MODE=auto`), where every call is slow |
+
+The rule engine always runs in team mode. Between the model and the executor sits `robust.py` (tool-call
+repair, loop guard, stream filter); it only normalises format and can never grant a tool or bypass a check.
+
 ## 4. Security
 
 - **Three levels** enforced in `ToolExecutor.call`, not in prompts. CONFIRM calls create an approval
@@ -65,6 +75,12 @@ any cited URL that was never retrieved are flagged on the task and appended to t
 - **No tool can approve, change trust settings or delegate inside a workflow.** Text approval only
   works for a human chat turn with exactly one pending action in that conversation.
 - **Trusted allowlist** only accepts tools flagged `trust_eligible` in code.
+- **Task grants**: the user may approve one tool for one conversation for 30 minutes. Tools marked not
+  `grantable` (delete, run command, git commit, send email) always ask. Path and capability checks still run.
+- **Untrusted-content flag**: approvals requested within ten minutes of reading third-party content (web,
+  screen, clipboard, email) are labelled with the source.
+- **Continuation** is triggered only by the user's decision, runs as a distinct actor that cannot approve
+  anything, and is capped.
 - **Workflows get no extra privilege**: a CONFIRM step pauses the run until approved, then resumes.
 - **Path guard**: all paths are resolved (symlinks included) and must sit inside
   `JARVIS_ALLOWED_ROOTS`; credential locations and key files are unreadable; JARVIS will not write to

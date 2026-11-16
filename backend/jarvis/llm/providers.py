@@ -122,7 +122,10 @@ class OpenAICompatProvider:
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(600, connect=10), transport=self.transport) as client:
                 if self.stream:
-                    return await self._streamed(client, url, {**body, "stream": True}, headers, on_text)
+                    resp = await self._streamed(client, url, {**body, "stream": True}, headers, on_text)
+                    if resp.text or resp.tool_calls:
+                        return resp
+                    # Nothing came back. Some servers silently drop tool calls when streaming: ask again in one piece.
                 r = await client.post(url, json=body, headers=headers)
         except httpx.HTTPError as e:
             raise LLMError(f"Cannot reach {self.base_url}: {e}", retryable=True) from e

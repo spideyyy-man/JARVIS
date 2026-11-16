@@ -29,6 +29,14 @@ elseif (Get-Command ollama -ErrorAction SilentlyContinue) {
   $ramGB = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB)
   Write-Host "   $ramGB GB RAM detected. Downloading $Model (this can take a while)..."
   ollama pull $Model
+  # Ollama's default context window is too small for an agent's tool definitions; build a variant with 8192 tokens.
+  $mf = Join-Path $env:TEMP "jarvis.Modelfile"
+  "FROM $Model`nPARAMETER num_ctx 8192" | Set-Content -Encoding ASCII $mf
+  ollama create jarvis-model -f $mf
+  if ($LASTEXITCODE -eq 0) {
+    (Get-Content .env) -replace '^JARVIS_OPENAI_MODEL=.*', 'JARVIS_OPENAI_MODEL=jarvis-model' | Set-Content .env
+    Write-Host "   created 'jarvis-model' ($Model with an 8192-token context) and set it in .env"
+  } else { Write-Host "   could not create the larger-context variant; using $Model as is" -ForegroundColor Yellow }
 } else {
   Write-Host "   Ollama is not installed. Install it from https://ollama.com/download , then run:  ollama pull $Model" -ForegroundColor Yellow
   Write-Host "   Until then JARVIS runs on its built-in rule engine."

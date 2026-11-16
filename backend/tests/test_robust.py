@@ -146,3 +146,34 @@ def test_stream_filter_hides_text_form_tool_calls_but_not_ordinary_text():
     code = ["Use this:\n", "```python\n", "print('hi')\n", "```", " Done."]
     assert run_stream(code, "".join(code), False) == "".join(code)                           # a real code answer is delivered in full, just later
     assert run_stream(['<tool_call>{"name": "x", "arguments": {}}</tool_call>'], "", True) == ""
+
+
+def test_local_models_get_a_lean_prompt_and_a_non_streaming_retry(home, tmp_path):
+    from jarvis.agents import lean_spec
+
+    j = make(home, tmp_path)
+    long = max(j.tools.all(), key=lambda t: len(t.description))
+    assert len(long.description) > 200 and len(lean_spec(long)["description"]) <= 175 and lean_spec(long)["input_schema"] == long.schema
+
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        calls.append(body.get("stream", False))
+        if body.get("stream"):
+            return httpx.Response(200, text="data: [DONE]\n\n", headers={"content-type": "text/event-stream"})  # server dropped the tool call
+        return httpx.Response(200, json={"choices": [{"message": {"content": None, "tool_calls": [{"id": "c", "type": "function", "function": {"name": "system_stats", "arguments": "{}"}}]}}]})
+
+    p = OpenAICompatProvider("http://local/v1", "m", transport=httpx.MockTransport(handler))
+    resp = run(p.complete("s", [{"role": "user", "content": "x"}], []))
+    assert calls == [True, False] and resp.tool_calls[0].name == "system_stats"
+
+    # a huge tool result is cut down for a local model
+    big = home / "big.txt"
+    big.write_text("line of text\n" * 5000)
+    llm = ScriptedLLM([("", [("read_file", {"path": str(big), "max_chars": 60000})]), ("ok", [])])
+    llm.name = "openai_compat"
+    j2 = make(home, tmp_path / "b", providers=[llm])
+    j2.db.set_setting("fast_path", False)
+    run(j2.chat("please look at the big notes file for me"))
+    assert len(llm.seen[1]["messages"][-1]["results"][0]["content"]) < 3200

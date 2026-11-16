@@ -26,6 +26,7 @@ MAX_CONTINUATIONS = 20
 AFFIRM = re.compile(r"^\s*(hey\s+)?(jarvis[,\s]+)?(yes|yep|approve[d]?|go ahead|do it|confirm(ed)?|proceed|yes,? (do it|please|go ahead))[\s.!]*$", re.I)
 DENY = re.compile(r"^\s*(hey\s+)?(jarvis[,\s]+)?(no|nope|deny|denied|cancel( it| that)?|don'?t|stop|abort)[\s.!]*$", re.I)
 HISTORY_CHAR_BUDGET = 16_000
+LOCAL_HISTORY_CHAR_BUDGET = 5_000  # local models usually run with a small context window
 
 
 class Jarvis:
@@ -131,7 +132,7 @@ class Jarvis:
         kept, used = [], 0
         for r in reversed(rows):
             used += len(r["content"])
-            if used > HISTORY_CHAR_BUDGET and kept:
+            if used > (LOCAL_HISTORY_CHAR_BUDGET if self.llm.current().name == "openai_compat" else HISTORY_CHAR_BUDGET) and kept:
                 break
             kept.append(r)
         kept.reverse()
