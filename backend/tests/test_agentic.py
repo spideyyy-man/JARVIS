@@ -274,3 +274,38 @@ def test_flat_mode_survives_failover_to_the_rule_engine(home, tmp_path):
     j.db.set_setting("fast_path", False)
     r = run(j.chat("how is my computer performing?"))
     assert r["provider"] == "offline" and "System performance" in r["text"]
+
+
+def test_doctor_reports_model_tool_calling_and_local_abilities(home, tmp_path):
+    import json as _json
+
+    from jarvis.doctor import diagnose, probe_model, render
+    from jarvis.llm.providers import OpenAICompatProvider
+
+    def server(behaviour):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if behaviour == "native":
+                msg = {"content": None, "tool_calls": [{"id": "c", "type": "function", "function": {"name": "add_numbers", "arguments": '{"a": 17, "b": 25}'}}]}
+            elif behaviour == "text":
+                msg = {"content": 'Sure!\n```json\n{"name": "add_numbers", "arguments": {"a": "17", "b": "25"}}\n```'}
+            else:
+                msg = {"content": "17 plus 25 is 42."}
+            return httpx.Response(200, json={"choices": [{"message": msg}]})
+        return OpenAICompatProvider("http://local/v1", "test-model", transport=httpx.MockTransport(handler), stream=False)
+
+    assert run(probe_model(server("native")))["correct"] and not run(probe_model(server("native")))["needed_repair"]
+    text = run(probe_model(server("text")))
+    assert text["correct"] and text["needed_repair"] and not text["native_tool_call"]
+    assert not run(probe_model(server("chat")))["correct"]
+
+    j = make(home, tmp_path, providers=[server("chat")])
+    j.llm.providers.append(j.offline)
+    results = {r["name"]: r for r in run(diagnose(j, online=False))}
+    assert results["Model: openai_compat"]["status"] == "fail" and "cannot act" in results["Model: openai_compat"]["detail"]
+    assert results["Screen text recognition"]["status"] == "ok" and "4821" in results["Screen text recognition"]["detail"]
+    assert results["Email"]["status"] == "warn" and results["Python"]["status"] == "ok"
+    assert "[FAIL] Model: openai_compat" in render(list(results.values()))
+
+    plain = make(home, tmp_path / "b")
+    plain_results = {r["name"]: r for r in run(diagnose(plain, online=False))}
+    assert plain_results["Language model"]["status"] == "warn" and "qwen2.5:3b" in plain_results["Language model"]["fix"]

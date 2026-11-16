@@ -24,6 +24,8 @@ from .tools import coding, files, system
 from .tools.registry import ToolContext
 
 COOKIE = "jarvis_token"
+# User-switchable behaviours (all default on): what each does is described in the Settings screen.
+BEHAVIOR = ("fast_path", "auto_continue", "auto_memory")
 FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 
 
@@ -44,6 +46,7 @@ class SettingsIn(BaseModel):
     default_project: str | None = None
     voice: dict | None = None
     capabilities: dict | None = None
+    behavior: dict | None = None
     proactive: dict | None = None
 
 
@@ -279,6 +282,12 @@ def create_app(jarvis: Jarvis | None = None) -> FastAPI:
     async def audit(limit: int = 100, tool: str | None = None):
         return j.audit.recent(min(limit, 500), tool)
 
+    @app.get("/api/doctor")
+    async def doctor(online: bool = False):
+        from .doctor import diagnose
+
+        return await diagnose(j, online=online)
+
     @app.get("/api/tools")
     async def tools():
         trusted = j.executor.trusted_tools()
@@ -290,6 +299,8 @@ def create_app(jarvis: Jarvis | None = None) -> FastAPI:
                 "voice": {"wake_word": j.settings.wake_word, "continuous": False, "voice_name": "", "rate": 1.0, "speak_replies": True, "wake_on_start": False, **j.db.get_setting("voice", {})},
                 "capabilities": {name: {"enabled": on, "description": j.CAPABILITIES[name]} for name, on in j.capabilities().items()},
                 "proactive": {"briefing_time": "", **j.db.get_setting("proactive", {})},
+                "behavior": {k: bool(j.db.get_setting(k, True)) for k in BEHAVIOR},
+                "agent_mode": {"configured": j.settings.agent_mode, "active": "flat" if j.root_agent() == "assistant" else "team"},
                 "allowed_roots": [str(r) for r in j.settings.allowed_roots], "data_dir": str(j.settings.data_dir),
                 "llm": j.provider_info(), "embedder": j.embedder.name, "search_provider": j.settings.search_provider,
                 "speech": {"stt": j.settings.stt_provider, "tts": j.settings.tts_provider}, "image_provider": j.settings.image_provider,
@@ -315,6 +326,12 @@ def create_app(jarvis: Jarvis | None = None) -> FastAPI:
             new = {**j.capabilities(), **{k: bool(v) for k, v in body.capabilities.items()}}
             j.db.set_setting("capabilities", new)
             j.audit.record(actor="user", tool="settings.capabilities", level="confirm", decision="user-action", args=new, outcome="ok")
+        if body.behavior is not None:
+            unknown = set(body.behavior) - set(BEHAVIOR)
+            if unknown:
+                raise ValueError(f"Unknown behaviour setting: {', '.join(sorted(unknown))}")
+            for k, v in body.behavior.items():
+                j.db.set_setting(k, bool(v))
         if body.proactive is not None:
             at = str(body.proactive.get("briefing_time", "")).strip()
             if at and not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", at):
