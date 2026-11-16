@@ -183,6 +183,42 @@ def repair_response(resp: LLMResponse, tools: dict[str, dict]) -> tuple[LLMRespo
     return LLMResponse(text=text, tool_calls=calls, stop_reason=resp.stop_reason, raw=None, provider=resp.provider, model=resp.model, usage=resp.usage), fixes
 
 
+class StreamFilter:
+    """Sits between the model's token stream and the user. As soon as the text starts to look like a tool
+    call written as prose (a code fence, a <tool_call> tag, a JSON object), it stops forwarding and holds
+    the rest back. If that text turns out to be a real tool call it is discarded; otherwise it is flushed.
+    Without this the user would see - and the voice would read aloud - raw JSON."""
+
+    MARKERS = ("```", "<tool_call", "<function_call", "<tool>", '{"name"', '{"tool"', '{"function"', "{\n")
+
+    def __init__(self, forward):
+        self.forward, self.sent, self.buffer, self.holding = forward, 0, "", False
+
+    def feed(self, piece: str) -> None:
+        self.buffer += piece
+        if self.holding:
+            return
+        cut = min((i for i in (self.buffer.find(m, self.sent) for m in self.MARKERS) if i >= 0), default=-1)
+        if cut >= 0:
+            self.holding = True
+            end = cut
+        else:  # keep a short tail back in case a marker is split across two tokens
+            end = max(self.sent, len(self.buffer) - 12)
+        if end > self.sent:
+            self.forward(self.buffer[self.sent:end])
+            self.sent = end
+
+    def finish(self, final_text: str, had_tool_calls: bool) -> None:
+        """Called with the response's final (possibly repaired) text."""
+        if self.holding and had_tool_calls:
+            rest = final_text[len(self.buffer[:self.sent].rstrip()):] if final_text.startswith(self.buffer[:self.sent].rstrip()) else ""
+        else:
+            rest = self.buffer[self.sent:]
+        if rest.strip():
+            self.forward(rest)
+        self.sent, self.buffer, self.holding = 0, "", False
+
+
 class LoopGuard:
     """Detects a model repeating the same call. First it is told; if it keeps going, the run stops."""
 

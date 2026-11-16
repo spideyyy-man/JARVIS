@@ -127,3 +127,22 @@ def test_openai_compatible_streaming_text_tool_calls_and_think_tags():
     assert pieces == ["Hello ", "there."] and resp.text == "Hello there."  # tokens streamed, private reasoning never shown
     resp = run(p.complete("s", [{"role": "user", "content": "tool"}], []))
     assert [(c.id, c.name, c.args) for c in resp.tool_calls] == [("c1", "search_files", {"keywords": ["budget"]}), ("c2", "system_stats", {})]
+
+
+def test_stream_filter_hides_text_form_tool_calls_but_not_ordinary_text():
+    from jarvis.robust import StreamFilter
+
+    def run_stream(pieces, final, had_calls):
+        out = []
+        f = StreamFilter(out.append)
+        for p in pieces:
+            f.feed(p)
+        f.finish(final, had_calls)
+        return "".join(out)
+
+    sloppy = ["Let me ", "check that.\n", "``", "`json\n", '{"name": "system_stats", ', '"arguments": {}}\n', "```"]
+    assert run_stream(sloppy, "Let me check that.", True) == "Let me check that.\n"          # JSON never reaches the user
+    assert run_stream(["Here is ", "the plan: ", "step one, ", "then step two."], "Here is the plan: step one, then step two.", False) == "Here is the plan: step one, then step two."
+    code = ["Use this:\n", "```python\n", "print('hi')\n", "```", " Done."]
+    assert run_stream(code, "".join(code), False) == "".join(code)                           # a real code answer is delivered in full, just later
+    assert run_stream(['<tool_call>{"name": "x", "arguments": {}}</tool_call>'], "", True) == ""

@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 from .db import new_id
 from .llm.base import OnText
 from .llm.offline import match_rules
-from .robust import LoopGuard, compact_history, repair_response, select_tools
+from .robust import LoopGuard, StreamFilter, compact_history, repair_response, select_tools
 from .tools.registry import Tool, ToolContext, ToolRegistry
 from .tools.research import verify_citations
 
@@ -164,8 +164,16 @@ class AgentRuntime:
                 shown = select_tools(focus, tools, app.embedder, app.settings.max_tools, ALWAYS_SHOWN.get(agent, set()) | used_names | hinted) if weak else tools
                 if weak and app.llm.current().name == "openai_compat":
                     compact_history(messages)
-                resp = await app.llm.complete(system, messages, [t.spec() for t in shown], on_text, {"agent": agent})
+                stream = StreamFilter(on_text) if on_text and weak else None
+                try:
+                    resp = await app.llm.complete(system, messages, [t.spec() for t in shown], stream.feed if stream else on_text, {"agent": agent})
+                except asyncio.CancelledError:
+                    if stream:  # interrupted mid-sentence: deliver what was held back so the partial reply is complete
+                        stream.finish(stream.buffer, False)
+                    raise
                 resp, fixes = repair_response(resp, schemas)
+                if stream:
+                    stream.finish(resp.text, bool(resp.tool_calls))
                 if fixes:
                     trace.append({"step": step + 1, "repaired": fixes})
                 result.provider = resp.provider
