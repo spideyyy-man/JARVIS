@@ -36,6 +36,7 @@ class Settings:
     openai_base_url: str = ""
     openai_model: str = ""
     max_agent_steps: int = 12
+    agent_mode: str = "auto"  # auto | team | flat. flat = one agent with every tool (fewer model calls; best for slow local models)
     max_tools: int = 12  # tool definitions shown to a (non-offline) model per step; 0 = all
     llm_timeout: float = 300.0  # seconds per model call before failing over
     openai_stream: bool = True
@@ -107,6 +108,7 @@ def load_settings(env_file: Path | None = None) -> Settings:
         openai_base_url=env("JARVIS_OPENAI_BASE_URL", ""),
         openai_model=env("JARVIS_OPENAI_MODEL", ""),
         max_agent_steps=int(env("JARVIS_MAX_AGENT_STEPS", "12")),
+        agent_mode=env("JARVIS_AGENT_MODE", "auto"),
         max_tools=int(env("JARVIS_MAX_TOOLS", "12")),
         llm_timeout=float(env("JARVIS_LLM_TIMEOUT", "300")),
         openai_stream=env("JARVIS_OPENAI_STREAM", "1") != "0",

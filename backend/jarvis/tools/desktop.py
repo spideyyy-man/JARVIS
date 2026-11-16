@@ -188,6 +188,27 @@ def screen_read(ctx: ToolContext, contains: str = "") -> dict:
     return out
 
 
+def wait_for_text(ctx: ToolContext, text: str, timeout_s: int = 20) -> dict:
+    """Poll the screen until some text appears - for pages and dialogs that take a moment to load."""
+    require(ctx, "screen_access")
+    deadline, want = time.time() + max(1, min(timeout_s, 120)), " ".join(text.lower().split())
+    while True:
+        lines = ocr_lines(ctx.app.capture_screen())
+        hit = next((l for l in lines if want in " ".join(l["text"].lower().split())), None)
+        if hit:
+            return {"appeared": True, "text": hit["text"], "at": [hit["x"], hit["y"]]}
+        if time.time() >= deadline:
+            return {"appeared": False, "waited_s": timeout_s, "visible_text": "\n".join(l["text"] for l in lines)[:1500]}
+        time.sleep(0.8)
+
+
+def mouse_scroll(ctx: ToolContext, amount: int) -> dict:
+    require(ctx, "desktop_control")
+    mouse, _ = _mouse()
+    mouse.scroll(0, max(-30, min(int(amount), 30)))
+    return {"scrolled": amount}
+
+
 def find_on_screen(lines: list[dict], text: str, occurrence: int = 1) -> dict:
     """Exact (case-insensitive) matches first, then lines that contain the text. Raises if absent or out of range."""
     want = " ".join(text.lower().split())
@@ -297,6 +318,10 @@ def register(reg: ToolRegistry, app) -> None:
     reg.register(Tool("active_window", "Title of the window the user is currently using.", {}, active_window))
     reg.register(Tool("screen_read", "Read the text visible on the screen right now (CPU text recognition), with the position of each line. Use to see what the user is looking at, e.g. an error dialog.",
                       {"contains": {"type": "string", "description": "Only return lines containing this"}}, screen_read, timeout=60))
+    reg.register(Tool("wait_for_text", "Wait until some text is visible on screen (e.g. after opening an app or loading a page). Returns whether it appeared.",
+                      {"text": S, "timeout_s": I}, wait_for_text, required=["text"], timeout=130))
+    reg.register(Tool("mouse_scroll", "Scroll the mouse wheel at the current pointer position: positive = up, negative = down.", {"amount": I}, mouse_scroll, required=["amount"],
+                      level=C, preview=gated(["desktop_control"], lambda a: f"Scroll {'up' if a['amount'] > 0 else 'down'} by {abs(a['amount'])}")))
     reg.register(Tool("clipboard_write", "Put text on the clipboard.", {"text": S}, clipboard_write, required=["text"], level=C, trust_eligible=True,
                       preview=lambda a: f"Copy to clipboard ({len(a['text'])} chars): {a['text'][:200]}"))
     reg.register(Tool("system_control", "Change a system setting: volume_up/volume_down (value = steps), volume_mute, media_play_pause, media_next, media_previous, set_brightness (value = 0-100), lock_screen.",

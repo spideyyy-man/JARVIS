@@ -232,3 +232,45 @@ def test_auto_memory_learns_statements_not_questions_or_commands(jarvis):
     jarvis.db.set_setting("auto_memory", False)
     run(jarvis.chat("I always work late on Fridays."))
     assert len(jarvis.memory.all()) == 2
+
+
+def test_flat_mode_does_the_job_in_two_model_calls_instead_of_four(home, tmp_path):
+    llm = ScriptedLLM([("", [("system_stats", {})]), ("CPU and memory are fine.", [])])
+    llm.name = "openai_compat"  # a local model: 'auto' mode picks the single flat agent
+    j = make(home, tmp_path, providers=[llm])
+    j.db.set_setting("fast_path", False)
+    r = run(j.chat("is my laptop struggling right now?"))
+    assert r["text"] == "CPU and memory are fine." and len(llm.seen) == 2
+    assert llm.seen[0]["meta"] == {"agent": "assistant"} and "delegate" not in llm.seen[0]["tools"]
+    assert len(llm.seen[0]["tools"]) == j.settings.max_tools and {"system_stats", "list_tools"} <= set(llm.seen[0]["tools"])
+    assert j.db.one("SELECT COUNT(*) AS n FROM tasks")["n"] == 1  # no sub-agents
+
+    j.settings.agent_mode = "team"
+    llm.script = [("", [("delegate", {"agent": "monitoring", "task": "stats"})]), ("", [("system_stats", {})]), ("fine", []), ("All fine.", [])]
+    llm.seen.clear()
+    run(j.chat("is my laptop struggling right now?"))
+    assert len(llm.seen) == 4 and llm.seen[0]["meta"] == {"agent": "orchestrator"}
+
+
+def test_flat_agent_can_discover_and_use_a_tool_outside_its_shortlist(home, tmp_path):
+    llm = ScriptedLLM([("", [("list_tools", {"query": "undo a deleted file trash"})]), ("", [("list_trash", {})]), ("The trash is empty.", [])])
+    llm.name = "openai_compat"
+    j = make(home, tmp_path, providers=[llm])
+    j.settings.max_tools = 5
+    j.db.set_setting("fast_path", False)
+    r = run(j.chat("hmm, what was that thing I removed earlier?"))
+    found = llm.seen[1]["messages"][-1]["results"][0]["content"]
+    assert "list_trash" in found and "restore_from_trash" in found and r["text"] == "The trash is empty." and not r["errors"]
+    assert "list_trash" in llm.seen[2]["tools"]  # once used, a tool stays in the shortlist
+
+
+def test_flat_mode_survives_failover_to_the_rule_engine(home, tmp_path):
+    from jarvis.llm.base import LLMError, LLMRouter
+
+    dead = ScriptedLLM([LLMError("connection refused")] * 3)
+    dead.name = "openai_compat"
+    j = make(home, tmp_path)
+    j.llm = LLMRouter([dead, j.offline], backoff=0.01)
+    j.db.set_setting("fast_path", False)
+    r = run(j.chat("how is my computer performing?"))
+    assert r["provider"] == "offline" and "System performance" in r["text"]

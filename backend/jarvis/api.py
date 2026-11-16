@@ -183,10 +183,13 @@ def create_app(jarvis: Jarvis | None = None) -> FastAPI:
     @app.get("/api/agents")
     async def agents():
         out = []
+        flat = j.root_agent() == "assistant"
         for a in AGENTS.values():
+            if a.name == "assistant" and not flat:
+                continue  # the single flat agent only exists when a local model is driving
             stats = j.db.one("SELECT COUNT(*) AS total, SUM(status='done') AS done, SUM(status='failed') AS failed, MAX(updated) AS last FROM tasks WHERE agent=?", (a.name,))
             active = [t for t in j.agents.active.values() if t["agent"] == a.name]
-            tools = [{"name": t.name, "level": t.level.value, "trusted": t.name in j.executor.trusted_tools()} for t in j.tools.subset(a.tools)]
+            tools = [{"name": t.name, "level": t.level.value, "trusted": t.name in j.executor.trusted_tools()} for t in (j.tools.subset(a.tools) if a.name != "assistant" else [x for x in j.tools.all() if x.name != "delegate"])]
             out.append({"name": a.name, "title": a.title, "responsibility": a.responsibility, "status": "running" if active else "idle", "active": active,
                         "tools": tools, "stats": stats, "recent_tasks": j.db.query("SELECT id, title, status, created, updated FROM tasks WHERE agent=? ORDER BY created DESC LIMIT 5", (a.name,))})
         return out

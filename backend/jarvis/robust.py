@@ -197,6 +197,42 @@ class LoopGuard:
         return "stop" if n >= self.stop_at else "warn" if n >= self.warn_at else ""
 
 
+# Everyday words people use for a capability that its formal description does not contain. The default
+# embedder is lexical, so without these a paraphrase ("is my laptop struggling?") would miss the right tool.
+# With a neural embedder (JARVIS_EMBEDDER=openai:<model>) these matter much less.
+TOOL_HINTS = {
+    "system_stats": "computer laptop pc machine slow fast laggy lagging struggling freezing hot fan health speed busy load usage ram",
+    "list_processes": "apps programs running hogging eating using memory cpu task manager",
+    "disk_usage": "space storage full drive free room big large folders",
+    "search_files": "find locate where look for file document photo spreadsheet pdf lost missing",
+    "read_file": "open show contents text inside",
+    "organize_folder_plan": "tidy clean up sort messy downloads desktop",
+    "screen_read": "see look at screen display window error dialog message showing visible",
+    "click_text": "press tap button link menu select choose",
+    "type_text": "write enter input keyboard fill",
+    "system_control": "volume louder quieter mute sound brightness dim lock music pause play next song",
+    "clipboard_read": "copied paste clipboard",
+    "browser_open": "website web page site url visit go to online",
+    "web_search": "search internet google look up online latest news research",
+    "calendar_events": "meetings appointments schedule agenda today tomorrow busy free week",
+    "calendar_add": "book schedule meeting appointment event remind",
+    "email_inbox": "mail inbox messages unread new emails",
+    "email_send": "send write reply mail message someone",
+    "add_dev_task": "remind reminder todo task remember to later",
+    "list_dev_tasks": "todo tasks reminders pending unfinished outstanding",
+    "kb_search": "my documents notes papers knowledge according to",
+    "repo_overview": "project codebase repository code explain architecture",
+    "run_tests": "tests test suite passing failing",
+    "generate_image": "draw picture image illustration art photo create",
+    "restore_from_trash": "undo undelete recover bring back mistake",
+    "daily_briefing": "brief briefing morning status overview what is on",
+    "daily_summary": "accomplished done today summary productivity recap",
+    "create_workflow": "automate every schedule recurring routine when",
+    "remember": "remember note keep in mind my preference",
+    "open_application": "open launch start app program application",
+}
+
+
 def select_tools(task: str, tools: list, embedder, limit: int, always: set[str]) -> list:
     """Show a small model only the tools most relevant to the request (plus `always`). Fewer tool
     definitions means a shorter prompt and far fewer wrong-tool mistakes. The agent's full tool set
@@ -205,7 +241,7 @@ def select_tools(task: str, tools: list, embedder, limit: int, always: set[str])
         return tools
     from .knowledge import tokenize
 
-    docs = [re.sub(r"[_/()=,]", " ", f"{t.name}. {t.name}. {t.description}") for t in tools]  # split volume_up -> "volume up"
+    docs = [re.sub(r"[_/()=,]", " ", f"{t.name}. {t.name}. {t.description} {TOOL_HINTS.get(t.name, '')}") for t in tools]  # split volume_up -> "volume up"
     vecs = embedder.embed([task] + docs)
     words = set(tokenize(task))
     overlap = np.array([len(words & set(tokenize(d))) for d in docs], dtype=np.float32)

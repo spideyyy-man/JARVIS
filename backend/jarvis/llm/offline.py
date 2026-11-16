@@ -325,6 +325,14 @@ class OfflineProvider:
     # -- first step of a turn ---------------------------------------------------
     def _decide(self, agent: str, text: str, available: set[str]) -> LLMResponse:
         self._current = text
+        if agent == "assistant":  # flat mode fell back to the rule engine: it holds every tool, so call the matched one directly
+            hit = match_rules(text, self.env)
+            if hit and hit[1][0] in available:
+                return LLMResponse(tool_calls=[ToolCall(self._id(), *hit[1])])
+            for pattern, reply in SMALL_TALK:
+                if re.search(pattern, text, re.I):
+                    return LLMResponse(text=reply())
+            return LLMResponse(text=f"I couldn't map that to something I can do offline.\n\n{CAPABILITIES}\n\n{OFFLINE_NOTE}")
         if agent != "orchestrator":
             hit = match_rules(text, self.env, agent)
             if hit and hit[1][0] in available:

@@ -215,7 +215,7 @@ class Jarvis:
         # Fast path: a slow local model should not be made to think about "turn the volume up".
         pin = FORCE_PROVIDER.set("offline") if actor == "chat" and self.fast_path_applies(text) else None
         try:
-            result = await self.agents.run("orchestrator", text, conversation_id=conversation_id, history=history,
+            result = await self.agents.run(self.root_agent(pinned_offline=pin is not None), text, conversation_id=conversation_id, history=history,
                                            context_note="\n\n".join(notes), actor=actor, on_text=on_text)
         except asyncio.CancelledError:
             partial = "".join(streamed).strip()
@@ -268,6 +268,17 @@ class Jarvis:
 
     # Requests the rule engine recognises but a model answers better (they need synthesis, not a lookup).
     NOT_FAST = {"search_files", "kb_search", "web_search", "fetch_url", "repo_overview", "conversation_search", "create_plan", "recall", "kb_ingest"}
+
+    def root_agent(self, pinned_offline: bool = False) -> str:
+        """team: orchestrator + specialists (least privilege, 4+ model calls per action).
+        flat: one agent with a shortlist drawn from every tool (2 model calls per action). 'auto' picks flat for
+        local OpenAI-compatible models, where each call is slow, and team otherwise. The rule engine always uses team."""
+        if pinned_offline or self.llm.current().name == "offline":
+            return "orchestrator"
+        mode = self.settings.agent_mode
+        if mode == "auto":
+            mode = "flat" if self.llm.current().name == "openai_compat" else "team"
+        return "assistant" if mode == "flat" else "orchestrator"
 
     def fast_path_applies(self, text: str) -> bool:
         """True when a model is configured but this request is a simple command the rule engine can do instantly."""

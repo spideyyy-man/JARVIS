@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from .db import new_id
 from .llm.base import OnText
+from .llm.offline import match_rules
 from .robust import LoopGuard, compact_history, repair_response, select_tools
 from .tools.registry import Tool, ToolContext, ToolRegistry
 from .tools.research import verify_citations
@@ -74,7 +75,7 @@ AGENTS: dict[str, AgentSpec] = {a.name: a for a in [
               "screen_read again to confirm the result - one step at a time. For websites prefer browser_open / browser_click / browser_fill.",
               ["list_dir", "read_file", "file_info", "search_files", "recent_files", "organize_folder_plan", "organize_folder", "write_file", "create_directory",
                "move_path", "copy_path", "delete_path", "list_trash", "restore_from_trash", "open_application", "list_installed_apps", "dev_environment", "disk_usage",
-               "clipboard_read", "clipboard_write", "active_window", "system_control", "screen_read", "click_text", "mouse_click", "type_text", "press_keys",
+               "clipboard_read", "clipboard_write", "active_window", "system_control", "screen_read", "click_text", "mouse_click", "type_text", "press_keys", "wait_for_text", "mouse_scroll",
                "browser_open", "browser_read", "browser_click", "browser_fill", "browser_close"]),
     AgentSpec("knowledge", "Knowledge Agent", "Indexes documents and answers from them with citations; searches notes and past conversations",
               "You are JARVIS's knowledge agent. Answer from the user's indexed material using kb_search, citing passages as [n] with a "
@@ -87,6 +88,13 @@ AGENTS: dict[str, AgentSpec] = {a.name: a for a in [
     AgentSpec("monitoring", "Monitoring Agent", "System health and performance: CPU, memory, disk, processes, trends",
               "You are JARVIS's monitoring agent. Report measured numbers, name the heaviest processes, and give a short assessment.",
               ["system_stats", "list_processes", "disk_usage", "metrics_history"]),
+    AgentSpec("assistant", "Single Assistant (flat mode)", "One agent with every tool; used with slow local models to avoid delegation round-trips",
+              "You are JARVIS, a personal AI assistant running on the user's computer. Decide whether the user wants an ANSWER or an ACTION. "
+              "Answer conversational questions directly. For anything about the computer, files, code, documents, the web, calendar, email or "
+              "schedules, call the right tool yourself - there is nobody to delegate to. You are shown the tools most relevant to the request; "
+              "if you need a different capability, call `list_tools` to find it and then call that tool by name. "
+              "For multi-step goals call `create_plan` first, then work through the steps one at a time with `update_plan`. "
+              "After acting, check the result before you answer.", []),
 ]}
 
 
@@ -97,6 +105,7 @@ ALWAYS_SHOWN: dict[str, set[str]] = {
     "coding": {"repo_overview", "read_file", "search_code"},
     "research": {"web_search", "fetch_url"},
     "knowledge": {"kb_search"},
+    "assistant": {"list_tools", "create_plan", "update_plan"},
 }
 
 
@@ -134,10 +143,13 @@ class AgentRuntime:
         self._post(task_id, sender, agent, "request", task)
         app.bus.emit("agent.status", agent=agent, status="running", task_id=task_id, title=task[:120])
 
-        tools = app.tools.subset(spec.tools)
+        tools = app.tools.subset(spec.tools) if agent != "assistant" else [t for t in app.tools.all() if t.name != "delegate"]
         allowed = {t.name for t in tools}
         schemas = {t.name: t.schema for t in tools}
         guard, used_names, trace = LoopGuard(), set(), []
+        # the rule engine doubles as a tool recommender: if it recognises the request, that tool is always offered
+        rule_hit = match_rules(task, app.offline.env)
+        hinted = {rule_hit[1][0]} & allowed if rule_hit else set()
         system = f"{spec.prompt}\n{COMMON_RULES}\n\nCurrent time: {time.strftime('%A %Y-%m-%d %H:%M')}. Home: {app.settings.allowed_roots[0]}." + (f"\n\n{context_note}" if context_note else "")
         messages = [*(history or []), {"role": "user", "content": task}]
         ctx = ToolContext(app, agent=agent, actor=actor, task_id=task_id, conversation_id=conversation_id)
@@ -147,7 +159,9 @@ class AgentRuntime:
             for step in range(app.settings.max_agent_steps):
                 result.steps = step + 1
                 weak = app.llm.current().name != "offline"  # the rule engine needs to see every tool; real models get a shortlist
-                shown = select_tools(task, tools, app.embedder, app.settings.max_tools, ALWAYS_SHOWN.get(agent, set()) | used_names) if weak else tools
+                # re-rank every step on the request plus what the model just said, so follow-up tools surface as the task unfolds
+                focus = task + " " + " ".join(m.get("content") or "" for m in messages[-2:] if m["role"] == "assistant")[:300]
+                shown = select_tools(focus, tools, app.embedder, app.settings.max_tools, ALWAYS_SHOWN.get(agent, set()) | used_names | hinted) if weak else tools
                 if weak and app.llm.current().name == "openai_compat":
                     compact_history(messages)
                 resp = await app.llm.complete(system, messages, [t.spec() for t in shown], on_text, {"agent": agent})
@@ -282,6 +296,14 @@ def register(reg: ToolRegistry, app: "Jarvis") -> None:
 
     reg.register(Tool("update_plan", "Mark a plan step as in_progress, done, failed or skipped as you work through the plan.",
                       {"step": {"type": "integer"}, "status": {"type": "string", "enum": ["in_progress", "done", "failed", "skipped"]}, "note": S}, update_plan, required=["step", "status"]))
+    def list_tools(ctx: ToolContext, query: str = "") -> dict:
+        every = [t for t in app.tools.all() if t.name not in ("delegate", "list_tools")]
+        found = select_tools(query, every, app.embedder, 12, set()) if query.strip() else every
+        return {"tools": [{"name": t.name, "description": t.description, "needs_approval": t.level.value == "confirm"} for t in found],
+                "note": "Any of these can be called directly by name."}
+
+    reg.register(Tool("list_tools", "Search JARVIS's full tool catalogue by capability (e.g. 'send email', 'screen', 'git'). Use when the tool you need is not in your current list.",
+                      {"query": S}, list_tools))
     reg.register(Tool("delegate", "Hand a self-contained task to a specialist agent and get its result.",
                       {"agent": {"type": "string", "enum": [a for a in AGENTS if a != "orchestrator"]}, "task": {"type": "string", "description": "Everything the specialist needs; it cannot see the conversation"}},
                       delegate, required=["agent", "task"], timeout=900))

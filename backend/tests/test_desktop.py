@@ -210,6 +210,11 @@ def test_real_screen_read_click_by_label_and_typing(jarvis):
         page.wait_for_timeout(400)
         assert page.input_value("#f") == "hello from jarvis"
 
+        ctx = ToolContext(jarvis, agent="computer", conversation_id="c1")
+        assert run(jarvis.executor.call("wait_for_text", {"text": "total revenue", "timeout_s": 5}, ctx)).data["appeared"]
+        gone = run(jarvis.executor.call("wait_for_text", {"text": "Payment complete", "timeout_s": 1}, ctx)).data
+        assert not gone["appeared"] and "Quarterly Report" in gone["visible_text"]
+
         r = run(jarvis.chat("click Nonexistent Button", "c1"))
         out = run(jarvis.chat("approve", "c1"))
         assert "not visible on screen" in out["text"]
