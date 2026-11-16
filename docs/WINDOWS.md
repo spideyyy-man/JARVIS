@@ -6,6 +6,10 @@ yet** - expect to hit and report a few first-run issues.
 
 ## 1. Install
 
+**One click:** double-click `Install-JARVIS.bat` in the project folder. It installs Python and Ollama if needed,
+sets everything up, downloads the model, runs the diagnostics, creates a desktop shortcut and starts JARVIS.
+The manual steps below do the same thing by hand.
+
 Prerequisites: [Python 3.11 or 3.12, 64-bit](https://www.python.org/downloads/) (tick "Add to PATH") and
 [Ollama](https://ollama.com/download) for the language model. Node.js is not needed; the built UI ships in
 `frontend/dist`.

@@ -11,7 +11,19 @@ an explicit permission model, remembers context, and runs automations.
 - **Using local models (no API key)**: [docs/LOCAL_MODELS.md](docs/LOCAL_MODELS.md)
 - **Evidence for the ten acceptance workflows**: [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)
 
-## Run it
+## Install on Windows (one click)
+
+1. Download this repository (green **Code** button -> **Download ZIP**) and unzip it, e.g. to `C:\jarvis`.
+2. Double-click **`Install-JARVIS.bat`**. If Windows shows "Windows protected your PC", choose **More info -> Run anyway**.
+
+The installer adds Python 3.12 and Ollama if they are missing, installs JARVIS, downloads the language model
+(about 2 GB), runs the diagnostics (saved to `doctor-report.txt`), puts a **JARVIS** shortcut on the desktop and
+starts it. It needs no administrator rights and takes 10-20 minutes. It has not yet been run on a real Windows
+machine - if it stops, the message on screen and `doctor-report.txt` say where.
+
+Options (from a terminal): `Install-JARVIS.bat -Model qwen2.5:7b`, `-NoModel`, `-NoLaunch`.
+
+## Run it manually (any OS)
 
 ```bash
 cd backend && python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"

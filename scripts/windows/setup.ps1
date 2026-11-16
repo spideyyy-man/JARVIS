@@ -1,14 +1,19 @@
 # JARVIS setup for Windows. Run from the project folder in PowerShell:
 #     powershell -ExecutionPolicy Bypass -File scripts\windows\setup.ps1
 # Optional:  -Model qwen2.5:7b   (better answers, needs ~16 GB RAM and is slow without a GPU)
-param([string]$Model = "qwen2.5:3b", [switch]$SkipModel)
+# Optional:  -Python C:\path\to\python.exe   use a specific Python (the one-click installer passes this)
+param([string]$Model = "qwen2.5:3b", [switch]$SkipModel, [string]$Python = "")
 $ErrorActionPreference = "Stop"
 Set-Location (Join-Path $PSScriptRoot "..\..")
 
 Write-Host "== 1/4  Python environment" -ForegroundColor Cyan
-$py = Get-Command py -ErrorAction SilentlyContinue
-if ($py) { py -3 -m venv backend\.venv } else { python -m venv backend\.venv }
+if (-not (Test-Path backend\.venv\Scripts\python.exe)) {
+  if ($Python) { & $Python -m venv backend\.venv }
+  elseif (Get-Command py -ErrorAction SilentlyContinue) { py -3 -m venv backend\.venv }
+  else { python -m venv backend\.venv }
+}
 & backend\.venv\Scripts\python.exe -m pip install --upgrade pip --quiet
+Write-Host "   installing dependencies (a few minutes, no output until it finishes)..."
 & backend\.venv\Scripts\python.exe -m pip install -e "backend[desktop]" --quiet
 if ($LASTEXITCODE -ne 0) { throw "pip install failed. Python 3.11 or 3.12 (64-bit) is recommended: https://www.python.org/downloads/" }
 
