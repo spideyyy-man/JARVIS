@@ -56,7 +56,7 @@ class Jarvis:
         agents_mod.register(self.tools, self)
         self.offline = OfflineProvider(Env(home=self.settings.allowed_roots[0], default_project=lambda: self.db.get_setting("default_project", ""),
                                            workflows=self.automation.list))
-        self.llm = LLMRouter(providers if providers is not None else self._build_providers(), on_event=self._llm_event)
+        self.llm = LLMRouter(providers if providers is not None else self._build_providers(), on_event=self._llm_event, timeout=self.settings.llm_timeout)
         self.stt, self.tts = build_voice(self.settings)
         self._chat_tasks: dict[str, asyncio.Task] = {}
 
@@ -70,7 +70,7 @@ class Jarvis:
         if want == "anthropic" or (want == "auto" and has_anthropic):
             chain.append(AnthropicProvider(s.anthropic_model, s.anthropic_effort, get_secret("ANTHROPIC_API_KEY")))
         if s.openai_base_url and s.openai_model and want in ("auto", "openai_compat", "anthropic"):
-            compat = OpenAICompatProvider(s.openai_base_url, s.openai_model, get_secret("OPENAI_API_KEY"))
+            compat = OpenAICompatProvider(s.openai_base_url, s.openai_model, get_secret("OPENAI_API_KEY"), stream=s.openai_stream)
             chain.insert(0, compat) if want == "openai_compat" else chain.append(compat)
         chain.append(self.offline)  # always last: graceful degradation
         return chain

@@ -8,6 +8,12 @@ import httpx
 from .base import LLMError, LLMResponse, OnText, ToolCall
 
 
+def _strip_think(text: str) -> str:
+    import re
+
+    return re.sub(r"<think>.*?(</think>|$)", "", text, flags=re.S).strip()
+
+
 class AnthropicProvider:
     """Claude via the official SDK: streaming, adaptive thinking, client tools.
 
@@ -86,12 +92,12 @@ class AnthropicProvider:
 
 class OpenAICompatProvider:
     """Any server that speaks the OpenAI chat-completions protocol (Ollama, LM Studio, vLLM, OpenAI).
-    This is the integration point for local models. Non-streaming: the text arrives in one piece."""
+    This is the integration point for local models. Streams tokens (and tool-call fragments) over SSE; set JARVIS_OPENAI_STREAM=0 for servers that cannot."""
 
     name = "openai_compat"
 
-    def __init__(self, base_url: str, model: str, api_key: str | None = None, transport: httpx.AsyncBaseTransport | None = None):
-        self.base_url, self.model, self.api_key, self.transport = base_url.rstrip("/"), model, api_key, transport
+    def __init__(self, base_url: str, model: str, api_key: str | None = None, transport: httpx.AsyncBaseTransport | None = None, stream: bool = True):
+        self.base_url, self.model, self.api_key, self.transport, self.stream = base_url.rstrip("/"), model, api_key, transport, stream
 
     def _convert(self, system: str, messages: list[dict]) -> list[dict]:
         out = [{"role": "system", "content": system}]
@@ -111,22 +117,69 @@ class OpenAICompatProvider:
         body: dict = {"model": self.model, "messages": self._convert(system, messages)}
         if tools:
             body["tools"] = [{"type": "function", "function": {"name": t["name"], "description": t["description"], "parameters": t["input_schema"]}} for t in tools]
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        url = f"{self.base_url}/chat/completions"
         try:
-            async with httpx.AsyncClient(timeout=300, transport=self.transport) as client:
-                r = await client.post(f"{self.base_url}/chat/completions", json=body,
-                                      headers={"Authorization": f"Bearer {self.api_key}"} if self.api_key else {})
+            async with httpx.AsyncClient(timeout=httpx.Timeout(600, connect=10), transport=self.transport) as client:
+                if self.stream:
+                    return await self._streamed(client, url, {**body, "stream": True}, headers, on_text)
+                r = await client.post(url, json=body, headers=headers)
         except httpx.HTTPError as e:
             raise LLMError(f"Cannot reach {self.base_url}: {e}", retryable=True) from e
-        if r.status_code >= 400:
-            raise LLMError(f"{self.base_url} returned {r.status_code}: {r.text[:200]}", retryable=r.status_code in (408, 429) or r.status_code >= 500)
+        self._raise_for_status(r.status_code, r.text)
         msg = r.json()["choices"][0]["message"]
-        calls = []
-        for c in msg.get("tool_calls") or []:
-            try:
-                calls.append(ToolCall(c["id"], c["function"]["name"], json.loads(c["function"]["arguments"] or "{}")))
-            except ValueError as e:
-                raise LLMError(f"Malformed tool arguments from model: {e}", retryable=True) from e
-        text = msg.get("content") or ""
+        calls = [ToolCall(c.get("id") or f"call_{i}", c["function"]["name"], self._args(c["function"].get("arguments"))) for i, c in enumerate(msg.get("tool_calls") or [])]
+        text = _strip_think(msg.get("content") or "")
         if text and on_text:
             on_text(text)
         return LLMResponse(text=text, tool_calls=calls, provider=self.name, model=self.model)
+
+    def _raise_for_status(self, status: int, text: str) -> None:
+        if status >= 400:
+            raise LLMError(f"{self.base_url} returned {status}: {text[:200]}", retryable=status in (408, 429) or status >= 500)
+
+    @staticmethod
+    def _args(raw):
+        """Arguments arrive as a JSON string. Leave unparsable input as-is: the repair layer and the
+        executor's validation turn it into an error the model can correct, instead of killing the turn."""
+        if isinstance(raw, dict):
+            return raw
+        try:
+            return json.loads(raw or "{}")
+        except ValueError:
+            return raw
+
+    async def _streamed(self, client, url, body, headers, on_text) -> LLMResponse:
+        text, slots, in_think = "", {}, False
+        async with client.stream("POST", url, json=body, headers=headers) as r:
+            if r.status_code >= 400:
+                self._raise_for_status(r.status_code, (await r.aread()).decode(errors="replace"))
+            async for line in r.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    choices = json.loads(data).get("choices") or []
+                except ValueError:
+                    continue
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or {}
+                piece = delta.get("content") or ""
+                if piece:
+                    text += piece
+                    # reasoning models wrap private thoughts in <think>...</think>: never speak or show those
+                    in_think = text.rfind("<think>") > text.rfind("</think>")
+                    if on_text and not in_think and "<think>" not in piece and "</think>" not in piece:
+                        on_text(piece)
+                for tc in delta.get("tool_calls") or []:
+                    slot = slots.setdefault(tc.get("index", 0), {"id": "", "name": "", "args": ""})
+                    fn = tc.get("function") or {}
+                    slot["id"] = tc.get("id") or slot["id"]
+                    slot["name"] += fn.get("name") or ""
+                    args = fn.get("arguments")
+                    slot["args"] += args if isinstance(args, str) else (json.dumps(args) if args else "")
+        calls = [ToolCall(s["id"] or f"call_{i}", s["name"], self._args(s["args"])) for i, s in sorted(slots.items()) if s["name"]]
+        return LLMResponse(text=_strip_think(text), tool_calls=calls, provider=self.name, model=self.model)

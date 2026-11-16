@@ -118,7 +118,7 @@ def test_openai_compatible_provider_round_trip():
         return httpx.Response(200, json={"choices": [{"message": {"content": None, "tool_calls": [
             {"id": "c1", "type": "function", "function": {"name": "system_stats", "arguments": "{}"}}]}}]})
 
-    p = OpenAICompatProvider("http://local/v1", "llama3", "k", transport=httpx.MockTransport(handler))
+    p = OpenAICompatProvider("http://local/v1", "llama3", "k", transport=httpx.MockTransport(handler), stream=False)
     msgs = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "", "tool_calls": [ToolCall("c0", "x", {"a": 1})]},
             {"role": "tool", "results": [{"id": "c0", "name": "x", "content": "{}", "is_error": False}]}]
     resp = run(p.complete("sys", msgs, [{"name": "system_stats", "description": "d", "input_schema": {"type": "object", "properties": {}}}]))

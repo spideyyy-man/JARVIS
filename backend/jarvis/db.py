@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS notifications (id TEXT PRIMARY KEY, level TEXT, title
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
 """
 
-JSON_COLUMNS = {"meta", "plan", "evaluation", "data", "args", "origin", "schedule", "steps", "context", "log"}
+JSON_COLUMNS = {"trace", "meta", "plan", "evaluation", "data", "args", "origin", "schedule", "steps", "context", "log"}
 
 
 def new_id(prefix: str = "") -> str:
@@ -46,7 +46,7 @@ class Database:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(SCHEMA)
-        for table, column, ddl in [("dev_tasks", "reminded", "INTEGER DEFAULT 0")]:  # additive migrations
+        for table, column, ddl in [("dev_tasks", "reminded", "INTEGER DEFAULT 0"), ("tasks", "trace", "TEXT DEFAULT '[]'")]:  # additive migrations
             if column not in {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})")}:
                 self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 

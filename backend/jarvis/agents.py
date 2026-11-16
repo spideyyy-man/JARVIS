@@ -6,12 +6,14 @@ persisted in `agent_messages`, and share state through the `tasks` table."""
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from .db import new_id
 from .llm.base import OnText
+from .robust import LoopGuard, compact_history, repair_response, select_tools
 from .tools.registry import Tool, ToolContext, ToolRegistry
 from .tools.research import verify_citations
 
@@ -43,13 +45,14 @@ AGENTS: dict[str, AgentSpec] = {a.name: a for a in [
               "First decide what the user wants: a QUESTION you can answer directly, or an ACTION/investigation that needs tools. "
               "Answer simple conversational questions yourself. For anything that needs the computer, code, documents, the web or "
               "schedules, call `delegate` with a self-contained task description for the right specialist. Independent subtasks can "
-              "be delegated in parallel; dependent ones in sequence. For multi-step goals, call `create_plan` first.\n"
+              "be delegated in parallel; dependent ones in sequence. For multi-step goals, call `create_plan` first, then work through it "
+              "one step at a time, calling `update_plan` as each step starts and finishes, until every step is done or you are blocked.\n"
               "Specialists: research (web research, GitHub evaluation), coding (repositories, git, tests, code edits), "
               "computer (files, folders, applications, clipboard, screen reading, mouse/keyboard, system settings, browser automation), knowledge (the user's indexed documents and notes, past conversations), "
               "automation (scheduled/conditional workflows), monitoring (CPU, memory, disk, processes).\n"
               "You can create pictures yourself with `generate_image` (the user's local image model).\n"
               "After delegation, check the result actually answers the request before replying; if it does not, try another route or say so.",
-              ["delegate", "create_plan", "generate_image", "remember", "recall", "conversation_search", "daily_briefing", "daily_summary", "list_dev_tasks", "add_dev_task", "update_dev_task"]),
+              ["delegate", "create_plan", "update_plan", "generate_image", "remember", "recall", "conversation_search", "daily_briefing", "daily_summary", "list_dev_tasks", "add_dev_task", "update_dev_task"]),
     AgentSpec("research", "Research Agent", "Web research, technology comparison, GitHub repository evaluation, sourced reports",
               "You are JARVIS's research agent. Search, read the most relevant pages, then write a structured answer. Every factual claim "
               "from the web must cite a URL that you actually retrieved in this task (check with list_sources). If search is unavailable, "
@@ -82,6 +85,16 @@ AGENTS: dict[str, AgentSpec] = {a.name: a for a in [
               "You are JARVIS's monitoring agent. Report measured numbers, name the heaviest processes, and give a short assessment.",
               ["system_stats", "list_processes", "disk_usage", "metrics_history"]),
 ]}
+
+
+# Tools every (non-offline) model always sees for an agent, whatever the request looks like.
+ALWAYS_SHOWN: dict[str, set[str]] = {
+    "orchestrator": {"delegate", "create_plan", "update_plan"},
+    "computer": {"list_dir", "search_files", "read_file", "screen_read"},
+    "coding": {"repo_overview", "read_file", "search_code"},
+    "research": {"web_search", "fetch_url"},
+    "knowledge": {"kb_search"},
+}
 
 
 @dataclass
@@ -119,8 +132,9 @@ class AgentRuntime:
         app.bus.emit("agent.status", agent=agent, status="running", task_id=task_id, title=task[:120])
 
         tools = app.tools.subset(spec.tools)
-        specs = [t.spec() for t in tools]
         allowed = {t.name for t in tools}
+        schemas = {t.name: t.schema for t in tools}
+        guard, used_names, trace = LoopGuard(), set(), []
         system = f"{spec.prompt}\n{COMMON_RULES}\n\nCurrent time: {time.strftime('%A %Y-%m-%d %H:%M')}. Home: {app.settings.allowed_roots[0]}." + (f"\n\n{context_note}" if context_note else "")
         messages = [*(history or []), {"role": "user", "content": task}]
         ctx = ToolContext(app, agent=agent, actor=actor, task_id=task_id, conversation_id=conversation_id)
@@ -129,7 +143,14 @@ class AgentRuntime:
         try:
             for step in range(app.settings.max_agent_steps):
                 result.steps = step + 1
-                resp = await app.llm.complete(system, messages, specs, on_text, {"agent": agent})
+                weak = app.llm.current().name != "offline"  # the rule engine needs to see every tool; real models get a shortlist
+                shown = select_tools(task, tools, app.embedder, app.settings.max_tools, ALWAYS_SHOWN.get(agent, set()) | used_names) if weak else tools
+                if weak and app.llm.current().name == "openai_compat":
+                    compact_history(messages)
+                resp = await app.llm.complete(system, messages, [t.spec() for t in shown], on_text, {"agent": agent})
+                resp, fixes = repair_response(resp, schemas)
+                if fixes:
+                    trace.append({"step": step + 1, "repaired": fixes})
                 result.provider = resp.provider
                 messages.append(resp.as_message())
                 if not resp.tool_calls:
@@ -139,16 +160,31 @@ class AgentRuntime:
                     on_text("\n\n")
                 app.bus.set_state("executing", ", ".join(c.name for c in resp.tool_calls))
 
+                verdicts = {c.id: guard.check(c) for c in resp.tool_calls}
+                if "stop" in verdicts.values():
+                    result.text = ("I stopped because I was repeating the same step without making progress. "
+                                   + (resp.text or "Here is what I had so far: " + next((m.get("content") for m in reversed(messages[:-1]) if m["role"] == "assistant" and m.get("content")), "nothing conclusive.")))
+                    result.errors.append("loop detected: identical tool call repeated")
+                    status = "incomplete"
+                    break
+
                 async def execute(call):
                     if call.name not in allowed:  # the model may only use this agent's tools
                         return call, None
+                    if verdicts[call.id] == "warn":
+                        from .tools.registry import ToolResult
+
+                        return call, ToolResult(False, error="You have already made this exact call several times. Use the result you already have, or try a different approach.")
+                    used_names.add(call.name)
+                    trace.append({"step": step + 1, "tool": call.name, "args": call.args})
                     return call, await app.executor.call(call.name, call.args, ctx)
 
                 outcomes = await asyncio.gather(*(execute(c) for c in resp.tool_calls))
                 tool_results = []
                 for call, res in outcomes:
                     if res is None:
-                        tool_results.append({"id": call.id, "name": call.name, "content": f'{{"error": "Tool {call.name} is not available to the {agent} agent"}}', "is_error": True})
+                        tool_results.append({"id": call.id, "name": call.name, "is_error": True,
+                                             "content": json.dumps({"error": f"There is no tool named '{call.name}' for the {agent} agent. Available tools: {', '.join(sorted(allowed))}"})})
                         result.errors.append(f"{call.name}: not permitted for {agent}")
                         continue
                     if res.pending:
@@ -176,7 +212,7 @@ class AgentRuntime:
         finally:
             self.active.pop(task_id, None)
             evaluation = self.evaluate(agent, task_id, result)
-            app.db.update("tasks", task_id, status=status, result=result.text[:8000], evaluation=evaluation, updated=time.time())
+            app.db.update("tasks", task_id, status=status, result=result.text[:8000], evaluation=evaluation, trace=trace[:200], updated=time.time())
             self._post(task_id, agent, sender, "error" if status == "failed" else "result", result.text,
                        {"tools": result.tools_used, "pending_approvals": result.pending_approvals, "errors": result.errors, "evaluation": evaluation})
             app.bus.emit("agent.status", agent=agent, status=status, task_id=task_id)
@@ -220,6 +256,23 @@ def register(reg: ToolRegistry, app: "Jarvis") -> None:
         app.bus.emit("plan.created", task_id=ctx.task_id, title=title, plan=plan)
         return {"title": title, "steps": plan}
 
+    def update_plan(ctx: ToolContext, step: int, status: str, note: str = "") -> dict:
+        task = app.db.one("SELECT id, parent_id, plan FROM tasks WHERE id=?", (ctx.task_id or "",))
+        while task and not task["plan"] and task["parent_id"]:  # the plan lives on the root task
+            task = app.db.one("SELECT id, parent_id, plan FROM tasks WHERE id=?", (task["parent_id"],))
+        if not task or not task["plan"]:
+            raise RuntimeError("There is no plan for this task yet; call create_plan first")
+        plan = task["plan"]
+        if not 1 <= step <= len(plan):
+            raise ValueError(f"The plan has steps 1..{len(plan)}")
+        plan[step - 1].update(status=status, **({"note": note} if note else {}))
+        app.db.update("tasks", task["id"], plan=plan)
+        app.bus.emit("plan.created", task_id=task["id"], title="", plan=plan)
+        remaining = [p["n"] for p in plan if p["status"] not in ("done", "skipped")]
+        return {"step": step, "status": status, "remaining_steps": remaining, "all_done": not remaining}
+
+    reg.register(Tool("update_plan", "Mark a plan step as in_progress, done, failed or skipped as you work through the plan.",
+                      {"step": {"type": "integer"}, "status": {"type": "string", "enum": ["in_progress", "done", "failed", "skipped"]}, "note": S}, update_plan, required=["step", "status"]))
     reg.register(Tool("delegate", "Hand a self-contained task to a specialist agent and get its result.",
                       {"agent": {"type": "string", "enum": [a for a in AGENTS if a != "orchestrator"]}, "task": {"type": "string", "description": "Everything the specialist needs; it cannot see the conversation"}},
                       delegate, required=["agent", "task"], timeout=900))

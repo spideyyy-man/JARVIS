@@ -36,6 +36,9 @@ class Settings:
     openai_base_url: str = ""
     openai_model: str = ""
     max_agent_steps: int = 12
+    max_tools: int = 12  # tool definitions shown to a (non-offline) model per step; 0 = all
+    llm_timeout: float = 300.0  # seconds per model call before failing over
+    openai_stream: bool = True
     # Files JARVIS may see at all. Reads outside these roots are refused.
     allowed_roots: list[Path] = field(default_factory=list)
     # Research
@@ -98,6 +101,9 @@ def load_settings(env_file: Path | None = None) -> Settings:
         openai_base_url=env("JARVIS_OPENAI_BASE_URL", ""),
         openai_model=env("JARVIS_OPENAI_MODEL", ""),
         max_agent_steps=int(env("JARVIS_MAX_AGENT_STEPS", "12")),
+        max_tools=int(env("JARVIS_MAX_TOOLS", "12")),
+        llm_timeout=float(env("JARVIS_LLM_TIMEOUT", "300")),
+        openai_stream=env("JARVIS_OPENAI_STREAM", "1") != "0",
         allowed_roots=_paths(env("JARVIS_ALLOWED_ROOTS", str(Path.home()))),
         search_provider=env("JARVIS_SEARCH_PROVIDER", "duckduckgo"),
         stt_provider=env("JARVIS_STT_PROVIDER", "browser"),
