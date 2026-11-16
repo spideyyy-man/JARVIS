@@ -239,3 +239,69 @@ def test_desktop_launcher_pieces(jarvis, monkeypatch, tmp_path):
     finally:
         server.should_exit = True
         thread.join(timeout=10)
+
+
+@needs_gui
+def test_agent_completes_a_multi_step_desktop_task_with_task_approval(home, tmp_path):
+    """The whole agentic loop on a real display: see -> click -> type -> click -> wait -> report,
+    pausing for approval and resuming by itself. 'Approve for this task' means the second click does not ask."""
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+
+    from playwright.sync_api import sync_playwright
+
+    from conftest import ScriptedLLM, make
+
+    llm = ScriptedLLM([
+        ("", [("screen_read", {})]),
+        ("", [("click_text", {"text": "Your name"})]),                      # needs approval -> turn ends
+        ("I need your approval to click the name field.", []),
+        ("", [("type_text", {"text": "Ada Lovelace"})]),                    # continuation 1: different tool -> asks again
+        ("Waiting for approval to type.", []),
+        ("", [("click_text", {"text": "Save form"})]),                      # continuation 2: click_text was approved for the task -> runs
+        ("", [("wait_for_text", {"text": "Saved for Ada", "timeout_s": 8})]),
+        ("The form is saved for Ada Lovelace.", []),
+    ])
+    llm.name = "openai_compat"
+    j = make(home, tmp_path, providers=[llm])
+    j.db.set_setting("fast_path", False)
+    enable(j, "screen_access", "desktop_control")
+    pool = ThreadPoolExecutor(1)
+    loop = asyncio.new_event_loop()
+    go = lambda coro: pool.submit(loop.run_until_complete, coro).result()  # noqa: E731  (one loop, so continuations survive between calls)
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=False, executable_path=CHROME, args=["--no-sandbox", "--window-position=0,0", "--window-size=1000,700"])
+        page = browser.new_page(no_viewport=True)
+        page.set_content("<body style='font:26px sans-serif;padding:50px'><h1>Signup</h1><label for=n>Your name</label><br><input id=n style='font-size:26px'><br><br>"
+                         "<button style='font-size:26px;padding:12px 28px' onclick=\"document.getElementById('o').textContent='Saved for '+document.getElementById('n').value\">Save form</button>"
+                         "<p id=o></p></body>")
+        page.wait_for_timeout(1200)
+
+        async def step1():
+            r = await j.chat("fill in the signup form with the name Ada Lovelace and save it", "c1")
+            assert len(r["pending_approvals"]) == 1
+            await j.executor.decide(r["pending_approvals"][0], True, scope="task")   # approve clicks for this task
+            await j.idle()
+
+        go(step1())
+        page.wait_for_timeout(300)
+        assert page.evaluate("document.activeElement.id") == "n"                     # the click focused the field
+
+        async def step2():
+            ap = j.db.one("SELECT * FROM approvals WHERE status='pending'")
+            assert ap["tool"] == "type_text" and "Ada Lovelace" in ap["preview"] and ap["origin"]["untrusted"] == ["screen_read"]
+            await j.executor.decide(ap["id"], True)
+            await j.idle()
+
+        go(step2())
+        page.wait_for_timeout(300)
+        assert page.input_value("#n") == "Ada Lovelace" and page.text_content("#o") == "Saved for Ada Lovelace"
+        browser.close()
+
+    msgs = j.db.query("SELECT role, content FROM messages WHERE conversation_id='c1' ORDER BY created")
+    assert msgs[-1]["content"] == "The form is saved for Ada Lovelace."
+    decisions = [r["decision"] for r in j.db.query("SELECT decision FROM audit_log WHERE tool='click_text' ORDER BY id")]
+    assert decisions == ["queued-for-approval", "task-grant-created", "approved", "task-grant"]
+    assert j.db.one("SELECT COUNT(*) AS n FROM approvals")["n"] == 2                   # only two prompts for four actions
+    loop.close()
