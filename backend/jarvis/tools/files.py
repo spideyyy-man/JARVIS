@@ -189,7 +189,44 @@ def _to_trash(ctx: ToolContext, p: Path, copy: bool = False) -> str:
         (shutil.copytree if p.is_dir() else shutil.copy2)(str(p), str(dest))
     else:
         shutil.move(str(p), str(dest))
+    index = ctx.app.db.get_setting("trash_index", {})
+    index[dest.name] = {"original": str(p), "at": time.time(), "kind": "backup" if copy else "deleted"}
+    ctx.app.db.set_setting("trash_index", dict(sorted(index.items())[-500:]))
     return str(dest)
+
+
+def list_trash(ctx: ToolContext) -> dict:
+    index = ctx.app.db.get_setting("trash_index", {})
+    items = [{"name": n, **meta} for n, meta in index.items() if (ctx.app.settings.trash_dir / n).exists()]
+    return {"items": sorted(items, key=lambda i: i["at"], reverse=True)[:100], "trash_folder": str(ctx.app.settings.trash_dir)}
+
+
+def _trash_entry(ctx: ToolContext, name: str) -> tuple[str, dict]:
+    items = list_trash(ctx)["items"]
+    if name:
+        hit = next((i for i in items if i["name"] == name or i["name"].endswith("_" + name) or Path(i["original"]).name == name), None)
+    else:  # default: the most recent real deletion
+        hit = next((i for i in items if i["kind"] == "deleted"), None)
+    if not hit:
+        raise FileNotFoundError("Nothing matching that is in JARVIS's trash")
+    return hit["name"], hit
+
+
+def restore_from_trash(ctx: ToolContext, name: str = "") -> dict:
+    """Undo: put a deleted file back, or roll a file back to the version saved before an edit."""
+    trash_name, meta = _trash_entry(ctx, name)
+    original = ctx.app.guard.resolve(meta["original"], write=True)
+    replaced = None
+    if original.exists():
+        if meta["kind"] != "backup":
+            raise FileExistsError(f"{original} exists again; move it away first")
+        replaced = _to_trash(ctx, original)  # keep the current version recoverable too
+    original.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(ctx.app.settings.trash_dir / trash_name), str(original))
+    index = ctx.app.db.get_setting("trash_index", {})
+    index.pop(trash_name, None)
+    ctx.app.db.set_setting("trash_index", index)
+    return {"restored": str(original), "was": meta["kind"], "current_version_saved_as": replaced}
 
 
 def delete_path(ctx: ToolContext, path: str) -> dict:
@@ -262,7 +299,12 @@ def register(reg: ToolRegistry, app) -> None:
     reg.register(Tool("recent_files", "Files modified in the last N days under a folder.", {"root": S, "days": {"type": "integer"}, "limit": {"type": "integer"}}, recent_files, timeout=40))
     reg.register(Tool("organize_folder_plan", "Dry run: show how a folder's loose files would be sorted into category subfolders. Changes nothing.", {"path": S}, organize_folder_plan, required=["path"]))
 
+    reg.register(Tool("list_trash", "Files JARVIS deleted or backed up before editing; these can be restored.", {}, list_trash))
+
     C = Level.CONFIRM
+    reg.register(Tool("restore_from_trash", "Undo a delete, or roll a file back to its version from before an edit. With no name, restores the most recent deletion.",
+                      {"name": S}, restore_from_trash, level=C, trust_eligible=True,
+                      preview=lambda a: (lambda n, m: f"Restore {m['original']} ({'undo delete' if m['kind'] == 'deleted' else 'roll back to the version before the last edit'})")(*_trash_entry(ToolContext(app), a.get("name", "")))))
     reg.register(Tool("organize_folder", "Sort a folder's loose files into category subfolders (Images, Documents, ...).", {"path": S}, organize_folder, required=["path"], level=C, preview=_organize_preview(app)))
     reg.register(Tool("write_file", "Create a file, or replace one with overwrite=true (the previous version is backed up).", {"path": S, "content": S, "overwrite": {"type": "boolean"}}, write_file, required=["path", "content"], level=C,
                       preview=lambda a: f"{'Overwrite' if a.get('overwrite') else 'Create'} file {g.resolve(a['path'], write=True)} ({len(a['content'])} chars)\n---\n{a['content'][:600]}"))

@@ -227,6 +227,10 @@ class Jarvis:
         meta = {"task_id": result.task_id, "provider": result.provider, "tools": result.tools_used, "pending_approvals": result.pending_approvals,
                 "errors": result.errors, "agents": sorted({t["agent"] for t in result.tools_used} | {"orchestrator"})}
         failed = bool(result.errors) and not result.tools_used
+        if actor == "chat":
+            learned = self.auto_memory(text)
+            if learned:
+                meta["learned"] = learned
         return self._finish(conversation_id, result.text, meta, state="error" if failed else "idle")
 
     def _finish(self, conversation_id: str, text: str, meta: dict, state: str = "idle") -> dict:
@@ -234,6 +238,31 @@ class Jarvis:
         self.bus.emit("chat.done", conversation_id=conversation_id, message=msg)
         self.bus.set_state(state)
         return {"conversation_id": conversation_id, "message_id": msg["id"], "text": text, **meta}
+
+    _FACT_PATTERNS = [re.compile(p, re.I) for p in (
+        r"\bmy name is\s+[A-Z][\w\-]+", r"\bcall me\s+\w+", r"\bI(?:'m| am) (?:a|an)\s+\w+", r"\bI (?:work|am working) (?:at|on|for|as|in)\s+\w+",
+        r"\bI (?:really |usually |always |never |mostly )?(?:prefer|like|love|hate|dislike|use|avoid|want you to)\s+\w+", r"\bI (?:always|never|usually)\s+\w+",
+        r"\bmy (?:\w+ ){0,2}(?:is|are)\s+\w+", r"\bI live in\s+\w+", r"\bdon'?t (?:ever )?(?:call|use|send|show)\b")]
+
+    def auto_memory(self, text: str) -> list[str]:
+        """Learn durable facts the user states in passing ("I prefer dark mode", "my manager is Priya").
+        Pattern-based and conservative: statements only, never questions or commands, and no duplicates."""
+        if not self.db.get_setting("auto_memory", True):
+            return []
+        saved = []
+        for sentence in re.split(r"(?<=[.!?])\s+|\n+", text):
+            s = sentence.strip()
+            if not (12 <= len(s) <= 220) or s.endswith("?") or re.match(r"^(hey\s+)?(jarvis[,\s]+)?(remember|remind|find|open|search|show|what|how|why|can|could|please|create|make|delete|run)\b", s, re.I):
+                continue
+            if not any(p.search(s) for p in self._FACT_PATTERNS) or re.search(r"\bmy (computer|screen|clipboard|downloads?|documents?|desktop|project|repo|code|files?|folder|inbox|email|calendar)\b", s, re.I):
+                continue
+            s = re.sub(r"^(by the way|btw|also|oh|and|fyi|just so you know)[,:\s]+", "", s, flags=re.I)
+            existing = self.memory.recall(s, k=1, min_sim=0.6)
+            if existing:
+                continue
+            self.memory.remember(f"The user said: \"{s.rstrip('.!')}\"", "auto")
+            saved.append(s)
+        return saved
 
     # Requests the rule engine recognises but a model answers better (they need synthesis, not a lookup).
     NOT_FAST = {"search_files", "kb_search", "web_search", "fetch_url", "repo_overview", "conversation_search", "create_plan", "recall", "kb_ingest"}

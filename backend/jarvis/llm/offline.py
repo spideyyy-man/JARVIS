@@ -88,7 +88,8 @@ def _search_files(text: str, m: re.Match, env: Env):
 
 def _interval(text: str) -> dict | None:
     low = text.lower()
-    m = re.search(r"every\s+(\d+)?\s*(second|minute|hour|day)s?", low)
+    timed = re.search(r"(?:every day|daily|each day|every morning|every evening)\s+at\s+\d", low)
+    m = None if timed else re.search(r"every\s+(\d+)?\s*(second|minute|hour|day)s?", low)
     if m:
         return {"type": "interval", "seconds": int(m.group(1) or 1) * {"second": 1, "minute": 60, "hour": 3600, "day": 86400}[m.group(2)]}
     m = re.search(r"(?:every day|daily|each day|every morning|every evening)(?:\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?)?", low)
@@ -176,6 +177,13 @@ RULES: list[Rule] = [
     R("computer", r"\b(read|what'?s on|summari[sz]e) (the |this )?(current )?(web ?page|page in the browser|browser page)\b", lambda t, m, e: ("browser_read", {})),
     R("computer", r"\bclose (the )?browser\b", lambda t, m, e: ("browser_close", {})),
     # orchestrator-level
+    R("orchestrator", r"\b(?:save|store|keep)\s+(?:that|this|it)\s+as\s+(?:a\s+)?(?:workflow|automation|routine|skill)(?:\s+(?:called|named)\s+[\"']?(.+?)[\"']?)?\s*[.!]?$",
+      lambda t, m, e: ("save_as_workflow", {"name": (m.group(1) or "Saved routine").strip()}), whole=True),
+    R("orchestrator", r"^\s*(?:jarvis[,\s]+)?(?:please\s+)?(?:do|run|repeat)\s+(?:that|this|it)(?:\s+again)?\s+(every\b.+|daily\b.*|each day\b.*)$",
+      lambda t, m, e: ("save_as_workflow", {"name": "Repeat: " + m.group(1).strip(" .")[:40], "schedule": s}) if (s := _interval(t)) else None, whole=True),
+    R("computer", r"\b(what'?s|what is|show|list)\b.*\b(trash|recycle bin|deleted files)\b", lambda t, m, e: ("list_trash", {})),
+    R("computer", r"^\s*(?:jarvis[,\s]+)?(?:please\s+)?(?:undo(?:\s+(?:that|it|the (?:last )?delet\w+))?|restore (?:the )?(?:last )?(?:deleted )?(?:file|one)|bring (?:it|that) back)\s*[.!]?$",
+      lambda t, m, e: ("restore_from_trash", {}), whole=True),
     R("orchestrator", r"\b(brief me|briefing|what'?s on (today|my plate)|morning report)\b", lambda t, m, e: ("daily_briefing", {})),
     R("orchestrator", r"\bremind me\s+in\s+(\d+)\s*(minute|min|hour|hr)s?\s+(?:to|about|that)\s+(.+)$|\bremind me\s+(?:to|about)\s+(.+?)\s+in\s+(\d+)\s*(minute|min|hour|hr)s?\s*[.!]?$",
       lambda t, m, e: ("add_dev_task", {"title": (m.group(3) or m.group(4)).strip(" ."), "due_in_minutes": int(m.group(1) or m.group(5)) * (60 if (m.group(2) or m.group(6)).startswith("h") else 1)}), whole=True),
@@ -575,6 +583,9 @@ def _r_page(d, q, t):
 
 
 RENDERERS: dict[str, Callable] = {
+    "list_trash": lambda d, q, t: ("JARVIS's trash holds:\n" + "\n".join(f"- {Path(i['original']).name} ({'deleted' if i['kind'] == 'deleted' else 'version before an edit'}, from `{i['original']}`)" for i in d["items"][:15]) + "\n\nSay \"undo that\" to restore the most recent deletion.") if d["items"] else "The trash is empty.",
+    "restore_from_trash": lambda d, q, t: f"Restored `{d['restored']}`.",
+    "save_as_workflow": lambda d, q, t: f"Saved as workflow \"{d['name']}\" ({' -> '.join(d['steps'])})" + (f", schedule {d['schedule']}." if d["schedule"].get("type") != "manual" else ". Run it from Automation, or say \"run workflow " + d["name"] + "\"."),
     "clipboard_read": lambda d, q, t: (f"Your clipboard holds {d['chars']} characters:\n```\n{d['text'][:1500]}\n```" if d["text"].strip() else "Your clipboard is empty (or holds something that is not text)."),
     "clipboard_write": lambda d, q, t: f"Copied {d['copied_chars']} characters to the clipboard.",
     "screen_read": lambda d, q, t: (f"Here is the text on your screen" + (f" (active window: {d['active_window']})" if d.get("active_window") else "") + f":\n```\n{d['text'][:1800]}\n```" if d["text"].strip() else "I captured the screen but could not recognise any text on it."),

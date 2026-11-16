@@ -203,9 +203,14 @@ def select_tools(task: str, tools: list, embedder, limit: int, always: set[str])
     stays *permitted* - this only narrows what is advertised."""
     if limit <= 0 or len(tools) <= limit:
         return tools
-    vecs = embedder.embed([task] + [f"{t.name.replace('_', ' ')}. {t.description}" for t in tools])
-    sims = vecs[1:] @ vecs[0]
-    ranked = [tools[i] for i in np.argsort(-sims)]
+    from .knowledge import tokenize
+
+    docs = [re.sub(r"[_/()=,]", " ", f"{t.name}. {t.name}. {t.description}") for t in tools]  # split volume_up -> "volume up"
+    vecs = embedder.embed([task] + docs)
+    words = set(tokenize(task))
+    overlap = np.array([len(words & set(tokenize(d))) for d in docs], dtype=np.float32)
+    scores = vecs[1:] @ vecs[0] + 0.12 * np.minimum(overlap, 4)  # shared vocabulary is strong evidence for a tool
+    ranked = [tools[i] for i in np.argsort(-scores)]
     keep = [t for t in tools if t.name in always]
     for t in ranked:
         if len(keep) >= limit:

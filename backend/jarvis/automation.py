@@ -80,14 +80,20 @@ class AutomationEngine:
     def __init__(self, app: "Jarvis"):
         self.app = app
         self._running: set[str] = set()
+        self._watch: dict[str, dict] = {}
         self._tasks: set[asyncio.Task] = set()
         self._loop_task: asyncio.Task | None = None
 
     # -- definition ---------------------------------------------------------------
     def validate(self, schedule: dict, steps: list[dict]) -> None:
         kind = schedule.get("type")
-        if kind not in ("interval", "cron", "once", "manual"):
-            raise ValueError("schedule.type must be interval | cron | once | manual")
+        if kind not in ("interval", "cron", "once", "manual", "watch"):
+            raise ValueError("schedule.type must be interval | cron | once | manual | watch")
+        if kind == "watch":
+            folder = self.app.guard.resolve(schedule.get("path", ""))
+            if not folder.is_dir():
+                raise ValueError(f"watch path is not a folder: {folder}")
+            schedule["path"] = str(folder)
         if kind == "interval" and float(schedule.get("seconds", 0)) < 5:
             raise ValueError("interval must be at least 5 seconds")
         if kind == "cron" and not croniter.is_valid(schedule.get("expr", "")):
@@ -142,10 +148,10 @@ class AutomationEngine:
         return wf
 
     # -- execution -----------------------------------------------------------------
-    async def run(self, wf_id: str, trigger: str = "manual") -> dict:
+    async def run(self, wf_id: str, trigger: str = "manual", context: dict | None = None) -> dict:
         wf = self._get(wf_id)
         run = {"id": new_id("run_"), "workflow_id": wf_id, "status": "running", "trigger": trigger, "cursor": 0,
-               "context": {}, "log": [], "started": time.time(), "finished": None}
+               "context": dict(context or {}), "log": [], "started": time.time(), "finished": None}
         self.app.db.insert("workflow_runs", run)
         self.app.db.update("workflows", wf_id, last_run=run["started"])
         return await self._execute(wf, run)
@@ -262,6 +268,40 @@ class AutomationEngine:
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
             started.append(wf["id"])
+        return started + self._tick_watchers()
+
+    def _tick_watchers(self) -> list[str]:
+        """Event trigger: run a workflow once for each new file that appears in a watched folder.
+        A file must be seen with the same size on two consecutive ticks, so half-written downloads are not picked up."""
+        import fnmatch
+        from pathlib import Path
+
+        started = []
+        for wf in self.app.db.query("SELECT * FROM workflows WHERE enabled=1 AND json_extract(schedule,'$.type')='watch'"):
+            folder = Path(wf["schedule"]["path"])
+            state = self._watch.setdefault(wf["id"], {"known": None, "pending": {}})
+            try:
+                now = {p.name: p.stat().st_size for p in folder.iterdir() if p.is_file() and not p.name.startswith(".")
+                       and not p.name.endswith((".crdownload", ".part", ".tmp")) and fnmatch.fnmatch(p.name.lower(), wf["schedule"].get("pattern", "*").lower())}
+            except OSError:
+                continue
+            if state["known"] is None:  # first look: everything already there is not "new"
+                state["known"] = set(now)
+                continue
+            for name, size in now.items():
+                if name in state["known"]:
+                    continue
+                if state["pending"].get(name) == size:
+                    state["known"].add(name)
+                    state["pending"].pop(name, None)
+                    ctx = {"trigger": {"name": name, "path": str(folder / name), "folder": str(folder), "size": size}}
+                    task = asyncio.create_task(self.run(wf["id"], trigger="file", context=ctx))
+                    self._tasks.add(task)
+                    task.add_done_callback(self._tasks.discard)
+                    started.append(wf["id"])
+                else:
+                    state["pending"][name] = size
+            state["known"] &= set(now) | set()  # forget files that were removed, so they count as new if they return
         return started
 
     async def _guarded(self, wf_id: str) -> None:
@@ -350,8 +390,10 @@ def register(reg: ToolRegistry, app: "Jarvis") -> None:
         "id": S, "tool": S, "args": {"type": "object"}, "notify": S, "agent_prompt": S, "level": S,
         "when": {"type": "object", "properties": {"ref": S, "op": {"type": "string", "enum": list(OPS)}, "value": {}}, "required": ["ref"]},
         "retries": {"type": "integer", "minimum": 0, "maximum": 5}, "retry_delay": {"type": "number"}, "continue_on_error": {"type": "boolean"}}}
-    sched_schema = {"type": "object", "description": "{type:'interval',seconds:N} | {type:'cron',expr:'0 9 * * 1-5'} | {type:'once',at:<unix ts>} | {type:'manual'}",
-                    "properties": {"type": {"type": "string", "enum": ["interval", "cron", "once", "manual"]}, "seconds": {"type": "number"}, "expr": S, "at": {"type": "number"}}, "required": ["type"]}
+    sched_schema = {"type": "object", "description": "{type:'interval',seconds:N} | {type:'cron',expr:'0 9 * * 1-5'} | {type:'once',at:<unix ts>} | {type:'manual'} | "
+                                                     "{type:'watch',path:<folder>,pattern:'*.pdf'} (runs once per new file; steps can use {{trigger.path}} and {{trigger.name}})",
+                    "properties": {"type": {"type": "string", "enum": ["interval", "cron", "once", "manual", "watch"]}, "seconds": {"type": "number"}, "expr": S, "at": {"type": "number"},
+                                   "path": S, "pattern": S}, "required": ["type"]}
 
     def create_workflow(ctx: ToolContext, name: str, schedule: dict, steps: list, description: str = "") -> dict:
         wf = app.automation.create(name, schedule, steps, description)
@@ -377,6 +419,34 @@ def register(reg: ToolRegistry, app: "Jarvis") -> None:
                       "later steps can reference earlier results as {{step_id.path}} and be conditional via `when`.",
                       {"name": S, "description": S, "schedule": sched_schema, "steps": {"type": "array", "items": step_schema}},
                       create_workflow, required=["name", "schedule", "steps"], level=Level.CONFIRM, trust_eligible=True, preview=_preview))
+    INTERNAL = {"delegate", "create_plan", "update_plan", "save_as_workflow", "remember", "recall", "daily_briefing", "daily_summary", "create_workflow", "run_workflow"}
+
+    def _recorded_steps(ctx: ToolContext) -> list[dict]:
+        """The tool calls of the most recent earlier task in this conversation, in order."""
+        roots = app.db.query("SELECT id, trace FROM tasks WHERE conversation_id=? AND parent_id IS NULL ORDER BY created DESC", (ctx.conversation_id or "",))
+        current = ctx.task_id
+        parent = app.db.one("SELECT parent_id FROM tasks WHERE id=?", (current or "",))
+        skip = {current, (parent or {}).get("parent_id")}
+        for root in roots:
+            if root["id"] in skip:
+                continue
+            traces = [root["trace"]] + [t["trace"] for t in app.db.query("SELECT trace FROM tasks WHERE parent_id=? ORDER BY created", (root["id"],))]
+            calls = [c for tr in traces for c in (tr or []) if c.get("tool") and c["tool"] not in INTERNAL]
+            if calls:
+                return [{"id": f"s{i}", "tool": c["tool"], "args": c.get("args", {}), "retries": 1} for i, c in enumerate(calls, 1)]
+        raise RuntimeError("There is no earlier task in this conversation with steps I can turn into a workflow")
+
+    def save_as_workflow(ctx: ToolContext, name: str, schedule: dict | None = None) -> dict:
+        wf = app.automation.create(name, schedule or {"type": "manual"}, _recorded_steps(ctx), "Saved from a conversation")
+        return {"id": wf["id"], "name": name, "steps": [s["tool"] for s in wf["steps"]], "schedule": wf["schedule"], "next_run": wf["next_run"]}
+
+    def _save_preview(a: dict) -> str:
+        steps = _recorded_steps(ToolContext(app, conversation_id=a.get("_conversation")))
+        return f"Save workflow '{a['name']}' ({a.get('schedule') or 'manual'}): " + " -> ".join(s["tool"] for s in steps)
+
+    reg.register(Tool("save_as_workflow", "Turn what was just done in this conversation into a reusable workflow, optionally on a schedule ('do that every morning').",
+                      {"name": S, "schedule": sched_schema}, save_as_workflow, required=["name"], level=Level.CONFIRM, trust_eligible=True,
+                      preview=lambda a: f"Save the steps of the previous task as workflow '{a['name']}'" + (f" on schedule {a['schedule']}" if a.get("schedule") else " (manual)")))
     reg.register(Tool("daily_summary", "Factual summary of today's activity: conversations, executed actions, approved changes, tasks, commits.", {}, daily_summary))
     reg.register(Tool("daily_briefing", "Spoken-style briefing: time, open/overdue/due-today tasks, pending approvals, next workflow, system health.", {}, lambda ctx: {"text": briefing_text(app)}))
     reg.register(Tool("metrics_history", "Rolling CPU/memory statistics collected by the background monitor.", {}, lambda ctx: app.monitor.summary()))

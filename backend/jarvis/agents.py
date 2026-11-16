@@ -53,7 +53,7 @@ AGENTS: dict[str, AgentSpec] = {a.name: a for a in [
               "automation (scheduled/conditional workflows), monitoring (CPU, memory, disk, processes).\n"
               "You can create pictures yourself with `generate_image` (the user's local image model).\n"
               "After delegation, check the result actually answers the request before replying; if it does not, try another route or say so.",
-              ["delegate", "create_plan", "update_plan", "generate_image", "remember", "recall", "conversation_search", "daily_briefing", "daily_summary", "list_dev_tasks", "add_dev_task", "update_dev_task"]),
+              ["delegate", "create_plan", "update_plan", "save_as_workflow", "generate_image", "remember", "recall", "conversation_search", "daily_briefing", "daily_summary", "list_dev_tasks", "add_dev_task", "update_dev_task"]),
     AgentSpec("research", "Research Agent", "Web research, technology comparison, GitHub repository evaluation, sourced reports",
               "You are JARVIS's research agent. Search, read the most relevant pages, then write a structured answer. Every factual claim "
               "from the web must cite a URL that you actually retrieved in this task (check with list_sources). If search is unavailable, "
@@ -71,7 +71,7 @@ AGENTS: dict[str, AgentSpec] = {a.name: a for a in [
               "To operate an application: screen_read to see it, click_text to press what is labelled, type_text / press_keys to enter input, then "
               "screen_read again to confirm the result - one step at a time. For websites prefer browser_open / browser_click / browser_fill.",
               ["list_dir", "read_file", "file_info", "search_files", "recent_files", "organize_folder_plan", "organize_folder", "write_file", "create_directory",
-               "move_path", "copy_path", "delete_path", "open_application", "list_installed_apps", "dev_environment", "disk_usage",
+               "move_path", "copy_path", "delete_path", "list_trash", "restore_from_trash", "open_application", "list_installed_apps", "dev_environment", "disk_usage",
                "clipboard_read", "clipboard_write", "active_window", "system_control", "screen_read", "click_text", "mouse_click", "type_text", "press_keys",
                "browser_open", "browser_read", "browser_click", "browser_fill", "browser_close"]),
     AgentSpec("knowledge", "Knowledge Agent", "Indexes documents and answers from them with citations; searches notes and past conversations",

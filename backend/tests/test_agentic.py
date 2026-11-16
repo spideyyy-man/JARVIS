@@ -153,4 +153,82 @@ def test_plan_is_tracked_step_by_step(home, tmp_path):
     r = run(j.chat("tidy up: check the disk and report"))
     plan = j.db.one("SELECT plan FROM tasks WHERE id=?", (r["task_id"],))["plan"]
     assert [(p["title"], p["status"]) for p in plan] == [("Check disk", "done"), ("Report", "done")] and plan[0]["note"] == "disk ok"
-    assert '"all_done": true' in llm.seen[6]["messages"][-1]["results"][1]["content"]
+    assert any('"all_done": true' in r["content"] for r in llm.seen[6]["messages"][-1]["results"])
+
+
+def test_undo_delete_and_roll_back_an_edit(jarvis, home):
+    victim = home / "Downloads" / "notes.txt"
+    victim.write_text("original")
+
+    async def scenario():
+        r = await jarvis.chat(f"delete {victim}", "c1")
+        await jarvis.chat("approve", "c1")
+        assert not victim.exists()
+        listing = await jarvis.chat("what's in the trash", "c1")
+        assert "notes.txt" in listing["text"]
+        await jarvis.chat("undo that", "c1")
+        await jarvis.chat("approve", "c1")
+        assert victim.read_text() == "original"
+        # roll back an edit: the pre-edit version is restored and the edited one is kept recoverable
+        ctx = ToolContext(jarvis, agent="computer", conversation_id="c2")
+        e = await jarvis.executor.call("replace_in_file", {"path": str(victim), "old": "original", "new": "changed"}, ctx)
+        await jarvis.executor.decide(e.approval_id, True)
+        assert victim.read_text() == "changed"
+        backup = next(i for i in jarvis.tools.get("list_trash").handler(ctx)["items"] if i["kind"] == "backup")
+        u = await jarvis.executor.call("restore_from_trash", {"name": backup["name"]}, ctx)
+        out = await jarvis.executor.decide(u.approval_id, True)
+        assert victim.read_text() == "original" and "current_version_saved_as" in out["result"]
+
+    run(scenario())
+
+
+def test_file_arrival_triggers_a_workflow_once_per_new_stable_file(jarvis, home):
+    import asyncio
+
+    inbox = home / "Inbox"
+    inbox.mkdir()
+    (inbox / "old.pdf").write_text("already here")
+    wf = jarvis.automation.create("on new pdf", {"type": "watch", "path": str(inbox), "pattern": "*.pdf"}, [{"id": "n", "notify": "New file {{trigger.name}} in {{trigger.folder}}"}])
+
+    async def scenario():
+        assert jarvis.automation.tick() == []            # first look only records what exists
+        (inbox / "report.pdf").write_text("data")
+        (inbox / "ignore.txt").write_text("x")
+        (inbox / "partial.pdf.crdownload").write_text("x")
+        assert jarvis.automation.tick() == []            # seen once: wait for it to stop changing
+        assert jarvis.automation.tick() == [wf["id"]]    # stable -> fires
+        assert jarvis.automation.tick() == []            # and only once
+        await asyncio.gather(*jarvis.automation._tasks)
+
+    run(scenario())
+    runs = jarvis.automation.runs(wf["id"])
+    assert len(runs) == 1 and runs[0]["trigger"] == "file" and runs[0]["status"] == "succeeded"
+    assert jarvis.db.one("SELECT body FROM notifications WHERE title='on new pdf'")["body"] == f"New file report.pdf in {inbox}"
+    with pytest.raises(Exception):
+        jarvis.automation.create("bad", {"type": "watch", "path": "/etc"}, [{"notify": "x"}])
+
+
+def test_save_what_was_just_done_as_a_scheduled_workflow(jarvis, home):
+    async def scenario():
+        await jarvis.chat("how is my computer performing?", "c1")
+        r = await jarvis.chat("do that every day at 9am", "c1")
+        assert r["pending_approvals"], r["text"]
+        await jarvis.chat("approve", "c1")
+
+    run(scenario())
+    wf = jarvis.automation.list()[0]
+    assert [s["tool"] for s in wf["steps"]] == ["system_stats"] and wf["schedule"] == {"type": "cron", "expr": "0 9 * * *"}
+    assert run(jarvis.automation.run(wf["id"]))["status"] == "succeeded"
+
+
+def test_auto_memory_learns_statements_not_questions_or_commands(jarvis):
+    run(jarvis.chat("By the way, I prefer answers in bullet points. My manager is Priya."))
+    run(jarvis.chat("what is my computer doing?"))
+    run(jarvis.chat("find my budget spreadsheet"))
+    run(jarvis.chat("I prefer answers in bullet points."))  # duplicate
+    mems = [m["content"] for m in jarvis.memory.all()]
+    assert len(mems) == 2 and any("bullet points" in m for m in mems) and any("Priya" in m for m in mems)
+    assert "Priya" in run(jarvis.chat("what do you remember about my manager"))["text"]
+    jarvis.db.set_setting("auto_memory", False)
+    run(jarvis.chat("I always work late on Fridays."))
+    assert len(jarvis.memory.all()) == 2
