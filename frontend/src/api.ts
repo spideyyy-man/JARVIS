@@ -67,7 +67,7 @@ export interface AgentInfo {
 }
 export interface Approval {
   id: string; tool: string; args: Record<string, unknown>; preview: string; agent: string; task_id: string | null;
-  conversation_id: string | null; origin: Record<string, unknown>; status: "pending" | "approved" | "executed" | "failed" | "denied";
+  conversation_id: string | null; origin: { untrusted?: string[]; grantable?: boolean; [k: string]: unknown }; status: "pending" | "approved" | "executed" | "failed" | "denied";
   result: string; created: number; decided: number | null;
 }
 export interface AuditEntry { id: number; ts: number; actor: string; tool: string; level: string; decision: string; args: unknown; outcome: string; detail: string }
@@ -77,6 +77,8 @@ export interface Settings {
   embedder: string; search_provider: string; speech: { stt: string; tts: string }; image_provider: string;
   levels: { read: number; confirm: number; trust_eligible: string[] };
   capabilities: Record<string, { enabled: boolean; description: string }>;
+  behavior: { fast_path: boolean; auto_continue: boolean; auto_memory: boolean };
+  agent_mode: { configured: string; active: string };
   proactive: { briefing_time: string };
 }
 export interface Schedule { type: "interval" | "cron" | "once" | "manual"; seconds?: number; expr?: string; at?: number }
@@ -124,6 +126,10 @@ export interface KbResult { chunk_id: string; title: string; source: string; loc
 export interface MemoryItem { id: string; kind: string; content: string; created?: number }
 export interface ResearchTask { id: string; title: string; status: string; result: string; evaluation: Evaluation; created: number }
 export interface Source { id: string; task_id: string; url: string; title: string; kind: string; snippet: string; fetched: number }
+export interface DoctorResult { name: string; status: "ok" | "warn" | "fail"; detail: string; fix?: string }
+export interface Grant { id: string; conversation_id: string; tool: string; expires: number; created: number; title: string }
+export interface CalendarEvent { title: string; start: string; end: string; all_day: boolean; location: string; source: string; id?: string }
+export interface CalendarData { from: string; to: string; events: CalendarEvent[]; configured_calendars: number; problems?: string[] }
 export interface Report { name: string; size: number; modified: number }
 
 export class ApiError extends Error {
@@ -210,11 +216,15 @@ export const api = {
   readFile: (path: string) => req<FileContent>("GET", `/api/files/read${q({ path })}`),
   searchFiles: (p: { q?: string; root?: string; ext?: string; days?: number; text?: string }) => req<FileSearch>("GET", `/api/files/search${q(p)}`),
   approvals: (status: "pending" | "all") => req<Approval[]>("GET", `/api/approvals${q({ status })}`),
-  decide: (id: string, approve: boolean) => req<Approval>("POST", `/api/approvals/${enc(id)}/decide`, { approve }),
+  decide: (id: string, approve: boolean, scope: "once" | "task" = "once") => req<Approval>("POST", `/api/approvals/${enc(id)}/decide`, { approve, scope }),
+  grants: () => req<Grant[]>("GET", "/api/grants"),
+  revokeGrants: () => req<unknown>("DELETE", "/api/grants"),
+  doctor: (online = false) => req<DoctorResult[]>("GET", `/api/doctor${q({ online })}`),
+  calendar: (days = 1) => req<CalendarData>("GET", `/api/calendar${q({ days })}`),
   audit: (limit = 100) => req<AuditEntry[]>("GET", `/api/audit${q({ limit })}`),
   tools: () => req<ToolInfo[]>("GET", "/api/tools"),
   settings: () => req<Settings>("GET", "/api/settings"),
-  putSettings: (body: { trusted_tools?: string[]; default_project?: string; voice?: Partial<VoiceSettings>; capabilities?: Record<string, boolean>; proactive?: { briefing_time: string } }) => req<Settings>("PUT", "/api/settings", body),
+  putSettings: (body: { trusted_tools?: string[]; default_project?: string; voice?: Partial<VoiceSettings>; capabilities?: Record<string, boolean>; proactive?: { briefing_time: string }; behavior?: Partial<Settings["behavior"]> }) => req<Settings>("PUT", "/api/settings", body),
   kbSpaces: () => req<KbSpace[]>("GET", "/api/knowledge/spaces"),
   kbDocuments: (space?: string) => req<KbDocument[]>("GET", `/api/knowledge/documents${q({ space })}`),
   kbIngest: (path: string, space: string) => req<Record<string, unknown>>("POST", "/api/knowledge/ingest", { path, space }),

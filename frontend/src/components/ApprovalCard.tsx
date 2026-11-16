@@ -12,11 +12,11 @@ export function ApprovalCard({ approval, showSource = false }: { approval: Appro
   const [showArgs, setShowArgs] = useState(false);
   const pending = approval.status === "pending";
 
-  const decide = async (approve: boolean) => {
+  const decide = async (approve: boolean, scope: "once" | "task" = "once") => {
     setBusy(approve ? "approve" : "deny");
     setError("");
     try {
-      await decideApproval(approval.id, approve);
+      await decideApproval(approval.id, approve, scope);
     } catch (e) {
       setError(errText(e));
     } finally {
@@ -41,6 +41,12 @@ export function ApprovalCard({ approval, showSource = false }: { approval: Appro
           </div>
         </div>
       </header>
+      {pending && (approval.origin?.untrusted?.length ?? 0) > 0 && (
+        <div className="note note-warning" role="alert" data-testid="untrusted-warning">
+          <b>Check this carefully.</b> JARVIS asked for this right after reading outside content ({approval.origin.untrusted!.join(", ").replace(/_/g, " ")}).
+          Web pages, emails and on-screen text can contain planted instructions. Approve only if this is what <i>you</i> asked for.
+        </div>
+      )}
       <div className="label" style={{ marginBottom: 4 }}>Exactly what will happen</div>
       <pre className="code approval-preview" data-testid="approval-preview">{approval.preview}</pre>
       <button type="button" className="btn ghost sm approval-args-toggle" aria-expanded={showArgs} onClick={() => setShowArgs((v) => !v)}>
@@ -59,6 +65,12 @@ export function ApprovalCard({ approval, showSource = false }: { approval: Appro
           <button type="button" className="btn approve" disabled={busy !== null} onClick={() => decide(true)} data-testid="approve-btn">
             <Check size={15} /> {busy === "approve" ? "Executing…" : "Approve & run"}
           </button>
+          {approval.origin?.grantable && (
+            <button type="button" className="btn" disabled={busy !== null} onClick={() => decide(true, "task")} data-testid="approve-task-btn"
+              title={`Approve this, and stop asking for ${approval.tool} in this conversation for 30 minutes`}>
+              <Check size={15} /> Approve all “{approval.tool.replace(/_/g, " ")}” for this task
+            </button>
+          )}
           <button type="button" className="btn danger" disabled={busy !== null} onClick={() => decide(false)} data-testid="deny-btn">
             <X size={15} /> {busy === "deny" ? "Denying…" : "Deny"}
           </button>

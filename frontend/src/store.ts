@@ -92,8 +92,8 @@ export async function sendChat(text: string, conversationId?: string | null, sou
   return cid;
 }
 
-export async function decideApproval(id: string, approve: boolean): Promise<void> {
-  const ap = await api.decide(id, approve);
+export async function decideApproval(id: string, approve: boolean, scope: "once" | "task" = "once"): Promise<void> {
+  const ap = await api.decide(id, approve, scope);
   setState({ approvals: { ...state.approvals, [ap.id]: ap }, rev: bump("approval") });
 }
 

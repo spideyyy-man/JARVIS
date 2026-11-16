@@ -282,6 +282,12 @@ def create_app(jarvis: Jarvis | None = None) -> FastAPI:
     async def audit(limit: int = 100, tool: str | None = None):
         return j.audit.recent(min(limit, 500), tool)
 
+    @app.get("/api/calendar")
+    async def calendar(days: int = 1, start_in_days: int = 0):
+        from .tools import personal
+
+        return await asyncio.to_thread(personal.calendar_events, ctx(), days, start_in_days)
+
     @app.get("/api/doctor")
     async def doctor(online: bool = False):
         from .doctor import diagnose

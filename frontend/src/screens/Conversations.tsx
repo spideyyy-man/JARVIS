@@ -93,7 +93,7 @@ export function Conversations({ cid }: { cid: string | null }) {
             {plan.length > 0 && (
               <div className="plan-box" data-testid="conv-plan">
                 <div className="label">Plan</div>
-                <ol>{plan.map((p) => <li key={p.n}><b>{p.title}</b>{p.detail && <span className="soft"> — {p.detail}</span>} <StatusBadge status={p.status} /></li>)}</ol>
+                <ol>{plan.map((p) => <li key={p.n} data-status={p.status}><b>{p.title}</b>{p.detail && <span className="soft"> — {p.detail}</span>} <StatusBadge status={p.status} />{(p as { note?: string }).note && <div className="dim">{(p as { note?: string }).note}</div>}</li>)}</ol>
               </div>
             )}
             <Thread key={cid ?? "new"} cid={cid} emptyHint={cid ? undefined : "Ask a question or give an instruction. Reading and analysis run immediately; anything that modifies your system asks first."} />

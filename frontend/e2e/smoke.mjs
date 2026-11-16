@@ -67,6 +67,10 @@ try {
   await page.keyboard.press("Enter");
   await page.waitForFunction(() => /System performance/.test(document.querySelector('[data-testid="home-assistant"]')?.textContent || ""), null, { timeout: 20000 });
   check("home: command streamed a real answer", true);
+  await page.fill('[data-testid="home-command-composer"] textarea, [data-testid="home-command-composer"] input', "schedule a meeting with Sam today at 23:58");
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => /Meeting with Sam/.test(document.querySelector('[data-testid="home-calendar"]')?.textContent || ""), null, { timeout: 20000 });
+  check("home: event added by voice/text appears on today's calendar", true);
   await shot("01-home");
 
   // --- 3 Conversations + approval round trip
@@ -82,6 +86,18 @@ try {
   await page.click('[data-testid="thread"] [data-testid="approve-btn"]');
   await page.waitForSelector('[data-testid="msg-event"]', { timeout: 15000 });
   check("approval: action executed only after Approve", fs.existsSync(path.join(downloads, "Documents", "report.pdf")) && !fs.existsSync(path.join(downloads, "report.pdf")));
+  // approve once for the whole task: the second identical kind of action must not ask again
+  const composer = '[data-testid="conv-composer"] textarea, [data-testid="conv-composer"] input';
+  await page.fill(composer, `create a folder ${path.join(HOME, "e2e-a")}`);
+  await page.keyboard.press("Enter");
+  await page.waitForSelector('[data-testid="thread"] [data-testid="approve-task-btn"]', { timeout: 20000 });
+  await page.click('[data-testid="thread"] [data-testid="approve-task-btn"]');
+  await page.waitForFunction(() => document.querySelectorAll('[data-testid="msg-event"]').length >= 2, null, { timeout: 15000 });
+  await page.fill(composer, `create a folder ${path.join(HOME, "e2e-b")}`);
+  await page.keyboard.press("Enter");
+  const deadline = Date.now() + 15000;
+  while (!fs.existsSync(path.join(HOME, "e2e-b")) && Date.now() < deadline) await page.waitForTimeout(200);
+  check("approval: “approve all for this task” stops repeat prompts", fs.existsSync(path.join(HOME, "e2e-a")) && fs.existsSync(path.join(HOME, "e2e-b")) && (await page.textContent('[data-testid="approvals-count"]')).trim() === "0");
   await page.waitForSelector('[data-testid="conv-item"]');
   check("conversation: list shows saved conversations", (await page.locator('[data-testid="conv-item"]').count()) >= 2);
 
@@ -196,6 +212,14 @@ try {
   await cap.click();
   await page.waitForFunction(() => document.querySelector('[data-testid="capability"][data-cap="screen_access"] [role="switch"]')?.getAttribute("aria-checked") === "false");
   check("settings: a capability can be switched on and off by the user", true);
+  check("settings: behaviour switches present", (await page.locator('[data-testid="behaviour-row"]').count()) === 3 && /team/.test(await page.textContent('[data-testid="agent-mode"]')));
+  check("settings: task approval listed and revocable", (await page.locator('[data-testid="grant-row"]').count()) === 1);
+  await page.click('[data-testid="revoke-grants"]');
+  await page.waitForFunction(() => document.querySelectorAll('[data-testid="grant-row"]').length === 0);
+  await page.click('[data-testid="run-doctor"]');
+  await page.waitForSelector('[data-testid="doctor-row"]', { timeout: 60000 });
+  const doctor = await page.textContent('[data-testid="diagnostics"]');
+  check("settings: diagnostics run and report on this machine", /Screen text recognition/.test(doctor) && /4821/.test(doctor) && /Language model/.test(doctor));
   check("settings: degraded model state disclosed", await page.isVisible('[data-testid="llm-degraded"]'));
   await shot("10-settings");
 

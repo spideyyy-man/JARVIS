@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Cpu, Eye, FolderLock, History, Mic, ScrollText, ShieldCheck, ShieldQuestion, Zap } from "lucide-react";
 import { api } from "../api";
-import type { VoiceSettings } from "../api";
+import type { DoctorResult, VoiceSettings } from "../api";
 import { errText, useApi, useStore } from "../store";
 import { dateTime } from "../util";
 import { Loading, Panel, ScreenHead, StatusBadge, Switch } from "../components/Panel";
@@ -25,6 +25,21 @@ export function SettingsScreen() {
   const tools = useApi(api.tools, []);
   const audit = useApi(() => api.audit(120), [rev]);
   const history = useApi(() => api.approvals("all"), [rev]);
+  const grants = useApi(api.grants, [rev]);
+  const [doc, setDoc] = useState<DoctorResult[] | null>(null);
+  const [docBusy, setDocBusy] = useState(false);
+  const [docErr, setDocErr] = useState("");
+  const runDoctor = async () => {
+    setDocBusy(true);
+    setDocErr("");
+    try {
+      setDoc(await api.doctor());
+    } catch (e) {
+      setDocErr(errText(e));
+    } finally {
+      setDocBusy(false);
+    }
+  };
   const voices = useVoices();
   const [err, setErr] = useState("");
   const [saved, setSaved] = useState("");
@@ -77,6 +92,45 @@ export function SettingsScreen() {
               <Switch checked={c.enabled} label={`Allow ${name.replace(/_/g, " ")}`} onChange={(v) => void put({ capabilities: { [name]: v } }, `${name.replace(/_/g, " ")} ${v ? "enabled" : "disabled"}.`)} />
             </div>
           ))}
+        </Panel>
+
+        <Panel className="s6" title="Behaviour" icon={<Zap size={14} />} testid="behaviour">
+          {s && (
+            <div className="col" style={{ gap: 0 }}>
+              {([["fast_path", "Instant answers for simple commands", "When a model is configured, recognisable commands (“turn the volume up”) skip it and run immediately."],
+                 ["auto_continue", "Continue a task after I approve", "After you approve or deny a step, JARVIS picks the task back up instead of stopping."],
+                 ["auto_memory", "Learn from what I say", "Remembers lasting facts you state in passing (“I prefer…”, “my manager is…”). Review them in Knowledge."]] as const).map(([key, title, desc]) => (
+                <div key={key} className="row between cap-row" data-testid="behaviour-row" data-key={key}>
+                  <div><b style={{ textTransform: "none" }}>{title}</b><div className="soft">{desc}</div></div>
+                  <Switch checked={s.behavior[key]} label={title} onChange={(v) => void put({ behavior: { [key]: v } }, `${title}: ${v ? "on" : "off"}.`)} />
+                </div>
+              ))}
+              <dl className="kv" style={{ marginTop: 10 }}><dt>Agent mode</dt><dd className="num" data-testid="agent-mode">{s.agent_mode.active} <span className="dim">(configured: {s.agent_mode.configured})</span></dd></dl>
+              <div className="dim" style={{ fontSize: 12 }}>flat = one agent with every tool (fewer model calls, best for a slow local model); team = orchestrator plus specialists with separated permissions. Set with JARVIS_AGENT_MODE.</div>
+            </div>
+          )}
+        </Panel>
+
+        <Panel className="s6" title="Diagnostics" icon={<Cpu size={14} />} testid="diagnostics"
+          actions={<button type="button" className="btn sm" disabled={docBusy} onClick={() => void runDoctor()} data-testid="run-doctor">{docBusy ? "Checking…" : "Run checks"}</button>}>
+          {!doc && !docBusy && <div className="dim">Checks this machine: the model (including whether it can call tools), screen reading, mouse/keyboard, browser, speech, calendar and email.</div>}
+          {docBusy && <div className="dim">Running. The model check can take a while on a CPU.</div>}
+          {docErr && <div className="error-text" role="alert">{docErr}</div>}
+          {doc?.map((r) => (
+            <div key={r.name} className={`note ${r.status === "fail" ? "note-error" : r.status === "warn" ? "note-warning" : "note-success"}`} data-testid="doctor-row" data-status={r.status}>
+              <b>{r.name}</b> <StatusBadge status={r.status === "ok" ? "ok" : r.status === "fail" ? "failed" : "pending"} />
+              <div className="soft">{r.detail}</div>
+              {r.fix && <div className="dim">Fix: {r.fix}</div>}
+            </div>
+          ))}
+        </Panel>
+
+        <Panel className="s12" title="Task approvals in effect" icon={<History size={14} />} testid="grants"
+          actions={(grants.data?.length ?? 0) > 0 ? <button type="button" className="btn danger sm" onClick={() => void api.revokeGrants().then(grants.reload)} data-testid="revoke-grants">Revoke all</button> : undefined}>
+          {(grants.data?.length ?? 0) === 0 ? <div className="dim">None. When you choose “Approve all … for this task”, that tool stops asking in that conversation for 30 minutes and appears here.</div> : (
+            <table className="table"><thead><tr><th>Tool</th><th>Conversation</th><th>Expires</th></tr></thead>
+              <tbody>{grants.data!.map((g) => <tr key={g.id} data-testid="grant-row"><td className="num">{g.tool}</td><td className="cell-clip">{g.title || g.conversation_id}</td><td className="num dim">{dateTime(g.expires)}</td></tr>)}</tbody></table>
+          )}
         </Panel>
 
         <Panel className="s8" title="Tool permissions" icon={<ShieldCheck size={14} />} testid="tool-permissions">

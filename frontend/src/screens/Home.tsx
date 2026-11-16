@@ -28,6 +28,7 @@ function describeArgs(args: unknown): string {
 export function Home() {
   const rev = useStore((s) => s.rev);
   const { data, error, loading } = useApi(api.dashboard, [rev.chat, rev.approval, rev.agent, rev.workflow, rev.notification]);
+  const cal = useApi(() => api.calendar(1), [rev.chat, rev.tool]);
   const state = useAssistantState();
   const detail = useStore((s) => s.stateDetail);
   const status = useStore((s) => s.status);
@@ -162,6 +163,16 @@ export function Home() {
               {sum.tasks_open.slice(0, 5).map((t, i) => <div className="list-item" key={i}><ClipboardList size={13} className="dim" /><span className="truncate">{t}</span></div>)}
             </div>
           )}
+        </Panel>
+
+        <Panel className="s4" title="Calendar today" icon={<CalendarClock size={14} />} testid="home-calendar">
+          {cal.error && <div className="error-text">{cal.error}</div>}
+          {cal.data && cal.data.events.length === 0 && <div className="empty">Nothing scheduled today.{cal.data.configured_calendars === 0 ? " Say “schedule a meeting tomorrow at 3pm”, or connect a calendar feed." : ""}</div>}
+          <div className="list">
+            {(cal.data?.events ?? []).slice(0, 7).map((e, i) => (
+              <div key={i} className="list-item" data-testid="calendar-event"><span className="num dim">{e.all_day ? "all day" : e.start.slice(11)}</span><span className="grow truncate">{e.title}</span>{e.location && <span className="dim truncate">{e.location}</span>}</div>
+            ))}
+          </div>
         </Panel>
 
         <Panel className="s4" title="Today" icon={<Terminal size={14} />} testid="home-summary">
