@@ -38,6 +38,8 @@ class Tool:
     level: Level = Level.READ
     trust_eligible: bool = False  # may the user allowlist this for automatic execution?
     preview: Callable[[dict], str] | None = None  # human-readable description of the pending action
+    grantable: bool = True  # may the user approve this tool "for the rest of this task"?
+    untrusted_output: bool = False  # returns content written by third parties (web pages, the screen, email)
     timeout: float = 60.0
 
     @property
@@ -93,8 +95,31 @@ class ToolRegistry:
 
 
 class ToolExecutor:
+    GRANT_SECONDS = 30 * 60
+    UNTRUSTED_WINDOW = 10 * 60
+
     def __init__(self, app: "Jarvis"):
         self.app = app
+        self._untrusted: dict[str, list[tuple[float, str]]] = {}  # conversation -> recent untrusted reads
+        app.db.execute("CREATE TABLE IF NOT EXISTS grants (id TEXT PRIMARY KEY, conversation_id TEXT, tool TEXT, expires REAL, created REAL)")
+
+    # -- task-scoped grants ("approve this tool for the rest of this task") --------------
+    def grants(self) -> list[dict]:
+        self.app.db.execute("DELETE FROM grants WHERE expires<?", (time.time(),))
+        return self.app.db.query("SELECT * FROM grants ORDER BY created DESC")
+
+    def has_grant(self, conversation_id: str | None, tool: str) -> bool:
+        return bool(conversation_id) and self.app.db.one("SELECT id FROM grants WHERE conversation_id=? AND tool=? AND expires>?", (conversation_id, tool, time.time())) is not None
+
+    def revoke_grants(self, conversation_id: str | None = None) -> None:
+        if conversation_id:
+            self.app.db.execute("DELETE FROM grants WHERE conversation_id=?", (conversation_id,))
+        else:
+            self.app.db.execute("DELETE FROM grants")
+
+    def recent_untrusted(self, conversation_id: str | None) -> list[str]:
+        cutoff = time.time() - self.UNTRUSTED_WINDOW
+        return sorted({tool for ts, tool in self._untrusted.get(conversation_id or "", []) if ts > cutoff})
 
     # -- trusted allowlist (Level 3) ------------------------------------------
     def trusted_tools(self) -> list[str]:
@@ -126,6 +151,12 @@ class ToolExecutor:
             return await self._run(tool, args, ctx, actor, decision="auto-read")
         if tool.trust_eligible and name in self.trusted_tools():
             return await self._run(tool, args, ctx, actor, decision="trusted-allowlist")
+        if tool.grantable and self.has_grant(ctx.conversation_id, name):
+            try:  # the preview doubles as the viability/security check, so it still runs
+                tool.preview(args) if tool.preview else None
+            except Exception as e:
+                return ToolResult(False, error=f"Blocked by security policy: {e}" if isinstance(e, SecurityError) else str(e))
+            return await self._run(tool, args, ctx, actor, decision="task-grant")
 
         # Level 2: prepare, queue, and wait for a human.
         try:
@@ -134,7 +165,9 @@ class ToolExecutor:
             self.app.audit.record(actor=actor, tool=name, level=tool.level.value, decision="rejected-invalid", args=args, outcome="error", detail=str(e))
             return ToolResult(False, error=f"Blocked by security policy: {e}" if isinstance(e, SecurityError) else str(e))
         approval = {"id": new_id("ap_"), "tool": name, "args": args, "preview": preview, "agent": ctx.agent,
-                    "task_id": ctx.task_id, "conversation_id": ctx.conversation_id, "origin": ctx.origin,
+                    "task_id": ctx.task_id, "conversation_id": ctx.conversation_id,
+                    # shown to the user: this request came after reading third-party content, which may contain planted instructions
+                    "origin": {**ctx.origin, **({"untrusted": u} if (u := self.recent_untrusted(ctx.conversation_id)) else {}), "grantable": tool.grantable and bool(ctx.conversation_id)},
                     "status": "pending", "result": "", "created": time.time(), "decided": None}
         self.app.db.insert("approvals", approval)
         self.app.audit.record(actor=actor, tool=name, level=tool.level.value, decision="queued-for-approval", args=args, outcome="pending", detail=preview)
@@ -142,7 +175,7 @@ class ToolExecutor:
         self.app.db.notify("action", f"Approval needed: {name}", preview)
         return ToolResult(True, approval_id=approval["id"], preview=preview)
 
-    async def decide(self, approval_id: str, approve: bool) -> dict:
+    async def decide(self, approval_id: str, approve: bool, scope: str = "once") -> dict:
         ap = self.app.db.one("SELECT * FROM approvals WHERE id=?", (approval_id,))
         if ap is None:
             raise KeyError(approval_id)
@@ -154,6 +187,12 @@ class ToolExecutor:
         if not claimed:
             raise SecurityError("Approval already decided")
         tool = self.app.tools.get(ap["tool"])
+        if approve and scope == "task" and tool is not None:
+            if not tool.grantable or not ap["conversation_id"]:
+                self.app.db.update("approvals", approval_id, status="pending", decided=None)
+                raise SecurityError(f"'{ap['tool']}' must be approved every time; it cannot be approved for a whole task")
+            self.app.db.insert("grants", {"id": new_id("g_"), "conversation_id": ap["conversation_id"], "tool": ap["tool"], "expires": time.time() + self.GRANT_SECONDS, "created": time.time()})
+            self.app.audit.record(actor="user", tool=ap["tool"], level="confirm", decision="task-grant-created", args={"conversation": ap["conversation_id"], "minutes": self.GRANT_SECONDS // 60}, outcome="ok")
         ctx = ToolContext(self.app, agent=ap["agent"], actor="approved-by-user", task_id=ap["task_id"],
                           conversation_id=ap["conversation_id"], origin=ap["origin"] or {})
         if not approve or tool is None:
@@ -176,6 +215,8 @@ class ToolExecutor:
                 data = await asyncio.wait_for(asyncio.to_thread(tool.handler, ctx, **args), tool.timeout)
             result = ToolResult(True, data=redact_obj(data))
             outcome, detail = "ok", ""
+            if tool.untrusted_output and ctx.conversation_id:
+                self._untrusted.setdefault(ctx.conversation_id, []).append((time.time(), tool.name))
         except asyncio.TimeoutError:
             result, outcome, detail = ToolResult(False, error=f"{tool.name} timed out after {tool.timeout:.0f}s"), "timeout", ""
         except SecurityError as e:

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -256,7 +257,13 @@ def register(reg: ToolRegistry, app: "Jarvis") -> None:
         app.bus.emit("plan.created", task_id=ctx.task_id, title=title, plan=plan)
         return {"title": title, "steps": plan}
 
+    plan_lock = threading.Lock()  # parallel update_plan calls must not overwrite each other
+
     def update_plan(ctx: ToolContext, step: int, status: str, note: str = "") -> dict:
+        with plan_lock:
+            return _update_plan(ctx, step, status, note)
+
+    def _update_plan(ctx: ToolContext, step: int, status: str, note: str = "") -> dict:
         task = app.db.one("SELECT id, parent_id, plan FROM tasks WHERE id=?", (ctx.task_id or "",))
         while task and not task["plan"] and task["parent_id"]:  # the plan lives on the root task
             task = app.db.one("SELECT id, parent_id, plan FROM tasks WHERE id=?", (task["parent_id"],))

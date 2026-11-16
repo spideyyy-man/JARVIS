@@ -238,6 +238,7 @@ async def main() -> int:
             raise LLMError("Cannot reach API: connection refused", retryable=True)
 
     j.llm = LLMRouter([DeadAPI(), j.offline], on_event=j._llm_event, backoff=0.05)
+    j.db.set_setting("fast_path", False)  # make this request go to the (dead) model, so failover is what is exercised
     r = await ask(j, "how is my computer performing?", "c10")
     note = j.db.one("SELECT title, body FROM notifications WHERE title LIKE 'Language model%' ORDER BY created DESC")
     block("Notification raised", f"{note['title']}: {note['body']}")

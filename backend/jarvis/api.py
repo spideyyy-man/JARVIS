@@ -36,6 +36,7 @@ class ChatIn(BaseModel):
 
 class DecideIn(BaseModel):
     approve: bool
+    scope: str = "once"  # "task": also approve this tool for the rest of this conversation's task (30 min)
 
 
 class SettingsIn(BaseModel):
@@ -257,7 +258,19 @@ def create_app(jarvis: Jarvis | None = None) -> FastAPI:
 
     @app.post("/api/approvals/{aid}/decide")
     async def decide(aid: str, body: DecideIn):
-        return await j.executor.decide(aid, body.approve)
+        if body.scope not in ("once", "task"):
+            raise HTTPException(400, "scope must be 'once' or 'task'")
+        return await j.executor.decide(aid, body.approve, body.scope)
+
+    @app.get("/api/grants")
+    async def grants():
+        return [{**g, "title": (j.db.one("SELECT title FROM conversations WHERE id=?", (g["conversation_id"],)) or {}).get("title", "")} for g in j.executor.grants()]
+
+    @app.delete("/api/grants")
+    async def grants_revoke(conversation_id: str | None = None):
+        j.executor.revoke_grants(conversation_id)
+        j.audit.record(actor="user", tool="settings.grants", level="confirm", decision="user-action", args={"revoked": conversation_id or "all"}, outcome="ok")
+        return {"ok": True}
 
     @app.get("/api/audit")
     async def audit(limit: int = 100, tool: str | None = None):

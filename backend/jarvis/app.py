@@ -14,13 +14,15 @@ from .config import Settings, get_secret, load_settings
 from .db import Database, new_id
 from .events import EventBus
 from .knowledge import KnowledgeBase, Memory, make_embedder
-from .llm.base import LLMProvider, LLMRouter
-from .llm.offline import Env, OfflineProvider
+from .llm.base import FORCE_PROVIDER, LLMProvider, LLMRouter
+from .llm.offline import Env, OfflineProvider, match_rules
 from .security import AuditLog, PathGuard
 from .tools import browser, coding, desktop, files, images, research, system
 from .tools.registry import ToolExecutor, ToolRegistry, ToolResult
 from .voice import build_voice
 
+AFFIRM_ALL = re.compile(r"^\s*(hey\s+)?(jarvis[,\s]+)?(approve all|yes to all|approve (them|these|everything)( all)?|approve for (this|the) (whole )?task|always allow( this)?( for (this|the) task)?)[\s.!]*$", re.I)
+MAX_CONTINUATIONS = 20
 AFFIRM = re.compile(r"^\s*(hey\s+)?(jarvis[,\s]+)?(yes|yep|approve[d]?|go ahead|do it|confirm(ed)?|proceed|yes,? (do it|please|go ahead))[\s.!]*$", re.I)
 DENY = re.compile(r"^\s*(hey\s+)?(jarvis[,\s]+)?(no|nope|deny|denied|cancel( it| that)?|don'?t|stop|abort)[\s.!]*$", re.I)
 HISTORY_CHAR_BUDGET = 16_000
@@ -59,6 +61,12 @@ class Jarvis:
         self.llm = LLMRouter(providers if providers is not None else self._build_providers(), on_event=self._llm_event, timeout=self.settings.llm_timeout)
         self.stt, self.tts = build_voice(self.settings)
         self._chat_tasks: dict[str, asyncio.Task] = {}
+        self._background: set[asyncio.Task] = set()
+        self._continuations: dict[str, int] = {}
+        for name in ("delete_path", "run_command", "git_commit"):  # always ask, every time
+            self.tools.get(name).grantable = False
+        for name in ("fetch_url", "web_search", "github_repo_info", "browser_open", "browser_read", "browser_click", "browser_fill", "screen_read", "clipboard_read"):
+            self.tools.get(name).untrusted_output = True
 
     # -- providers ---------------------------------------------------------------
     def _build_providers(self) -> list[LLMProvider]:
@@ -150,11 +158,29 @@ class Jarvis:
         if conversation_id is None or not self.db.one("SELECT id FROM conversations WHERE id=?", (conversation_id,)):
             conversation_id = conversation_id or new_id("c_")
             self.db.insert("conversations", {"id": conversation_id, "title": text[:70], "summary": "", "created": now, "updated": now})
-        user_msg = self._add_message(conversation_id, "user", text, {"source": source, "actor": actor})
-        self.bus.emit("chat.start", conversation_id=conversation_id, message=user_msg)
+        if actor == "continuation":  # an internal nudge, not something the user said: keep it out of the transcript
+            user_msg = {"id": "", "conversation_id": conversation_id, "role": "event", "content": "", "meta": {}, "created": now}
+            self.bus.emit("chat.resume", conversation_id=conversation_id)
+        else:
+            user_msg = self._add_message(conversation_id, "user", text, {"source": source, "actor": actor})
+            self.bus.emit("chat.start", conversation_id=conversation_id, message=user_msg)
 
         # Spoken/typed approval. Deliberately handled here, on the user's own words, and NOT exposed
         # as a tool - a model must never be able to approve its own pending action.
+        if actor == "chat":
+            self._continuations.pop(conversation_id, None)  # a real message from the user resets the auto-continue budget
+        if actor == "chat" and AFFIRM_ALL.match(text):
+            pending = self.db.query("SELECT * FROM approvals WHERE status='pending' AND conversation_id=? ORDER BY created", (conversation_id,))
+            if pending:
+                done, refused = [], []
+                for ap in pending:
+                    try:
+                        done.append((await self.executor.decide(ap["id"], True, scope="task"))["tool"])
+                    except Exception:
+                        refused.append(ap["tool"])
+                reply = (f"Approved {len(done)} action(s). I won't ask again for {', '.join(sorted(set(done)))} during this task (30 minutes)." if done else "") + \
+                        (f" {', '.join(sorted(set(refused)))} must be approved one at a time - still waiting on that." if refused else "")
+                return self._finish(conversation_id, reply.strip(), {"provider": "policy"})
         if actor == "chat" and (AFFIRM.match(text) or DENY.match(text)):
             pending = self.db.query("SELECT * FROM approvals WHERE status='pending' AND conversation_id=? ORDER BY created", (conversation_id,))
             if len(pending) == 1:
@@ -184,6 +210,8 @@ class Jarvis:
         self.bus.set_state("thinking")
         self.bus.active_task = {"conversation_id": conversation_id, "title": text[:120], "started": now}
         self._chat_tasks[conversation_id] = asyncio.current_task()  # type: ignore[assignment]
+        # Fast path: a slow local model should not be made to think about "turn the volume up".
+        pin = FORCE_PROVIDER.set("offline") if actor == "chat" and self.fast_path_applies(text) else None
         try:
             result = await self.agents.run("orchestrator", text, conversation_id=conversation_id, history=history,
                                            context_note="\n\n".join(notes), actor=actor, on_text=on_text)
@@ -192,6 +220,8 @@ class Jarvis:
             self._finish(conversation_id, (partial + "\n\n" if partial else "") + "_(interrupted)_", {"interrupted": True}, state="idle")
             raise
         finally:
+            if pin is not None:
+                FORCE_PROVIDER.reset(pin)
             self._chat_tasks.pop(conversation_id, None)
             self.bus.active_task = None
         meta = {"task_id": result.task_id, "provider": result.provider, "tools": result.tools_used, "pending_approvals": result.pending_approvals,
@@ -204,6 +234,16 @@ class Jarvis:
         self.bus.emit("chat.done", conversation_id=conversation_id, message=msg)
         self.bus.set_state(state)
         return {"conversation_id": conversation_id, "message_id": msg["id"], "text": text, **meta}
+
+    # Requests the rule engine recognises but a model answers better (they need synthesis, not a lookup).
+    NOT_FAST = {"search_files", "kb_search", "web_search", "fetch_url", "repo_overview", "conversation_search", "create_plan", "recall", "kb_ingest"}
+
+    def fast_path_applies(self, text: str) -> bool:
+        """True when a model is configured but this request is a simple command the rule engine can do instantly."""
+        if self.llm.primary.name == "offline" or not self.db.get_setting("fast_path", True) or len(text.split()) > 14:
+            return False
+        hit = match_rules(text, self.offline.env)
+        return bool(hit) and hit[1][0] not in self.NOT_FAST
 
     def cancel(self, conversation_id: str) -> bool:
         """Barge-in: the user interrupted. Stops the turn at its next await point."""
@@ -220,3 +260,37 @@ class Jarvis:
                                     {"approval": approval["id"], "status": approval["status"]})
             self.bus.emit("chat.event", conversation_id=approval["conversation_id"], message=msg)
         await self.automation.on_approval(approval, result)
+        conv = approval.get("conversation_id")
+        if conv and self.db.get_setting("auto_continue", True):
+            task = asyncio.create_task(self._continue_after_approval(conv))
+            self._background.add(task)
+            task.add_done_callback(self._background.discard)
+
+    async def _continue_after_approval(self, conversation_id: str) -> None:
+        """Pick the task back up once its approvals are decided, so a multi-step job does not die at the
+        first confirmation. Only for real models - the rule engine's requests are single-step."""
+        await asyncio.sleep(0.05)
+        running = self._chat_tasks.get(conversation_id)
+        if running and not running.done():
+            await asyncio.wait([running])
+        if self.db.one("SELECT id FROM approvals WHERE status='pending' AND conversation_id=?", (conversation_id,)):
+            return  # wait until every outstanding request is decided, then continue once
+        last = self.db.one("SELECT meta FROM messages WHERE conversation_id=? AND role='assistant' AND json_extract(meta,'$.task_id') IS NOT NULL ORDER BY created DESC LIMIT 1", (conversation_id,))
+        if not last or last["meta"].get("provider") in (None, "offline", "policy"):
+            return
+        n = self._continuations.get(conversation_id, 0)
+        if n >= MAX_CONTINUATIONS:
+            self._finish(conversation_id, "I've paused here: this task has needed a lot of approvals in a row. Tell me to continue if you want me to keep going.", {"provider": "policy"})
+            return
+        self._continuations[conversation_id] = n + 1
+        try:
+            await self.chat("The approval decision(s) above are in. Continue the original task from where you stopped: use the results, do not repeat "
+                            "actions that already ran, do not retry anything that was denied, and give the final answer when the task is complete.",
+                            conversation_id, actor="continuation", source="event")
+        except Exception as e:
+            self.db.notify("error", "Could not continue the task", str(e))
+
+    async def idle(self) -> None:
+        """Wait for background continuations to finish (used by tests and graceful shutdown)."""
+        while self._background:
+            await asyncio.gather(*list(self._background), return_exceptions=True)

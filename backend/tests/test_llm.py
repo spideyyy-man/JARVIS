@@ -57,6 +57,7 @@ def test_failover_to_offline_engine_when_api_is_down(home, tmp_path):
     j = make(home, tmp_path)
     events = []
     j.llm = LLMRouter([down, j.offline], on_event=lambda t, **d: (events.append(d), j._llm_event(t, **d)), retries=2, backoff=0.01)
+    j.db.set_setting("fast_path", False)  # force this request through the (dead) model so failover is what is tested
     r = run(j.chat("analyze my computer's performance"))
     assert "System performance" in r["text"] and r["provider"] == "offline"
     assert len(down.seen) == 3  # 1 try + 2 retries on the first call, then failover
@@ -68,6 +69,7 @@ def test_non_retryable_error_fails_over_immediately(home, tmp_path):
     bad = ScriptedLLM([LLMError("authentication failed")] * 5)
     j = make(home, tmp_path)
     j.llm = LLMRouter([bad, j.offline], retries=2, backoff=0.01)
+    j.db.set_setting("fast_path", False)
     assert "track" in run(j.chat("remind me to rotate the API key"))["text"]
     assert len(bad.seen) == 1  # no retry on auth errors, and the circuit breaker skips it for the rest of the turn
 

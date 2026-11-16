@@ -97,6 +97,7 @@ def test_slow_model_times_out_and_fails_over(home, tmp_path):
 
     j = make(home, tmp_path)
     j.llm = LLMRouter([Hung(), j.offline], timeout=0.2)
+    j.db.set_setting("fast_path", False)
     r = run(j.chat("how is my computer performing"))
     assert r["provider"] == "offline" and "System performance" in r["text"]
     assert "did not answer within" in j.llm.failures[0]["error"]
