@@ -9,7 +9,7 @@ import asyncio
 import re
 import time
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from croniter import croniter
@@ -467,6 +467,17 @@ def briefing_text(app: "Jarvis") -> str:
             parts.append("Due today: " + "; ".join(today[:4]) + ".")
     else:
         parts.append("You have no open tasks.")
+    try:
+        from .tools.personal import events_between
+        from .tools.registry import ToolContext
+
+        midnight = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        todays, _p = events_between(ToolContext(app), midnight, midnight + timedelta(days=1))
+        upcoming = [e for e in todays if e["end"] > datetime.now()]
+        if upcoming:
+            parts.append("On your calendar today: " + "; ".join(("all day " if e.get("all_day") else e["start"].strftime("%H:%M ")) + e.get("title", "event") for e in upcoming[:5]) + ".")
+    except Exception:
+        pass
     pending = db.one("SELECT COUNT(*) AS n FROM approvals WHERE status='pending'")["n"]
     if pending:
         parts.append(f"{pending} action{'s are' if pending != 1 else ' is'} waiting for your approval.")
@@ -506,6 +517,31 @@ class Proactive:
         self.app.bus.emit("notification", notification=note)
         self.app.bus.emit("assistant.announce", text=text, kind=kind, title=title)
 
+    def _upcoming_events(self, now: float) -> list[str]:
+        """Announce each event once, about ten minutes before it starts."""
+        from .tools.personal import events_between
+        from .tools.registry import ToolContext
+
+        said, start = [], datetime.fromtimestamp(now)
+        try:
+            events, _problems = events_between(ToolContext(self.app), start, start + timedelta(minutes=10))
+        except Exception:
+            return said
+        announced = self.app.db.get_setting("announced_events", [])
+        for e in events:
+            if e.get("all_day") or e["start"] < start:
+                continue
+            key = f"{e.get('title')}|{e['start'].isoformat()}"
+            if key in announced:
+                continue
+            announced.append(key)
+            minutes = max(1, round((e["start"] - start).total_seconds() / 60))
+            text = f"{e.get('title', 'An event')} starts in {minutes} minute{'s' if minutes != 1 else ''}" + (f" at {e['location']}" if e.get("location") else "") + "."
+            self.announce("Upcoming event", text, "event")
+            said.append(text)
+        self.app.db.set_setting("announced_events", announced[-200:])
+        return said
+
     def check(self, now: float | None = None) -> list[str]:
         now = now or time.time()
         db, said = self.app.db, []
@@ -514,6 +550,7 @@ class Proactive:
             text = f"Reminder: {t['title']}"
             self.announce("Reminder", text, "reminder")
             said.append(text)
+        said += self._upcoming_events(now)
         cfg = db.get_setting("proactive", {})
         at = cfg.get("briefing_time") or ""
         today = datetime.fromtimestamp(now).strftime("%Y-%m-%d")

@@ -148,7 +148,37 @@ def _p(tool: str, key: str = "path", **extra):
     return build
 
 
+def _calendar_add(text: str, m: re.Match, env: Env):
+    body = re.sub(r"^(please\s+)?(schedule|add|book|put|create|set up)\s+(an?\s+|the\s+|my\s+)?", "", _clean(text), flags=re.I)
+    body = re.sub(r"\s+(to|on|in|into)\s+(my|the)\s+calendar", "", body, flags=re.I)
+    w = re.search(r"\b(today|tonight|tomorrow|next\s+\w+|(?:on\s+)?(?:mon|tues?|wed(?:nes)?|thu(?:rs)?|fri|sat(?:ur)?|sun)(?:day)?|\d{4}-\d{2}-\d{2}|at\s+\d{1,2}|in\s+\d+\s*(?:minute|min|hour|hr)s?)\b.*$", body, re.I)
+    if not w:
+        return None
+    title = re.sub(r"\s+(on|at|for)$", "", body[: w.start()].strip(" ,")) or "Event"
+    args = {"title": title[0].upper() + title[1:], "when": re.sub(r"^on\s+", "", w.group(0).strip(" .?!"))}
+    dur = re.search(r"\bfor\s+(\d+)\s*(minute|min|hour|hr)s?", body, re.I)
+    if dur:
+        args["duration_minutes"] = int(dur.group(1)) * (60 if dur.group(2).startswith("h") else 1)
+        args["when"] = args["when"].replace(dur.group(0), "").strip()
+    return "calendar_add", args
+
+
+def _calendar_view(text: str, m: re.Match, env: Env):
+    low = text.lower()
+    if "tomorrow" in low:
+        return "calendar_events", {"days": 1, "start_in_days": 1}
+    if re.search(r"\b(this|the|next) week\b|\bnext (few|7) days\b", low):
+        return "calendar_events", {"days": 7}
+    return "calendar_events", {}
+
+
 RULES: list[Rule] = [
+    R("orchestrator", r"^\s*(?:jarvis[,\s]+)?(?:please\s+)?(?:schedule|add|book|put|create|set up)\b.*\b(meeting|event|appointment|call|lunch|dinner|interview|session|class|calendar)\b", _calendar_add, whole=True),
+    R("orchestrator", r"\b(my|the) (calendar|agenda|schedule)\b|\b(any|what|which|do i have)\b.*\b(meetings?|appointments?|events?)\b|\bwhat (do i have|is planned|am i doing) (today|tomorrow|this week)\b", _calendar_view),
+    R("orchestrator", r"^\s*(?:jarvis[,\s]+)?(?:please\s+)?(?:send\s+(?:an?\s+)?e-?mail\s+to|e-?mail)\s+([^\s,]+@[^\s,]+)\s*(?:with (?:the )?subject\s+[\"']?(.+?)[\"']?\s+)?(?:saying|that says|telling (?:him|her|them)(?: that)?|:|about)\s*(.+)$",
+      lambda t, m, e: ("email_send", {"to": m.group(1).rstrip(".,:"), "subject": (m.group(2) or " ".join(m.group(3).split()[:7])).strip(" .").capitalize(), "body": m.group(3).strip()}), whole=True),
+    R("orchestrator", r"\b(?:read|open|show)\s+(?:e-?mail|message|mail)\s+(?:number\s+|#)?(\d+)\b", lambda t, m, e: ("email_read", {"id": m.group(1)})),
+    R("orchestrator", r"\b(check|read|show|list|any|new|unread)\b.*\b(e-?mails?|inbox|mail)\b", lambda t, m, e: ("email_inbox", {**({"unread_only": False} if re.search(r"\b(all|recent|latest)\b", t, re.I) else {})})),
     # automation first: "every 10 minutes check X" must not be captured by X's own rule
     R("automation", r"\b(every\s+(\d+\s*)?(second|minute|hour|day)s?|every (day|morning|evening)|daily|schedule\b.*\bin \d+)", _workflow, whole=True),
     R("automation", r"\brun (?:the )?(?:workflow|automation)\s+(.+)$", _run_workflow, whole=True),
@@ -245,6 +275,7 @@ CAPABILITIES = ("Here's what I can do right now:\n"
                 "- **Knowledge**: index PDF/DOCX/TXT/Markdown and answer from them with citations\n"
                 "- **Research**: web search with tracked sources, GitHub repository evaluation\n"
                 "- **Automation**: scheduled and conditional workflows, timed reminders, a daily briefing and summary\n"
+                "- **Calendar and email**: today's agenda, add events, read your inbox, send email (always with your approval)\n"
                 "- **Desktop** (when enabled in Settings): read the screen, click things by name, type, clipboard, volume/brightness, drive a browser")
 OFFLINE_NOTE = ("I'm running on the built-in offline engine (no language model is configured), so I can only handle requests I can map to a "
                 "concrete capability. Set ANTHROPIC_API_KEY, or point JARVIS at a local model, for open-ended conversation and reasoning.")
@@ -582,7 +613,23 @@ def _r_page(d, q, t):
     return f"**{d.get('title') or d.get('url')}** ({d.get('url')})\n\n{' '.join(d.get('text', '').split())[:700]}" + (f"\n\nYou can interact with:\n{els}" if els else "")
 
 
+def _r_calendar(d, q, t):
+    if not d["events"]:
+        return f"Nothing on your calendar from {d['from']}" + (f" to {d['to']}" if d["to"] != d["from"] else "") + "." + ("" if d["configured_calendars"] else " (No external calendar is connected; set JARVIS_CALENDAR_ICS to include one.)")
+    lines = [f"**Calendar, {d['from']}" + (f" to {d['to']}" if d["to"] != d["from"] else "") + "**"]
+    for e in d["events"]:
+        when = "all day" if e["all_day"] else f"{e['start'][11:]}-{e['end'][11:]}"
+        lines.append(f"- {e['start'][:10] if d['to'] != d['from'] else ''} {when}: {e['title']}".replace("-  ", "- ") + (f" ({e['location']})" if e["location"] else ""))
+    return "\n".join(lines) + ("\n\nCould not read: " + "; ".join(d["problems"]) if d.get("problems") else "")
+
+
 RENDERERS: dict[str, Callable] = {
+    "calendar_events": _r_calendar,
+    "calendar_add": lambda d, q, t: f"Added \"{d['title']}\" on {d['start']} ({d['duration_minutes']} min). I'll remind you shortly before it starts.",
+    "calendar_remove": lambda d, q, t: "Removed that event.",
+    "email_inbox": lambda d, q, t: ((f"{d['count']} {'unread ' if d['unread_only'] else ''}message(s):\n" + "\n".join(f"{m['id']}. **{m['subject'] or '(no subject)'}** - {m['from']} ({m['date'][:22]})" for m in d["messages"]) + "\n\nSay \"read email <number>\" to open one.") if d["messages"] else ("No unread email." if d["unread_only"] else "The inbox is empty.")),
+    "email_read": lambda d, q, t: f"**{d['subject']}**\nFrom {d['from']} on {d['date']}\n\n{d['body'][:2500]}" + ("\n\n[truncated]" if d["truncated"] else ""),
+    "email_send": lambda d, q, t: f"Email sent to {', '.join(d['sent_to'])}: \"{d['subject']}\".",
     "list_trash": lambda d, q, t: ("JARVIS's trash holds:\n" + "\n".join(f"- {Path(i['original']).name} ({'deleted' if i['kind'] == 'deleted' else 'version before an edit'}, from `{i['original']}`)" for i in d["items"][:15]) + "\n\nSay \"undo that\" to restore the most recent deletion.") if d["items"] else "The trash is empty.",
     "restore_from_trash": lambda d, q, t: f"Restored `{d['restored']}`.",
     "save_as_workflow": lambda d, q, t: f"Saved as workflow \"{d['name']}\" ({' -> '.join(d['steps'])})" + (f", schedule {d['schedule']}." if d["schedule"].get("type") != "manual" else ". Run it from Automation, or say \"run workflow " + d["name"] + "\"."),

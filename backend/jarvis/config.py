@@ -55,6 +55,12 @@ class Settings:
     image_provider: str = "none"
     image_base_url: str = ""
     image_model: str = ""
+    # Calendar (comma-separated .ics files or URLs) and email (IMAP/SMTP)
+    calendar_ics: str = ""
+    email_address: str = ""
+    imap_host: str = ""
+    smtp_host: str = ""
+    smtp_port: int = 587
     # Embeddings
     embedder: str = "hashing"
 
@@ -117,6 +123,11 @@ def load_settings(env_file: Path | None = None) -> Settings:
         image_provider=env("JARVIS_IMAGE_PROVIDER", "none"),
         image_base_url=env("JARVIS_IMAGE_BASE_URL", ""),
         image_model=env("JARVIS_IMAGE_MODEL", ""),
+        calendar_ics=env("JARVIS_CALENDAR_ICS", ""),
+        email_address=env("JARVIS_EMAIL_ADDRESS", ""),
+        imap_host=env("JARVIS_IMAP_HOST", ""),
+        smtp_host=env("JARVIS_SMTP_HOST", ""),
+        smtp_port=int(env("JARVIS_SMTP_PORT", "587")),
     )
     for d in (s.trash_dir, s.reports_dir, s.images_dir):
         d.mkdir(parents=True, exist_ok=True)

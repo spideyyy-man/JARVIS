@@ -51,9 +51,11 @@ AGENTS: dict[str, AgentSpec] = {a.name: a for a in [
               "Specialists: research (web research, GitHub evaluation), coding (repositories, git, tests, code edits), "
               "computer (files, folders, applications, clipboard, screen reading, mouse/keyboard, system settings, browser automation), knowledge (the user's indexed documents and notes, past conversations), "
               "automation (scheduled/conditional workflows), monitoring (CPU, memory, disk, processes).\n"
+              "You handle the user's calendar (calendar_events, calendar_add) and email (email_inbox, email_read, email_send) yourself. "
+              "Before sending an email, show the user the full draft - sending always requires their approval.\n"
               "You can create pictures yourself with `generate_image` (the user's local image model).\n"
               "After delegation, check the result actually answers the request before replying; if it does not, try another route or say so.",
-              ["delegate", "create_plan", "update_plan", "save_as_workflow", "generate_image", "remember", "recall", "conversation_search", "daily_briefing", "daily_summary", "list_dev_tasks", "add_dev_task", "update_dev_task"]),
+              ["delegate", "create_plan", "update_plan", "save_as_workflow", "calendar_events", "calendar_add", "calendar_remove", "email_inbox", "email_read", "email_send", "generate_image", "remember", "recall", "conversation_search", "daily_briefing", "daily_summary", "list_dev_tasks", "add_dev_task", "update_dev_task"]),
     AgentSpec("research", "Research Agent", "Web research, technology comparison, GitHub repository evaluation, sourced reports",
               "You are JARVIS's research agent. Search, read the most relevant pages, then write a structured answer. Every factual claim "
               "from the web must cite a URL that you actually retrieved in this task (check with list_sources). If search is unavailable, "

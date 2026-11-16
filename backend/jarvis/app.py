@@ -17,7 +17,7 @@ from .knowledge import KnowledgeBase, Memory, make_embedder
 from .llm.base import FORCE_PROVIDER, LLMProvider, LLMRouter
 from .llm.offline import Env, OfflineProvider, match_rules
 from .security import AuditLog, PathGuard
-from .tools import browser, coding, desktop, files, images, research, system
+from .tools import browser, coding, desktop, files, images, personal, research, system
 from .tools.registry import ToolExecutor, ToolRegistry, ToolResult
 from .voice import build_voice
 
@@ -39,6 +39,7 @@ class Jarvis:
         self.kb = KnowledgeBase(self.db, self.embedder)
         self.memory = Memory(self.db, self.embedder)
         self.http_transport = None  # injectable for tests
+        self.mail_factory = None  # injectable for tests: (kind, config) -> IMAP/SMTP connection
         self.capture_screen = desktop.capture_screen  # injectable for tests
         self.browser = browser.BrowserSession(self)
         self.proactive = Proactive(self)
@@ -53,6 +54,7 @@ class Jarvis:
         research.register(self.tools)
         images.register(self.tools)
         desktop.register(self.tools, self)
+        personal.register(self.tools, self)
         browser.register(self.tools, self)
         automation_mod.register(self.tools, self)
         agents_mod.register(self.tools, self)
