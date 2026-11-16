@@ -90,6 +90,66 @@ def active_window(ctx: ToolContext) -> dict:
     raise RuntimeError("Cannot determine the active window on this system (install xdotool)")
 
 
+def _windows() -> list[dict]:
+    """Visible top-level windows as [{"id", "title"}]."""
+    if SYSTEM == "Windows":
+        import ctypes
+        from ctypes import wintypes
+
+        user32, found = ctypes.windll.user32, []
+
+        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        def each(hwnd, _lparam):
+            if user32.IsWindowVisible(hwnd) and user32.GetWindowTextLengthW(hwnd) > 0:
+                buf = ctypes.create_unicode_buffer(512)
+                user32.GetWindowTextW(hwnd, buf, 512)
+                found.append({"id": int(hwnd), "title": buf.value})
+            return True
+
+        user32.EnumWindows(each, 0)
+        return [w for w in found if w["title"] not in ("Program Manager", "Default IME", "MSCTFIME UI")]
+    if shutil.which("wmctrl"):
+        return [{"id": parts[0], "title": parts[3]} for line in _run(["wmctrl", "-l"]).splitlines() if len(parts := line.split(None, 3)) == 4]
+    if SYSTEM == "Darwin":
+        names = _run(["osascript", "-e", 'tell application "System Events" to get name of every application process whose visible is true']).strip()
+        return [{"id": n.strip(), "title": n.strip()} for n in names.split(",") if n.strip()]
+    raise RuntimeError("Listing windows is not supported on this system (install wmctrl)")
+
+
+def pick_window(windows: list[dict], query: str) -> dict:
+    """Best title match: exact, then starts-with, then contains (shortest title wins - usually the app's main window)."""
+    q = query.lower().strip()
+    for test in (lambda t: t == q, lambda t: t.startswith(q), lambda t: q in t, lambda t: all(w in t for w in q.split())):
+        hits = sorted((w for w in windows if test(w["title"].lower())), key=lambda w: len(w["title"]))
+        if hits:
+            return hits[0]
+    raise RuntimeError(f"No open window matches '{query}'. Open windows: " + "; ".join(w["title"][:50] for w in windows[:15]))
+
+
+def list_windows(ctx: ToolContext) -> dict:
+    return {"windows": [w["title"] for w in _windows()][:60]}
+
+
+def focus_window(ctx: ToolContext, title: str) -> dict:
+    win = pick_window(_windows(), title)
+    if SYSTEM == "Windows":
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        if user32.IsIconic(win["id"]):
+            user32.ShowWindow(win["id"], 9)  # SW_RESTORE
+        # Windows refuses SetForegroundWindow from a background process unless it "received the last input":
+        # a synthetic ALT key press satisfies that rule.
+        user32.keybd_event(0x12, 0, 0, 0)
+        user32.SetForegroundWindow(win["id"])
+        user32.keybd_event(0x12, 0, 2, 0)
+    elif SYSTEM == "Darwin":
+        _run(["osascript", "-e", f'tell application "{win["title"]}" to activate'])
+    else:
+        _run(["wmctrl", "-i", "-a", str(win["id"])])
+    return {"focused": win["title"]}
+
+
 # ------------------------------------------------------------------ system settings
 VK = {"volume_mute": 0xAD, "volume_down": 0xAE, "volume_up": 0xAF, "media_play_pause": 0xB3, "media_next": 0xB0, "media_previous": 0xB1}
 ACTIONS = [*VK, "set_brightness", "lock_screen"]
@@ -314,6 +374,9 @@ def register(reg: ToolRegistry, app) -> None:
             return text(a)
         return preview
 
+    reg.register(Tool("list_windows", "Titles of the windows currently open on the desktop.", {}, list_windows))
+    reg.register(Tool("focus_window", "Bring an open window to the front by (part of) its title, e.g. 'Chrome' or 'report.docx'.", {"title": S}, focus_window, required=["title"],
+                      level=C, trust_eligible=True, preview=lambda a: f"Switch to the window matching \"{a['title']}\""))
     reg.register(Tool("clipboard_read", "Read the text currently on the clipboard.", {}, clipboard_read))
     reg.register(Tool("active_window", "Title of the window the user is currently using.", {}, active_window))
     reg.register(Tool("screen_read", "Read the text visible on the screen right now (CPU text recognition), with the position of each line. Use to see what the user is looking at, e.g. an error dialog.",

@@ -305,3 +305,17 @@ def test_agent_completes_a_multi_step_desktop_task_with_task_approval(home, tmp_
     assert decisions == ["queued-for-approval", "task-grant-created", "approved", "task-grant"]
     assert j.db.one("SELECT COUNT(*) AS n FROM approvals")["n"] == 2                   # only two prompts for four actions
     loop.close()
+
+
+def test_window_matching_and_routing(jarvis, monkeypatch):
+    wins = [{"id": 1, "title": "report.docx - Word"}, {"id": 2, "title": "Inbox - Outlook"}, {"id": 3, "title": "Google Chrome"}, {"id": 4, "title": "New Tab - Google Chrome"}]
+    assert desktop.pick_window(wins, "google chrome")["id"] == 3       # exact beats contains
+    assert desktop.pick_window(wins, "chrome")["id"] == 3              # shortest containing title
+    assert desktop.pick_window(wins, "report")["id"] == 1
+    assert desktop.pick_window(wins, "outlook inbox")["id"] == 2       # all words, any order
+    with pytest.raises(RuntimeError, match="Open windows: report.docx"):
+        desktop.pick_window(wins, "photoshop")
+    monkeypatch.setattr(desktop, "_windows", lambda: wins)
+    assert "Inbox - Outlook" in run(jarvis.chat("what windows are open", "c1"))["text"]
+    r = run(jarvis.chat("switch to chrome", "c1"))
+    assert r["pending_approvals"] and 'window matching "chrome"' in jarvis.db.one("SELECT preview FROM approvals WHERE status='pending'")["preview"]

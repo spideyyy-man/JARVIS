@@ -75,7 +75,7 @@ AGENTS: dict[str, AgentSpec] = {a.name: a for a in [
               "screen_read again to confirm the result - one step at a time. For websites prefer browser_open / browser_click / browser_fill.",
               ["list_dir", "read_file", "file_info", "search_files", "recent_files", "organize_folder_plan", "organize_folder", "write_file", "create_directory",
                "move_path", "copy_path", "delete_path", "list_trash", "restore_from_trash", "open_application", "list_installed_apps", "dev_environment", "disk_usage",
-               "clipboard_read", "clipboard_write", "active_window", "system_control", "screen_read", "click_text", "mouse_click", "type_text", "press_keys", "wait_for_text", "mouse_scroll",
+               "clipboard_read", "clipboard_write", "active_window", "list_windows", "focus_window", "system_control", "screen_read", "click_text", "mouse_click", "type_text", "press_keys", "wait_for_text", "mouse_scroll",
                "browser_open", "browser_read", "browser_click", "browser_fill", "browser_close"]),
     AgentSpec("knowledge", "Knowledge Agent", "Indexes documents and answers from them with citations; searches notes and past conversations",
               "You are JARVIS's knowledge agent. Answer from the user's indexed material using kb_search, citing passages as [n] with a "

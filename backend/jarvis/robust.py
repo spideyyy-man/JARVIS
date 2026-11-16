@@ -266,6 +266,9 @@ TOOL_HINTS = {
     "create_workflow": "automate every schedule recurring routine when",
     "remember": "remember note keep in mind my preference",
     "open_application": "open launch start app program application",
+    "focus_window": "switch to window app bring front show go to alt tab",
+    "wait_for_text": "wait until appears loaded finished ready",
+    "save_as_workflow": "do that again every repeat routine save automate",
 }
 
 
