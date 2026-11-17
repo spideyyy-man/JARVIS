@@ -62,6 +62,8 @@ class Settings:
     openai_stream: bool = True
     # Files JARVIS may see at all. Reads outside these roots are refused.
     allowed_roots: list[Path] = field(default_factory=list)
+    # Folders inside those roots JARVIS must never read, list or search (e.g. private account storage).
+    blocked_paths: list[Path] = field(default_factory=list)
     # Research
     search_provider: str = "duckduckgo"  # duckduckgo | wikipedia
     # Voice (server-side providers are optional; the browser handles voice by default)
@@ -137,6 +139,7 @@ def load_settings(env_file: Path | None = None) -> Settings:
         llm_timeout=float(env("JARVIS_LLM_TIMEOUT", "300")),
         openai_stream=env("JARVIS_OPENAI_STREAM", "1") != "0",
         allowed_roots=_paths(env("JARVIS_ALLOWED_ROOTS", str(Path.home()))),
+        blocked_paths=_paths(env("JARVIS_BLOCKED_PATHS", "")),
         search_provider=env("JARVIS_SEARCH_PROVIDER", "duckduckgo"),
         stt_provider=env("JARVIS_STT_PROVIDER", "browser"),
         tts_provider=env("JARVIS_TTS_PROVIDER", "browser"),

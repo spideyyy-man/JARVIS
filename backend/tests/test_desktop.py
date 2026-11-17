@@ -228,6 +228,11 @@ def test_desktop_launcher_pieces(jarvis, monkeypatch, tmp_path):
 
     cmd = desktop_app.window_command(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe", "http://127.0.0.1:8765/x", tmp_path / "ui")
     assert cmd[1] == "--app=http://127.0.0.1:8765/x" and cmd[2].startswith("--user-data-dir=")
+    assert "--window-size=1360,900" in cmd  # no screen information: the default size
+    small = desktop_app.window_command("edge", "u", tmp_path / "ui", (0, 0, 1366, 728))  # 1366x768 laptop, 40 px taskbar
+    assert "--window-size=1360,728" in small and "--window-position=3,0" in small
+    big = desktop_app.window_command("edge", "u", tmp_path / "ui", (0, 0, 1920, 1040))
+    assert "--window-size=1360,900" in big and "--window-position=280,70" in big
     assert "/api/auth?token=" in desktop_app.app_url(jarvis, "voice") and desktop_app.app_url(jarvis, "voice").endswith("next=/%23/voice")
     script = desktop_app.autostart_script(r"C:\jarvis\backend\.venv\Scripts\python.exe", r"C:\jarvis")
     assert r"C:\jarvis\backend\.venv\Scripts\pythonw.exe" in script and "-m jarvis.desktop_app" in script and 'CurrentDirectory = "C:\\jarvis"' in script

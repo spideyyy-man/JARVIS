@@ -63,12 +63,20 @@ def redact_obj(obj: Any) -> Any:
 class PathGuard:
     """Every filesystem path a tool touches goes through here."""
 
-    def __init__(self, allowed_roots: list[Path], data_dir: Path):
+    def __init__(self, allowed_roots: list[Path], data_dir: Path, blocked: list[Path] | None = None):
         self.roots = [r.resolve() for r in allowed_roots]
         self.data_dir = data_dir.resolve()
+        # Folders the user excluded (JARVIS_BLOCKED_PATHS), even when they sit inside an allowed root.
+        self.blocked = [b.resolve() for b in blocked or []]
+
+    def is_blocked(self, path: Path) -> bool:
+        return any(path == b or b in path.parents for b in self.blocked)
 
     def is_sensitive(self, path: Path) -> bool:
+        """True for anything a tool must not read or list: credentials, and the user's blocked folders."""
         if SENSITIVE_PARTS & set(path.parts):
+            return True
+        if self.blocked and self.is_blocked(path.absolute()):
             return True
         return any(fnmatch.fnmatch(path.name.lower(), pat) for pat in SENSITIVE_NAMES)
 
@@ -80,6 +88,8 @@ class PathGuard:
         path = path.resolve()
         if not any(path == r or r in path.parents for r in self.roots):
             raise SecurityError(f"Path is outside the allowed roots: {path}")
+        if self.is_blocked(path):
+            raise SecurityError(f"Path is in a folder the user has blocked (JARVIS_BLOCKED_PATHS): {path}")
         if self.is_sensitive(path):
             raise SecurityError(f"Path is protected (credentials/secrets): {path}")
         if write:

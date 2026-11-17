@@ -36,6 +36,32 @@ def test_path_guard_blocks_outside_roots_secrets_and_symlink_escape(jarvis, home
         g.resolve(str(home / ".jarvis" / "jarvis.db"), write=True)
 
 
+def test_blocked_folder_cannot_be_read_listed_searched_or_sized(jarvis, ctx, home):
+    """JARVIS_BLOCKED_PATHS: a folder inside an allowed root that JARVIS must not touch at all."""
+    from jarvis.security import PathGuard
+
+    private = home / "private"
+    (private / "deep").mkdir(parents=True)
+    (private / "accounts.txt").write_text("invoice login details")
+    (private / "deep" / "invoice-copy.pdf").write_text("x")
+    jarvis.guard = PathGuard([home], jarvis.settings.data_dir, [private])
+    for p in (private, private / "accounts.txt", private / "deep" / "invoice-copy.pdf"):
+        with pytest.raises(SecurityError, match="blocked"):
+            jarvis.guard.resolve(str(p))
+
+    def call(name, **args):
+        return run(jarvis.executor.call(name, args, ctx))
+
+    assert not call("read_file", path=str(private / "accounts.txt")).ok
+    assert not call("list_dir", path=str(private)).ok
+    assert "private" not in [e["name"] for e in call("list_dir", path=str(home)).data["entries"]]
+    found = call("search_files", extensions=["pdf"]).data["results"]
+    assert found and all("private" not in r["path"] for r in found)  # the Downloads invoice, not the blocked copy
+    assert not call("search_files", contains_text="login details").data["results"]
+    assert "private" not in [e["name"] for e in call("disk_usage", path=str(home)).data["largest_in"]["entries"]]
+    assert jarvis.guard.resolve(str(home / "Downloads" / "notes.txt"))  # everything else is unaffected
+
+
 def test_redaction():
     out = redact("key sk-abcdefghijklmnopqrstuvwxyz123 and ghp_abcdefghijklmnopqrstuvwxyz1234 OPENAI_API_KEY=supersecretvalue password: hunter2hunter")
     assert "sk-abc" not in out and "ghp_abc" not in out and "supersecretvalue" not in out and "hunter2hunter" not in out

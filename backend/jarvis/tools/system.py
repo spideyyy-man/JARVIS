@@ -121,7 +121,7 @@ def disk_usage(ctx: ToolContext, path: str = "") -> dict:
         for child in root.iterdir():
             total = 0
             try:
-                if child.is_symlink():
+                if child.is_symlink() or ctx.app.guard.is_sensitive(child):
                     continue
                 if child.is_file():
                     total = child.stat().st_size

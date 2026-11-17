@@ -35,7 +35,7 @@ class Jarvis:
         self.db = Database(self.settings.db_path)
         self.bus = EventBus()
         self.audit = AuditLog(self.db)
-        self.guard = PathGuard(self.settings.allowed_roots, self.settings.data_dir)
+        self.guard = PathGuard(self.settings.allowed_roots, self.settings.data_dir, self.settings.blocked_paths)
         self.embedder = make_embedder(self.settings)
         self.kb = KnowledgeBase(self.db, self.embedder)
         self.memory = Memory(self.db, self.embedder)

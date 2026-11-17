@@ -40,8 +40,35 @@ def find_browser() -> str | None:
     return mac if Path(mac).is_file() else None
 
 
-def window_command(browser: str, url: str, profile: Path) -> list[str]:
-    return [browser, f"--app={url}", f"--user-data-dir={profile}", "--window-size=1360,900", "--no-first-run", "--no-default-browser-check"]
+WINDOW_SIZE = (1360, 900)
+
+
+def work_area() -> tuple[int, int, int, int] | None:
+    """Usable screen rectangle (x, y, width, height) on Windows - the screen minus the taskbar."""
+    if platform.system() != "Windows":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        rect = wintypes.RECT()
+        if ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):  # SPI_GETWORKAREA
+            return rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top
+    except Exception:
+        pass
+    return None
+
+
+def window_command(browser: str, url: str, profile: Path, area: tuple[int, int, int, int] | None = None) -> list[str]:
+    """The app window, sized to fit and centred in `area`. A fixed 1360x900 ran 23 px off the bottom of a
+    1366x768 laptop screen, hiding the bottom of the UI."""
+    w, h = WINDOW_SIZE
+    geometry = [f"--window-size={w},{h}"]
+    if area:
+        x, y, aw, ah = area
+        w, h = min(w, aw), min(h, ah)
+        geometry = [f"--window-size={w},{h}", f"--window-position={x + (aw - w) // 2},{y + (ah - h) // 2}"]
+    return [browser, f"--app={url}", f"--user-data-dir={profile}", *geometry, "--no-first-run", "--no-default-browser-check"]
 
 
 def app_url(jarvis: Jarvis, screen: str = "home") -> str:
@@ -55,7 +82,7 @@ def open_window(jarvis: Jarvis, screen: str = "home") -> bool:
         import webbrowser
 
         return webbrowser.open(app_url(jarvis, screen))
-    subprocess.Popen(window_command(browser, app_url(jarvis, screen), jarvis.settings.data_dir / "ui-profile"),
+    subprocess.Popen(window_command(browser, app_url(jarvis, screen), jarvis.settings.data_dir / "ui-profile", work_area()),
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return True
 

@@ -34,7 +34,8 @@ def _entry(p: Path) -> dict:
 def walk(root: Path, guard, include_hidden: bool = False, max_files: int = 60_000, deadline: float | None = None):
     count = 0
     for dirpath, dirs, files in os.walk(root, followlinks=False):
-        dirs[:] = [d for d in dirs if d not in SKIP_DIRS and (include_hidden or not d.startswith("."))]
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS and (include_hidden or not d.startswith("."))
+                   and not guard.is_sensitive(Path(dirpath) / d)]  # never descend into blocked/credential folders
         for name in files:
             if not include_hidden and name.startswith("."):
                 continue

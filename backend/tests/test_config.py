@@ -27,3 +27,12 @@ def test_the_shipped_env_example_loads_as_is(tmp_path, monkeypatch):
     assert s.calendar_ics == "" and s.imap_host == "" and s.openai_base_url == ""
     assert s.data_dir == (tmp_path / "data").resolve()
     assert s.allowed_roots == [Path.home().resolve()]  # blank JARVIS_ALLOWED_ROOTS = the documented default
+    assert s.blocked_paths == []
+
+
+def test_blocked_paths_setting_is_read(tmp_path, monkeypatch):
+    import os
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("JARVIS_BLOCKED_PATHS", os.pathsep.join([str(tmp_path / "a"), str(tmp_path / "b")]))
+    assert load_settings(tmp_path / "none.env").blocked_paths == [(tmp_path / "a").resolve(), (tmp_path / "b").resolve()]
