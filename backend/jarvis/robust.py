@@ -245,7 +245,8 @@ TOOL_HINTS = {
     "organize_folder_plan": "tidy clean up sort messy downloads desktop",
     "screen_read": "see look at screen display window error dialog message showing visible",
     "click_text": "press tap button link menu select choose",
-    "type_text": "write enter input keyboard fill",
+    # not "write": "write me a poem" put this tool first and a 3B model then typed into whatever window had focus
+    "type_text": "type typing enter input keyboard fill",
     "system_control": "volume louder quieter mute sound brightness dim lock music pause play next song",
     "clipboard_read": "copied paste clipboard",
     "browser_open": "website web page site url visit go to online",

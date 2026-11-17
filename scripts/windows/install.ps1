@@ -103,13 +103,15 @@ else {
   if (Has-Command "ollama") {
     $up = $false
     for ($i = 0; $i -lt 30 -and -not $up; $i++) {
-      try { Invoke-WebRequest -Uri "http://localhost:11434/api/version" -UseBasicParsing -TimeoutSec 2 | Out-Null; $up = $true }
+      # 127.0.0.1, not localhost: Windows tries ::1 first, Ollama listens on IPv4 only, and the refused
+      # IPv6 attempt alone takes about 2 s - long enough to time out every check.
+      try { Invoke-WebRequest -Uri "http://127.0.0.1:11434/api/version" -UseBasicParsing -TimeoutSec 5 | Out-Null; $up = $true }
       catch {
         if ($i -eq 0) { Note "starting the Ollama service"; Start-Process -FilePath "ollama" -ArgumentList "serve" -WindowStyle Hidden }
         Start-Sleep -Seconds 1
       }
     }
-    if ($up) { Note "Ollama is running" } else { Warn "Ollama did not answer on http://localhost:11434 - the model download may fail. Start Ollama from the Start menu and run this installer again." }
+    if ($up) { Note "Ollama is running" } else { Warn "Ollama did not answer on http://127.0.0.1:11434 - the model download may fail. Start Ollama from the Start menu and run this installer again." }
   } else {
     Warn "Ollama could not be installed automatically. Install it from https://ollama.com/download and run this installer again."
     Warn "Continuing without a model: JARVIS will use its built-in rule engine."
@@ -129,8 +131,13 @@ Step "4/6" "Checking what works on this computer"
 $report = Join-Path $root "doctor-report.txt"
 $ErrorActionPreference = "Continue"   # the report may write warnings to the error stream; that must not abort the installer
 & "backend\.venv\Scripts\python.exe" -m jarvis.doctor 2>&1 | ForEach-Object { "$_" } | Tee-Object -FilePath $report | Out-Host
+$doctorExit = $LASTEXITCODE
 $ErrorActionPreference = "Stop"
 Note "saved to $report  (send this file if you need help)"
+# Exit code 1 = some checks failed (each has a fix line above). Anything else, or no summary line, means
+# the doctor itself crashed - and then JARVIS will not start either, so do not carry on as if all is well.
+$summary = Select-String -Path $report -Pattern '^\d+ ok, \d+ warning' -Quiet
+if (-not $summary) { throw "The diagnostics crashed (exit code $doctorExit), so JARVIS would not start either. The error is above and in $report." }
 
 # ---------------------------------------------------------------- 6. Shortcut
 Step "5/6" "Desktop shortcut"

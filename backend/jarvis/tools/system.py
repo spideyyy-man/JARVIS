@@ -38,28 +38,46 @@ def snapshot(interval: float = 0.0) -> dict:
 
 
 def _top_processes(sort_by: str = "cpu", limit: int = 8, name_filter: str = "") -> list[dict]:
-    procs = []
-    for p in psutil.process_iter(["pid", "name", "username", "memory_percent", "status", "create_time", "cmdline"]):
+    """Two passes: the sort key for every process, then the costly fields (status, user, memory) only for
+    the rows shown. On Windows each of those fields takes 2-3 s across a few hundred processes, which made
+    one system_stats call take 15-20 s when they were read for everything."""
+    nf = name_filter.lower()
+    procs: list[tuple[psutil.Process, dict]] = []
+    for p in psutil.process_iter(["pid", "name"]):
         try:
-            info = p.info
-            if name_filter and name_filter.lower() not in (info["name"] or "").lower() and name_filter.lower() not in " ".join(info["cmdline"] or []).lower():
+            info = dict(p.info)
+            if info["pid"] == 0:  # Windows "System Idle Process": its CPU figure is idle time, not load
                 continue
-            info["cpu_percent"] = p.cpu_percent(None)
-            procs.append(info)
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            if nf and nf not in (info["name"] or "").lower():
+                if nf not in " ".join(p.as_dict(["cmdline"], ad_value=None)["cmdline"] or []).lower():
+                    continue
+            if sort_by == "cpu":
+                p.cpu_percent(None)  # first sample; the second one below gives the percentage
+            else:
+                info["memory_percent"] = p.as_dict(["memory_percent"], ad_value=None)["memory_percent"]
+            procs.append((p, info))
+        except psutil.Error:
             continue
     if sort_by == "cpu":  # cpu_percent needs two samples to be meaningful
         time.sleep(0.25)
-        for info in procs:
+        for p, info in procs:
             try:
-                info["cpu_percent"] = psutil.Process(info["pid"]).cpu_percent(None)
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
+                info["cpu_percent"] = p.cpu_percent(None)
+            except psutil.Error:
+                info["cpu_percent"] = None
     key = "cpu_percent" if sort_by == "cpu" else "memory_percent"
-    procs.sort(key=lambda i: i.get(key) or 0, reverse=True)
-    return [{"pid": i["pid"], "name": i["name"], "user": i["username"], "cpu_percent": round(i.get("cpu_percent") or 0, 1),
-             "memory_percent": round(i.get("memory_percent") or 0, 2), "status": i["status"],
-             "command": " ".join(i["cmdline"] or [])[:160]} for i in procs[:limit]]
+    procs.sort(key=lambda pi: pi[1].get(key) or 0, reverse=True)
+    rows = []
+    for p, info in procs[:limit]:
+        try:
+            more = p.as_dict(["username", "status", "cmdline"] + ([] if "memory_percent" in info else ["memory_percent"]), ad_value=None)
+        except psutil.Error:
+            more = {"username": None, "status": "exited", "cmdline": None}
+        info.update(more)
+        rows.append({"pid": info["pid"], "name": info["name"], "user": info["username"], "cpu_percent": round(info.get("cpu_percent") or 0, 1),
+                     "memory_percent": round(info.get("memory_percent") or 0, 2), "status": info["status"],
+                     "command": " ".join(info["cmdline"] or [])[:160]})
+    return rows
 
 
 def system_stats(ctx: ToolContext) -> dict:

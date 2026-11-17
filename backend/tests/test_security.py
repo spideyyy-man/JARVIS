@@ -1,4 +1,6 @@
 import os
+import subprocess
+import sys
 
 import pytest
 
@@ -15,9 +17,21 @@ def test_path_guard_blocks_outside_roots_secrets_and_symlink_escape(jarvis, home
             g.resolve(bad)
     outside = tmp_path / "outside.txt"
     outside.write_text("secret")
-    os.symlink(outside, home / "link.txt")
-    with pytest.raises(SecurityError):
-        g.resolve(str(home / "link.txt"))
+    try:
+        os.symlink(outside, home / "link.txt")
+    except OSError:  # Windows: symlinks need admin rights or Developer Mode
+        if sys.platform != "win32":
+            raise
+    else:
+        with pytest.raises(SecurityError):
+            g.resolve(str(home / "link.txt"))
+    if sys.platform == "win32":  # a directory junction needs no privileges, so it is the real escape route on Windows
+        (tmp_path / "outdir").mkdir()
+        (tmp_path / "outdir" / "secret.txt").write_text("secret")
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(home / "jlink"), str(tmp_path / "outdir")], check=True, capture_output=True)
+        for p in (home / "jlink", home / "jlink" / "secret.txt"):
+            with pytest.raises(SecurityError):
+                g.resolve(str(p))
     with pytest.raises(SecurityError):  # JARVIS never edits its own database / token
         g.resolve(str(home / ".jarvis" / "jarvis.db"), write=True)
 

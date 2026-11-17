@@ -84,6 +84,17 @@ def test_small_models_see_a_relevant_shortlist_of_tools(home, tmp_path):
     assert len(j.tools.subset(__import__("jarvis.agents", fromlist=["AGENTS"]).AGENTS["computer"].tools)) > 25
 
 
+def test_a_writing_request_does_not_shortlist_keyboard_typing(home, tmp_path):
+    """Found on the first real-model run: "write me a poem" ranked type_text first and qwen2.5:3b called it."""
+    llm = ScriptedLLM([("Mondays...", []), ("ok", [])])
+    j = make(home, tmp_path, providers=[llm])
+    j.settings.max_tools = 8
+    run(j.agents.run("computer", "write me a two-line poem about mondays", conversation_id=None))
+    assert "type_text" not in llm.seen[0]["tools"]
+    run(j.agents.run("computer", "type hello world into the box", conversation_id=None))
+    assert "type_text" in llm.seen[1]["tools"]  # still found when the user means typing
+
+
 def test_slow_model_times_out_and_fails_over(home, tmp_path):
     import asyncio
 

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from conftest import run
 
 
@@ -11,6 +13,7 @@ def test_system_stats_reports_real_numbers(jarvis, ctx):
     d = call(jarvis, ctx, "system_stats").data
     assert 0 <= d["cpu"]["percent"] <= 100 and d["memory"]["total_gb"] > 0 and d["cpu"]["cores"] >= 1
     assert d["top_memory"] and d["assessment"]
+    assert all(p["pid"] != 0 for p in d["top_cpu"])  # Windows' System Idle Process is idle time, not load
     assert call(jarvis, ctx, "list_processes", sort_by="memory", limit=5).data["processes"]
     assert call(jarvis, ctx, "disk_usage", path=str(jarvis.settings.allowed_roots[0])).data["largest_in"]["entries"]
 
@@ -21,7 +24,7 @@ def test_search_files_by_keyword_extension_and_content(jarvis, ctx, home):
     d = call(jarvis, ctx, "search_files", keywords=["budget"]).data
     assert d["results"][0]["path"].endswith("q3_budget_report.xlsx")
     d = call(jarvis, ctx, "search_files", extensions=["pdf"]).data
-    assert [r["path"].rsplit("/", 1)[1] for r in d["results"]] == ["invoice.pdf"]
+    assert [Path(r["path"]).name for r in d["results"]] == ["invoice.pdf"]
     d = call(jarvis, ctx, "search_files", contains_text="quarterly roadmap").data
     assert d["results"][0]["match"]["line"] == 2
 

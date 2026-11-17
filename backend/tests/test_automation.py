@@ -66,14 +66,16 @@ def test_scheduler_fires_due_workflow(jarvis):
         wf = jarvis.automation.create("tick", {"type": "interval", "seconds": 5}, [{"tool": "system_stats"}])
         assert jarvis.automation.tick() == []  # not due yet
         jarvis.db.update("workflows", wf["id"], next_run=time.time() - 1)
+        fired_at = time.time()
         assert jarvis.automation.tick() == [wf["id"]]
         await asyncio.gather(*jarvis.automation._tasks)
-        return wf
+        return wf, fired_at
 
-    wf = run(scenario())
+    wf, fired_at = run(scenario())
     runs = jarvis.automation.runs(wf["id"])
     assert len(runs) == 1 and runs[0]["status"] == "succeeded" and runs[0]["trigger"] == "schedule"
-    assert jarvis.db.one("SELECT next_run FROM workflows WHERE id=?", (wf["id"],))["next_run"] > time.time()
+    # rescheduled one interval after it fired (not "after now": how long the run took depends on the machine)
+    assert jarvis.db.one("SELECT next_run FROM workflows WHERE id=?", (wf["id"],))["next_run"] >= fired_at + 5
 
 
 def test_workflow_gets_no_extra_privileges_and_resumes_after_approval(jarvis, home):

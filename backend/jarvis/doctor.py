@@ -60,7 +60,7 @@ async def diagnose(app, online: bool = True) -> list[dict]:
     chain = app.llm.providers
     if chain[0].name == "offline":
         out.append(_r("Language model", WARN, "None configured: JARVIS is running on the built-in rule engine (fixed request shapes, no reasoning).",
-                      "Install Ollama, `ollama pull qwen2.5:3b`, and set JARVIS_LLM_PROVIDER=openai_compat, JARVIS_OPENAI_BASE_URL=http://localhost:11434/v1, JARVIS_OPENAI_MODEL=qwen2.5:3b."))
+                      "Install Ollama, `ollama pull qwen2.5:3b`, and set JARVIS_LLM_PROVIDER=openai_compat, JARVIS_OPENAI_BASE_URL=http://127.0.0.1:11434/v1, JARVIS_OPENAI_MODEL=qwen2.5:3b."))
     for p in chain:
         if p.name == "offline":
             continue
@@ -80,8 +80,14 @@ async def diagnose(app, online: bool = True) -> list[dict]:
                 out.append(_r(f"Model: {p.name}", FAIL, f"{p.model} did not call the tool when asked (it replied: {res['text']!r}). It can chat but cannot act.",
                               "Use a model that supports tool calling, e.g. `ollama pull qwen2.5:3b`."))
         except Exception as e:
-            out.append(_r(f"Model: {p.name}", FAIL, f"{p.model}: {type(e).__name__}: {str(e)[:200]}",
-                          "Is the model server running? For Ollama: start it and run `ollama list` to confirm the model name."))
+            msg = str(e)
+            if "out-of-memory" in msg or "out of memory" in msg or "failed to allocate" in msg:
+                fix = ("The model server is running but this computer did not have enough free memory to load the model. "
+                       "Close other programs (browsers, editors, builds) and run the check again, or use a smaller model "
+                       "(e.g. `ollama pull qwen2.5:1.5b`, then set JARVIS_OPENAI_MODEL).")
+            else:
+                fix = "Is the model server running? For Ollama: start it and run `ollama list` to confirm the model name."
+            out.append(_r(f"Model: {p.name}", FAIL, f"{p.model}: {type(e).__name__}: {msg[:200]}", fix))
     if chain[0].name == "openai_compat":
         from .agents import AGENTS, COMMON_RULES, lean_spec
         from .robust import select_tools

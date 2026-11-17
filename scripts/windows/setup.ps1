@@ -22,7 +22,7 @@ if (-not (Test-Path .env)) {
   Copy-Item .env.example .env
   if (-not $SkipModel) {
     (Get-Content .env) -replace '^JARVIS_LLM_PROVIDER=.*', 'JARVIS_LLM_PROVIDER=openai_compat' `
-                       -replace '^JARVIS_OPENAI_BASE_URL=.*', 'JARVIS_OPENAI_BASE_URL=http://localhost:11434/v1' `
+                       -replace '^JARVIS_OPENAI_BASE_URL=.*', 'JARVIS_OPENAI_BASE_URL=http://127.0.0.1:11434/v1' `
                        -replace '^JARVIS_OPENAI_MODEL=.*', "JARVIS_OPENAI_MODEL=$Model" | Set-Content .env
   }
   Write-Host "   wrote .env"

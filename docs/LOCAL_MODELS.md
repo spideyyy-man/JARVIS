@@ -15,7 +15,7 @@ out falls back to the built-in behaviour.
 
 ```bash
 JARVIS_LLM_PROVIDER=openai_compat
-JARVIS_OPENAI_BASE_URL=http://localhost:11434/v1
+JARVIS_OPENAI_BASE_URL=http://127.0.0.1:11434/v1
 JARVIS_OPENAI_MODEL=<model name>
 ```
 

@@ -2,22 +2,42 @@
 nothing secret is ever hardcoded or written to the database."""
 from __future__ import annotations
 
+import locale
 import os
+import re
 import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
 
 
+def _dotenv_value(raw: str) -> str:
+    """The value part of a KEY=VALUE line. A quoted value is taken verbatim; an unquoted one ends at
+    an inline comment (whitespace then '#'), so `KEY=12   # note` gives '12' and `KEY=   # note` gives ''."""
+    value = raw.strip()
+    if value[:1] in ('"', "'"):
+        end = value.find(value[0], 1)
+        if end > 0:
+            return value[1:end]
+    if value.startswith("#"):
+        return ""
+    return re.split(r"\s+#", value, maxsplit=1)[0].rstrip()
+
+
 def _load_dotenv(path: Path) -> None:
-    """Minimal .env loader: KEY=VALUE lines, existing environment wins."""
+    """Minimal .env loader: KEY=VALUE lines, inline comments allowed, existing environment wins."""
     if not path.is_file():
         return
-    for line in path.read_text().splitlines():
+    data = path.read_bytes()
+    try:
+        text = data.decode("utf-8-sig")
+    except UnicodeDecodeError:  # Windows PowerShell 5.1 Set-Content writes the ANSI code page
+        text = data.decode(locale.getpreferredencoding(False), errors="replace")
+    for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+        os.environ.setdefault(key.strip(), _dotenv_value(value))
 
 
 def _paths(value: str) -> list[Path]:
@@ -95,7 +115,11 @@ class Settings:
 
 def load_settings(env_file: Path | None = None) -> Settings:
     _load_dotenv(env_file or Path.cwd() / ".env")
-    env = os.environ.get
+
+    def env(key: str, default: str) -> str:
+        """A blank value (`KEY=` in .env, as .env.example ships) means "use the default", not "empty"."""
+        return os.environ.get(key, "").strip() or default
+
     data_dir = Path(env("JARVIS_DATA_DIR", "~/.jarvis")).expanduser().resolve()
     data_dir.mkdir(parents=True, exist_ok=True)
     s = Settings(
