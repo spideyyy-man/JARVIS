@@ -78,6 +78,7 @@ export class VoiceEngine {
   private capture: "none" | "ptt" | "followup" = "none";
   private armedUntil = 0;
   private activeTurn = false; // a reply is being generated/streamed
+  private cancelling: Promise<unknown> | null = null; // cancel request for an interrupted turn, still in flight
   private ttsBuf = "";
   private ttsPending = 0;
   private ttsGen = 0;
@@ -160,6 +161,10 @@ export class VoiceEngine {
     } else if (this.capture !== "none") this.stopCapture();
     else this.startCapture("ptt");
   }
+  /** Hotkey / tray: listen for one request now, without the wake word (interrupting a reply in progress). */
+  listenNow() {
+    if (this.capture === "none" || this.busy) this.toggleMic();
+  }
   /** Barge-in / stop: silence speech output and cancel the running turn on the backend. */
   interrupt() {
     const wasBusy = this.busy;
@@ -172,7 +177,7 @@ export class VoiceEngine {
       /* ignore */
     }
     if (this.activeTurn && this.s.conversationId) {
-      this.deps.cancelChat(this.s.conversationId).catch(() => {});
+      this.cancelling = this.deps.cancelChat(this.s.conversationId).catch(() => {});
       if (this.s.reply.trim()) this.set({ turns: [...this.s.turns, { role: "assistant", text: this.s.reply.trim() + " (interrupted)" }] });
     }
     this.activeTurn = false;
@@ -344,7 +349,10 @@ export class VoiceEngine {
     this.ttsBuf = "";
     this.spoken = "";
     this.set({ conversationId: cid, phase: "thinking", reply: "", replyStreaming: true, error: "", turns: [...this.s.turns, { role: "user", text }] });
-    this.deps.sendChat(text, cid).catch((err: unknown) => {
+    // Send only once a cancel of the interrupted turn has been handled: arriving later, it would cancel this new turn.
+    const prior = this.cancelling;
+    this.cancelling = null;
+    (prior ?? Promise.resolve()).then(() => this.deps.sendChat(text, cid)).catch((err: unknown) => {
       this.activeTurn = false;
       this.set({ phase: "idle", replyStreaming: false, error: err instanceof Error ? err.message : String(err) });
       this.deps.report("idle");
@@ -359,7 +367,8 @@ export class VoiceEngine {
   }
   private onDone(e: Record<string, unknown>) {
     if (!this.activeTurn || e.conversation_id !== this.s.conversationId) return;
-    const msg = e.message as { content?: string } | undefined;
+    const msg = e.message as { content?: string; meta?: { interrupted?: boolean } } | undefined;
+    if (msg?.meta?.interrupted) return; // the end of the turn we interrupted, not the reply to the current one
     const full = msg?.content ?? this.s.reply;
     // Anything that was never streamed as deltas (e.g. policy replies) still has to be spoken.
     if (full.startsWith(this.s.reply)) this.ttsBuf += full.slice(this.s.reply.length);

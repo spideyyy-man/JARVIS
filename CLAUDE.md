@@ -28,7 +28,7 @@ shortcut "JARVIS" starts `scripts\windows\start.bat`.
 ```powershell
 # from the project folder
 backend\.venv\Scripts\python.exe -m jarvis.doctor      # what works on THIS machine; prints a fix per failure
-scripts\windows\start.bat                              # start (tray icon + app window); or the desktop shortcut
+scripts\windows\start.bat                              # start in the background (tray + minimised window); or the desktop shortcut
 cd backend; .venv\Scripts\python.exe -m pytest -q      # tests (3 GUI tests skip: they need a Linux display)
 .\Install-JARVIS.bat                                   # full (re)install; safe to re-run, keeps an existing .env
 ```
@@ -36,9 +36,20 @@ cd backend; .venv\Scripts\python.exe -m pytest -q      # tests (3 GUI tests skip
 The doctor's `Model` line matters most: it asks the model to call a tool and reports whether it can
 and how long it took. The installer also saves its output to `doctor-report.txt` (git-ignored).
 
-Only one JARVIS may run at a time (port 8765). To restart it, use the tray menu's Quit, or stop the
+Only one JARVIS may run at a time (port 8765); starting it again just brings the running one's window up.
+To restart it, use the tray menu's Quit (it also closes the window), or stop the
 `python.exe -m jarvis.desktop_app` processes and the `msedge.exe` processes whose command line contains
 `.jarvis\ui-profile` - never the user's other Edge windows.
+
+## How the owner uses it (2026-11-18)
+
+JARVIS is a background assistant, not a dashboard. At start one compact window (460 px wide, docked
+bottom-right) opens and is minimised to the taskbar; the page keeps listening for the wake word (Edge is
+started with background-throttling off and autoplay allowed so it can listen and speak while minimised).
+`Ctrl+Alt+J` or the tray's "Talk to JARVIS" brings that same window back and starts listening without the
+wake word (`POST /api/ui/listen` -> `ui.listen` event). There is only ever one window: each window runs its
+own recogniser, so two would both answer. The UI is one Assistant screen + Settings; "Show all pages" in
+Settings (local storage) restores the full workspace (Command Center, Agents, Coding, ...).
 
 ## Windows results (2026-11-17)
 
@@ -76,7 +87,7 @@ empty = Edge's own language) and, with no voice chosen, picks a voice for that l
 so Tamil/Hindi speech normalised to "" - and accepts "Jarvis" written in the language's script. The prompt
 asks the model to reply in the user's language. Measured: `qwen2.5:3b` does reply in Hindi/Tamil, but got
 "capital of India" wrong in both (84-118 s each). Treat non-English answers from the 3B model as unreliable.
-The rule engine (fast path) is English-only.
+The rule engine (fast path) understands English and, since 2026-11-18, common Tamil commands (below).
 
 Fixed at the same time: in flat mode tool results are cut to 3000 chars for the local model; a longer result
 (system_stats with long Windows command lines) no longer crashes the rule engine's summary after a failover -
@@ -141,6 +152,19 @@ docs/               ARCHITECTURE, GAP_ANALYSIS, WINDOWS, LOCAL_MODELS, ACCEPTANC
 - **Local model context**: Ollama's default context is small. `setup.ps1` builds `jarvis-model`
   (`num_ctx 8192`). Prompts are kept lean for `openai_compat` (short tool descriptions, 3000-char tool
   results, 5000-char history).
+- **Local model speed = prompt caching.** On this CPU, reading ~1200 prompt tokens takes ~20 s; generating a
+  short answer takes 1-2 s. Ollama reuses the processed prompt when a request starts with the same text, so in
+  flat mode the system prompt (`agents.flat_system`) and the first tools (`agents.FLAT_CORE`, fixed order) must
+  never change between requests. Anything per-request (time, recalled memories, summary) goes in a
+  `<context>` block in front of the user's words (`offline.with_context`; the rule engine strips it). Extra
+  tools are appended after the core only when the request shares words with them. Never put the time, a
+  shortlist that varies, or recalled memories into the system prompt - it silently brings back the 20 s.
+  `app._keep_model_warm` preloads that prefix at start and every 45 min (`keep_alive` 2h,
+  `JARVIS_OPENAI_KEEP_ALIVE`); quitting unloads the model.
+- **Instant replies**: time, date, hello, thanks, "who are you" (English and Tamil) are answered by
+  `offline.fast_talk` without the model. Tamil commands (`offline.TA_RULES`, only fire on Tamil script) cover
+  volume, media, brightness, lock, open app/site, system status, screen/clipboard, reminders, web search;
+  Tamil requests get Tamil replies (`TA_RENDERERS`). "சரி"/"வேண்டாம்" approve/deny a pending action.
 
 ## Conventions
 
@@ -167,6 +191,13 @@ Windows laptop (2026-11-17, Python 3.13):
 - After `5abb543`: 168 passed, 3 skipped (2 min 4 s). Doctor: 14 ok, 3 optional warnings, 0 failures.
 - With the language setting and failover fix (175 tests, 2026-11-18): **172 passed, 3 skipped, 0 failed**
   (7 min, ~1.8 GB free RAM); `node frontend/e2e/wake.test.mjs`: 6/6; UI type-check and build pass.
+- Background assistant, prompt caching, Tamil commands (2026-11-18): 229 passed, 3 skipped before the last
+  tool-selection fix; the affected modules (156 tests) pass after it. UI checked in a 460x704 view against a
+  throwaway instance: English/Tamil instant replies, Tamil status reply, inline approval card, barge-in.
+  Real laptop (CPU at 100% from other apps, <1 GB free): model preload at start 128 s (background); "capital of
+  France" 7-14 s with 1054-1133 of 1140 prompt tokens cached (1.1 s on a quiet machine, was 17-21 s);
+  time/date/hello in English and Tamil 0.1-0.4 s; Tamil "is my computer OK" -> Tamil reply in 26 s (system_stats
+  itself is slow under load). Tamil open questions from the 3B model are still wrong ("capital of India" -> nonsense).
 - Earlier, a full run under heavy memory pressure (0.4 GB free, 72 min) had timing-based failures in the
   failover tests: they pass on an unloaded machine. Expect timeouts when RAM is nearly exhausted.
 - Frontend browser checks (`frontend/e2e/*.mjs`) and `scripts/acceptance.py` were not run on Windows.
@@ -175,10 +206,12 @@ Windows laptop (2026-11-17, Python 3.13):
 
 1. Windows: finish the checks under "Still untested" above (tray menu, hotkey press, voice, media keys,
    window switching, autostart, a double-click install).
-2. Real model: works, but slow (17-50 s per model reply on this CPU) and it over-uses tools on simple
-   requests (three planning calls before a two-line poem). Try it on real one- and two-step tasks and tune
-   prompts/hints from what goes wrong; don't expect long chains from a 3B model. In Hindi/Tamil it answers
-   in the right language but with wrong facts; `qwen2.5:7b` is the next thing to try (needs ~5 GB free RAM).
+2. Real model: with prompt caching a short answer is 1-3 s on a quiet machine, 7-20 s when other apps load
+   the CPU. Planning tools are no longer offered in flat mode and tools that change things are not offered on
+   shared words alone. In Tamil/Hindi it answers in the right language but with wrong facts: a better
+   multilingual model is the fix (`qwen2.5:7b` needs ~5 GB free RAM; a 3-4B multilingual model is worth trying).
+   Still untested: real speech through the microphone (wake word while minimised, Tamil recognition by Edge),
+   whether Edge speaks Tamil replies with a Tamil voice on this laptop, the tray/hotkey bringing the window back.
 3. Memory: with other apps open the laptop can drop under 2 GB free; Ollama then fails to load the model
    ("out-of-memory") and JARVIS falls back to the rule engine. A smaller model (`qwen2.5:1.5b`) is an
    option if this keeps happening.

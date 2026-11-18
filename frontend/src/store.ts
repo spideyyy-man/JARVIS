@@ -178,6 +178,7 @@ export function initStore() {
     pushToast(n.level === "error" ? "error" : n.level === "warning" ? "warning" : "info", n.title, n.body);
   });
   bus.on("assistant.announce", (e) => voice.announce(String(e.text ?? "")));
+  bus.on("ui.listen", () => voice.listenNow()); // Ctrl+Alt+J or the tray's "Talk to JARVIS"
   bus.on("llm.failover", (e) => pushToast("warning", `Language model '${String(e.provider)}' failed`, `${String(e.error ?? "")}${e.next ? ` — switching to '${String(e.next)}'` : ""}`));
   void bootstrap();
 }

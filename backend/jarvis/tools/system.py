@@ -231,7 +231,7 @@ def open_application(ctx: ToolContext, name: str, target: str = "") -> dict:
     if target:
         cmd.append(str(ctx.app.guard.resolve(target)))
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-    return {"launched": cmd, "pid": proc.pid}
+    return {"opened": name, "launched": cmd, "pid": proc.pid}
 
 
 def register(reg: ToolRegistry) -> None:

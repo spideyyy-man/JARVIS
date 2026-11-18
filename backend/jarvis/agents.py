@@ -14,8 +14,9 @@ from typing import TYPE_CHECKING
 
 from .db import new_id
 from .llm.base import OnText
-from .llm.offline import match_rules
-from .robust import LoopGuard, StreamFilter, compact_history, repair_response, select_tools
+from .llm.offline import match_rules, with_context
+from .robust import LoopGuard, StreamFilter, compact_history, rank_tools, repair_response, select_tools
+from .security import Level
 from .tools.registry import Tool, ToolContext, ToolRegistry
 from .tools.research import verify_citations
 
@@ -90,13 +91,58 @@ AGENTS: dict[str, AgentSpec] = {a.name: a for a in [
               "You are JARVIS's monitoring agent. Report measured numbers, name the heaviest processes, and give a short assessment.",
               ["system_stats", "list_processes", "disk_usage", "metrics_history"]),
     AgentSpec("assistant", "Single Assistant (flat mode)", "One agent with every tool; used with slow local models to avoid delegation round-trips",
-              "You are JARVIS, a personal AI assistant running on the user's computer. Decide whether the user wants an ANSWER or an ACTION. "
-              "Answer conversational questions directly. For anything about the computer, files, code, documents, the web, calendar, email or "
-              "schedules, call the right tool yourself - there is nobody to delegate to. You are shown the tools most relevant to the request; "
-              "if you need a different capability, call `list_tools` to find it and then call that tool by name. "
-              "For multi-step goals call `create_plan` first, then work through the steps one at a time with `update_plan`. "
-              "After acting, check the result before you answer.", []),
+              "You are JARVIS, a personal voice assistant running on the user's computer. Most replies are spoken aloud.\n"
+              "- Questions, conversation and writing (facts, explanations, advice, poems, messages, translations): answer directly in "
+              "plain text. Do not call any tool for these.\n"
+              "- Requests that need this computer, files, apps, the web, reminders, calendar or email: call the right tool yourself. "
+              "If none of the tools you see fits, call `list_tools` to find one, then call it by name.\n"
+              "- Keep spoken answers short: one to three sentences unless the user asks for detail. No tables.\n"
+              "- After a tool runs, answer from its result.", []),
 ]}
+
+# Flat mode on a local model: these tools are always offered, first and in this order, so the system prompt and the
+# start of the tool list are identical on every request. Ollama then reuses the prompt it already processed instead
+# of re-reading ~1000 tokens (measured on the owner's laptop: 21 s -> 1.1 s). Simple commands never reach the model -
+# the fast path handles them - so the core covers what the model is actually asked to do.
+FLAT_CORE = ["list_tools", "web_search", "fetch_url", "open_application", "search_files", "list_dir", "read_file", "remember", "recall", "add_dev_task"]
+
+
+def flat_system(app: "Jarvis") -> str:
+    """The flat agent's system prompt for a local model. Must not change between requests (see FLAT_CORE)."""
+    return (f"{AGENTS['assistant'].prompt}\n{COMMON_RULES}\n\nHome folder: {app.settings.allowed_roots[0]}. "
+            "The user's message may begin with a <context> block (current time, things you remember about the user); "
+            "use it when it is relevant and never mention the block itself.")
+
+
+def flat_core(tools: list) -> list:
+    by_name = {t.name: t for t in tools}
+    return [by_name[n] for n in FLAT_CORE if n in by_name]
+
+
+def flat_extras(task: str, tools: list, core: list, embedder, hinted: set[str], limit: int) -> list:
+    """Request-specific tools added after the core: the rule engine's pick, then read-only tools the request shares
+    words with. A plain question shares words with none, so its prompt is exactly the cached one. Tools that change
+    something are never added on shared words alone: "write a two line poem" made the small model call write_file
+    (measured on the owner's laptop). It can still find them through list_tools."""
+    core_names = {t.name for t in core}
+    rest = [t for t in tools if t.name not in core_names]
+    picked = {t.name for t in rest if t.name in hinted}
+    for t, overlap in rank_tools(task, [t for t in rest if t.level == Level.READ], embedder):
+        if len(picked) >= limit:
+            break
+        if overlap:
+            picked.add(t.name)
+    return [t for t in rest if t.name in picked]
+
+
+async def warm_local_model(app: "Jarvis") -> dict | None:
+    """Load the local model and pre-process the flat agent's fixed prompt, so the first request after start-up is
+    as fast as the rest. Returns the server's token usage, or None when there is nothing to warm."""
+    provider = app.llm.current()
+    if provider.name != "openai_compat" or not hasattr(provider, "warm") or app.root_agent() != "assistant":
+        return None
+    tools = [t for t in app.tools.all() if t.name != "delegate"]
+    return await provider.warm(flat_system(app), [lean_spec(t) for t in flat_core(tools)])
 
 
 # Tools every (non-offline) model always sees for an agent, whatever the request looks like.
@@ -106,7 +152,7 @@ ALWAYS_SHOWN: dict[str, set[str]] = {
     "coding": {"repo_overview", "read_file", "search_code"},
     "research": {"web_search", "fetch_url"},
     "knowledge": {"kb_search"},
-    "assistant": {"list_tools", "create_plan", "update_plan"},
+    "assistant": {"list_tools"},
 }
 
 
@@ -160,8 +206,18 @@ class AgentRuntime:
         # the rule engine doubles as a tool recommender: if it recognises the request, that tool is always offered
         rule_hit = match_rules(task, app.offline.env)
         hinted = {rule_hit[1][0]} & allowed if rule_hit else set()
-        system = f"{spec.prompt}\n{COMMON_RULES}\n\nCurrent time: {time.strftime('%A %Y-%m-%d %H:%M')}. Home: {app.settings.allowed_roots[0]}." + (f"\n\n{context_note}" if context_note else "")
-        messages = [*(history or []), {"role": "user", "content": task}]
+        # Local model in flat mode: a fixed system prompt and tool-list start (see FLAT_CORE) so the model server reuses
+        # what it already processed; what changes per request (time, recalled memories) travels in the user message.
+        stable = agent == "assistant" and app.llm.current().name == "openai_compat"
+        if stable:
+            system = flat_system(app)
+            core = flat_core(tools)
+            extras = flat_extras(task, tools, core, app.embedder, hinted, max(2, app.settings.max_tools - len(core)))
+            content = with_context(task, context_note)
+        else:
+            system = f"{spec.prompt}\n{COMMON_RULES}\n\nCurrent time: {time.strftime('%A %Y-%m-%d %H:%M')}. Home: {app.settings.allowed_roots[0]}." + (f"\n\n{context_note}" if context_note else "")
+            content = task
+        messages = [*(history or []), {"role": "user", "content": content}]
         ctx = ToolContext(app, agent=agent, actor=actor, task_id=task_id, conversation_id=conversation_id)
         result = AgentResult("", agent, task_id)
         status, local = "done", False
@@ -170,8 +226,13 @@ class AgentRuntime:
                 result.steps = step + 1
                 weak = app.llm.current().name != "offline"  # the rule engine needs to see every tool; real models get a shortlist
                 # re-rank every step on the request plus what the model just said, so follow-up tools surface as the task unfolds
-                focus = task + " " + " ".join(m.get("content") or "" for m in messages[-2:] if m["role"] == "assistant")[:300]
-                shown = select_tools(focus, tools, app.embedder, app.settings.max_tools, ALWAYS_SHOWN.get(agent, set()) | used_names | hinted) if weak else tools
+                if stable and app.llm.current().name == "openai_compat":
+                    # same tools at every step of the turn (tools found through list_tools are appended), so step 2 reuses step 1's prompt
+                    fixed = {t.name for t in core + extras}
+                    shown = core + extras + [t for t in tools if t.name in used_names and t.name not in fixed]
+                else:
+                    focus = task + " " + " ".join(m.get("content") or "" for m in messages[-2:] if m["role"] == "assistant")[:300]
+                    shown = select_tools(focus, tools, app.embedder, app.settings.max_tools, ALWAYS_SHOWN.get(agent, set()) | used_names | hinted) if weak else tools
                 local = weak and app.llm.current().name == "openai_compat"  # small context window: keep everything lean
                 if local:
                     compact_history(messages)

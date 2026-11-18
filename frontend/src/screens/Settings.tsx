@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
-import { Cpu, Eye, FolderLock, History, Mic, ScrollText, ShieldCheck, ShieldQuestion, Zap } from "lucide-react";
+import { Cpu, Eye, FolderLock, History, LayoutGrid, Mic, ScrollText, ShieldCheck, ShieldQuestion, Zap } from "lucide-react";
 import { api } from "../api";
 import type { DoctorResult, VoiceSettings } from "../api";
 import { errText, useApi, useStore, voice as voiceEngine } from "../store";
 import { SPEECH_LANGUAGES } from "../wake";
-import { dateTime } from "../util";
+import { dateTime, setAllPages, useAllPages } from "../util";
 import { Loading, Panel, ScreenHead, StatusBadge, Switch } from "../components/Panel";
 
 function useVoices(): SpeechSynthesisVoice[] {
@@ -21,6 +21,7 @@ function useVoices(): SpeechSynthesisVoice[] {
 }
 
 export function SettingsScreen() {
+  const allPages = useAllPages();
   const rev = useStore((s) => s.rev.approval + s.rev.tool);
   const settings = useApi(api.settings, []);
   const tools = useApi(api.tools, []);
@@ -75,6 +76,12 @@ export function SettingsScreen() {
       {err && <div className="banner error-text" role="alert" data-testid="settings-error">{err}</div>}
       {saved && <div className="note note-success" role="status" data-testid="settings-saved">{saved}</div>}
       <div className="grid">
+        <Panel className="s12" title="Layout" icon={<LayoutGrid size={14} />} testid="layout">
+          <div className="row between cap-row">
+            <div><b style={{ textTransform: "none" }}>Show all pages</b><div className="soft">Off: just the assistant and these settings. On: the full workspace (agents, coding, knowledge, research, automation…) - best with a bigger window.</div></div>
+            <Switch checked={allPages} label="Show all pages" onChange={(v) => { setAllPages(v); location.hash = v ? "#/home" : "#/assistant"; }} />
+          </div>
+        </Panel>
         <Panel className="s4 stretch" title="Level 1 · Read" icon={<Eye size={14} />} testid="level-read">
           <div className="stat"><b>{s?.levels.read ?? "—"}</b><span className="dim">tools</span></div>
           <p className="soft">Inspects information and never modifies anything. Runs automatically.</p>

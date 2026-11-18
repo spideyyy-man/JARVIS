@@ -76,6 +76,18 @@ def test_voice_speech_language_setting(client):
     assert client.put("/api/settings", json={"voice": {"language": ""}}, headers=h).json()["voice"]["language"] == ""
 
 
+def test_hotkey_asks_the_open_window_to_listen(client):
+    assert client.post("/api/ui/listen").status_code == 401  # only JARVIS itself (it holds the token) may trigger this
+    with client.websocket_connect(f"/ws?token={client.token}") as ws:
+        assert client.post("/api/ui/listen", headers=client.auth_headers).json() == {"ok": True, "windows": 1}
+        for _ in range(10):
+            if ws.receive_json()["type"] == "ui.listen":
+                break
+        else:
+            raise AssertionError("the window was not told to listen")
+    assert client.get("/api/settings", headers=client.auth_headers).json()["voice"]["wake_on_start"] is True  # background assistant: listening from the start
+
+
 def test_dashboard_knowledge_and_workflow_endpoints(client, home):
     h = client.auth_headers
     (home / "doc.md").write_text("# Notes\nThe deploy pipeline uses blue green releases.\n")

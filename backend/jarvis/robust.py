@@ -273,20 +273,27 @@ TOOL_HINTS = {
 }
 
 
+def rank_tools(task: str, tools: list, embedder) -> list[tuple]:
+    """(tool, words shared with the request) for every tool, most relevant first."""
+    from .knowledge import tokenize
+
+    if not tools:
+        return []
+    docs = [re.sub(r"[_/()=,]", " ", f"{t.name}. {t.name}. {t.description} {TOOL_HINTS.get(t.name, '')}") for t in tools]  # split volume_up -> "volume up"
+    vecs = embedder.embed([task] + docs)
+    words = set(tokenize(task))
+    overlap = np.array([len(words & set(tokenize(d))) for d in docs], dtype=np.float32)
+    scores = vecs[1:] @ vecs[0] + 0.12 * np.minimum(overlap, 4)  # shared vocabulary is strong evidence for a tool
+    return [(tools[i], int(overlap[i])) for i in np.argsort(-scores)]
+
+
 def select_tools(task: str, tools: list, embedder, limit: int, always: set[str]) -> list:
     """Show a small model only the tools most relevant to the request (plus `always`). Fewer tool
     definitions means a shorter prompt and far fewer wrong-tool mistakes. The agent's full tool set
     stays *permitted* - this only narrows what is advertised."""
     if limit <= 0 or len(tools) <= limit:
         return tools
-    from .knowledge import tokenize
-
-    docs = [re.sub(r"[_/()=,]", " ", f"{t.name}. {t.name}. {t.description} {TOOL_HINTS.get(t.name, '')}") for t in tools]  # split volume_up -> "volume up"
-    vecs = embedder.embed([task] + docs)
-    words = set(tokenize(task))
-    overlap = np.array([len(words & set(tokenize(d))) for d in docs], dtype=np.float32)
-    scores = vecs[1:] @ vecs[0] + 0.12 * np.minimum(overlap, 4)  # shared vocabulary is strong evidence for a tool
-    ranked = [tools[i] for i in np.argsort(-scores)]
+    ranked = [t for t, _ in rank_tools(task, tools, embedder)]
     keep = [t for t in tools if t.name in always]
     for t in ranked:
         if len(keep) >= limit:

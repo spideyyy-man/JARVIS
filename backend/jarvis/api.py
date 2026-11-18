@@ -136,11 +136,17 @@ def create_app(jarvis: Jarvis | None = None) -> FastAPI:
                 "running_agents": list(j.agents.active.values()),
                 "pending_approvals": j.db.one("SELECT COUNT(*) AS n FROM approvals WHERE status='pending'")["n"],
                 "voice": {"stt": j.settings.stt_provider, "tts": j.settings.tts_provider, "wake_word": j.settings.wake_word, **j.db.get_setting("voice", {})},
-                "version": "0.1.0", "time": time.time()}
+                "model_warm": j.model_warm, "version": "0.1.0", "time": time.time()}
 
     @app.get("/api/status")
     async def status():
         return status_payload()
+
+    @app.post("/api/ui/listen")
+    async def ui_listen():
+        """The hotkey or tray asks the open JARVIS window to start listening (no wake word needed)."""
+        j.bus.emit("ui.listen")
+        return {"ok": True, "windows": len(j.bus._subscribers)}
 
     # -- chat ------------------------------------------------------------------------
     @app.post("/api/chat")
@@ -302,7 +308,7 @@ def create_app(jarvis: Jarvis | None = None) -> FastAPI:
 
     def settings_payload() -> dict:
         return {"trusted_tools": j.executor.trusted_tools(), "default_project": j.db.get_setting("default_project", ""),
-                "voice": {"wake_word": j.settings.wake_word, "continuous": False, "voice_name": "", "rate": 1.0, "speak_replies": True, "wake_on_start": False, "language": "", **j.db.get_setting("voice", {})},
+                "voice": {"wake_word": j.settings.wake_word, "continuous": False, "voice_name": "", "rate": 1.0, "speak_replies": True, "wake_on_start": True, "language": "", **j.db.get_setting("voice", {})},
                 "capabilities": {name: {"enabled": on, "description": j.CAPABILITIES[name]} for name, on in j.capabilities().items()},
                 "proactive": {"briefing_time": "", **j.db.get_setting("proactive", {})},
                 "behavior": {k: bool(j.db.get_setting(k, True)) for k in BEHAVIOR},

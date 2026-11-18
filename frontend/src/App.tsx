@@ -1,13 +1,14 @@
 import { useEffect, useState } from "react";
 import {
   Activity, Bell, BookOpen, Bot, Code2, FlaskConical, Home as HomeIcon, Lock, MessageSquare, Mic, MonitorCog, Settings as SettingsIcon,
-  ShieldAlert, ShieldCheck, Workflow, X, WifiOff, CloudOff, Cpu,
+  ShieldAlert, ShieldCheck, Sparkles, Workflow, X, WifiOff, CloudOff, Cpu,
 } from "lucide-react";
 import { api } from "./api";
 import { dismissToast, setState, usePendingApprovals, useAssistantState, useStore } from "./store";
-import { ago, go, pad, useNow, useRoute } from "./util";
+import { ago, go, pad, useAllPages, useNow, useRoute } from "./util";
 import { Orb } from "./components/Orb";
 import { ApprovalCard } from "./components/ApprovalCard";
+import { Assistant } from "./screens/Assistant";
 import { Home } from "./screens/Home";
 import { Voice } from "./screens/Voice";
 import { Conversations } from "./screens/Conversations";
@@ -20,6 +21,7 @@ import { Automation } from "./screens/Automation";
 import { SettingsScreen } from "./screens/Settings";
 
 const NAV = [
+  { id: "assistant", label: "Assistant", icon: Sparkles },
   { id: "home", label: "Command Center", icon: HomeIcon },
   { id: "voice", label: "Voice", icon: Mic },
   { id: "conversations", label: "Conversations", icon: MessageSquare },
@@ -192,10 +194,12 @@ export function App() {
   const [tray, setTray] = useState(false);
   const [bell, setBell] = useState(false);
   const pending = usePendingApprovals();
-  const screen = NAV.some((n) => n.id === route[0]) ? route[0] : "home";
+  const allPages = useAllPages();
+  // Default: just the assistant and Settings. "Show all pages" (Settings) brings back the full workspace.
+  const screen = allPages ? (NAV.some((n) => n.id === route[0]) ? route[0] : "assistant") : route[0] === "settings" ? "settings" : "assistant";
 
   useEffect(() => {
-    if (!location.hash) history.replaceState(null, "", "#/home");
+    if (!location.hash) history.replaceState(null, "", "#/assistant");
   }, []);
   useEffect(() => {
     document.title = `${pending.length ? `(${pending.length}) ` : ""}JARVIS · ${NAV.find((n) => n.id === screen)?.label ?? ""}`;
@@ -207,6 +211,18 @@ export function App() {
       <main className="gate" data-testid="booting">
         <div className="gate-card"><Orb state="thinking" size="md" /><p className="soft">Connecting to JARVIS…</p></div>
       </main>
+    );
+  }
+  if (!allPages) {
+    return (
+      <div className="simple-shell" data-screen={screen}>
+        <SimpleTop screen={screen} onApprovals={() => setTray(true)} />
+        <main className="simple-main" data-testid={`screen-${screen}`} key={screen}>
+          {screen === "settings" ? <SettingsScreen /> : <Assistant listen={route[1] === "listen"} />}
+        </main>
+        {tray && <ApprovalTray onClose={() => setTray(false)} />}
+        <Toasts onOpenApprovals={() => setTray(true)} />
+      </div>
     );
   }
   return (
@@ -230,6 +246,7 @@ export function App() {
       </nav>
       <TopBar onApprovals={() => setTray(true)} onBell={() => setBell((v) => !v)} bellOpen={bell} />
       <main className="main" data-testid={`screen-${screen}`} key={screen}>
+        {screen === "assistant" && <Assistant listen={route[1] === "listen"} />}
         {screen === "home" && <Home />}
         {screen === "voice" && <Voice />}
         {screen === "conversations" && <Conversations cid={route[1] ?? null} />}
@@ -245,6 +262,34 @@ export function App() {
       {bell && <NotificationsPopover onClose={() => setBell(false)} />}
       <Toasts onOpenApprovals={() => setTray(true)} />
     </div>
+  );
+}
+
+function SimpleTop({ screen, onApprovals }: { screen: string; onApprovals: () => void }) {
+  const connected = useStore((s) => s.connected);
+  const status = useStore((s) => s.status);
+  const pending = usePendingApprovals();
+  const llm = status?.llm;
+  return (
+    <header className="simple-top">
+      <a className="brand" href="#/assistant" aria-label="JARVIS assistant">
+        <span className="brand-mark" aria-hidden="true" />
+        <span className="brand-name">JARVIS</span>
+      </a>
+      <span className="grow" />
+      {!connected && <span className="badge red" data-testid="ws-offline"><WifiOff size={12} /> offline</span>}
+      {llm?.degraded && <span className="badge amber" data-testid="offline-badge" title="No language model: only built-in commands work."><CloudOff size={12} /> basic</span>}
+      {pending.length > 0 && (
+        <button type="button" className="btn sm topbar-approvals has-pending" onClick={onApprovals} data-testid="approvals-button" aria-label={`${pending.length} pending approvals`}>
+          <ShieldAlert size={14} /> <span className="count num" data-testid="approvals-count">{pending.length}</span>
+        </button>
+      )}
+      {screen === "settings" ? (
+        <a className="btn icon ghost" href="#/assistant" aria-label="Back to the assistant" data-testid="nav-assistant"><X size={16} /></a>
+      ) : (
+        <a className="btn icon ghost" href="#/settings" aria-label="Settings" data-testid="nav-settings"><SettingsIcon size={16} /></a>
+      )}
+    </header>
   );
 }
 

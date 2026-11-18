@@ -1,6 +1,33 @@
 import { useEffect, useState } from "react";
 import type { Schedule } from "./api";
 
+// "Show all pages" (Settings): off = just the assistant and Settings. A per-browser view preference, so local storage.
+const ALL_PAGES = "jarvis.allPages";
+export function getAllPages(): boolean {
+  try {
+    return localStorage.getItem(ALL_PAGES) === "1";
+  } catch {
+    return false;
+  }
+}
+export function setAllPages(on: boolean): void {
+  try {
+    localStorage.setItem(ALL_PAGES, on ? "1" : "0");
+  } catch {
+    /* storage unavailable: the choice lasts until reload */
+  }
+  window.dispatchEvent(new Event("jarvis-allpages"));
+}
+export function useAllPages(): boolean {
+  const [on, setOn] = useState(getAllPages);
+  useEffect(() => {
+    const sync = () => setOn(getAllPages());
+    window.addEventListener("jarvis-allpages", sync);
+    return () => window.removeEventListener("jarvis-allpages", sync);
+  }, []);
+  return on;
+}
+
 export const pad = (n: number) => String(n).padStart(2, "0");
 export function clock(ts: number): string {
   const d = new Date(ts * 1000);

@@ -96,8 +96,44 @@ class OpenAICompatProvider:
 
     name = "openai_compat"
 
-    def __init__(self, base_url: str, model: str, api_key: str | None = None, transport: httpx.AsyncBaseTransport | None = None, stream: bool = True):
+    def __init__(self, base_url: str, model: str, api_key: str | None = None, transport: httpx.AsyncBaseTransport | None = None, stream: bool = True,
+                 keep_alive: str = ""):
         self.base_url, self.model, self.api_key, self.transport, self.stream = base_url.rstrip("/"), model, api_key, transport, stream
+        # Ollama only: how long the model stays loaded after a request ("2h", "-1"). Unloading means the next request
+        # reloads it and re-reads the whole prompt - 20 s or more on a CPU. Other servers ignore the field.
+        self.keep_alive = keep_alive
+
+    def _tool_specs(self, tools: list[dict]) -> list[dict]:
+        return [{"type": "function", "function": {"name": t["name"], "description": t["description"], "parameters": t["input_schema"]}} for t in tools]
+
+    async def warm(self, system: str, tools: list[dict], keep_alive: str | None = None) -> dict:
+        """Load the model and have it read `system` + `tools` once, generating a single token. Ollama keeps the
+        processed prompt in its cache, so a later request that starts with the same system prompt and tools only
+        pays for its own new tokens (measured: 1.1 s instead of 21 s for a 900-token prefix). Returns the usage."""
+        body: dict = {"model": self.model, "messages": [{"role": "system", "content": system}, {"role": "user", "content": "hi"}],
+                      "max_tokens": 1, "stream": False}
+        if tools:
+            body["tools"] = self._tool_specs(tools)
+        ka = self.keep_alive if keep_alive is None else keep_alive
+        if ka:
+            body["keep_alive"] = ka
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(600, connect=10), transport=self.transport) as client:
+                r = await client.post(f"{self.base_url}/chat/completions", json=body, headers=headers)
+        except httpx.HTTPError as e:
+            raise LLMError(f"Cannot reach {self.base_url}: {e}", retryable=True) from e
+        self._raise_for_status(r.status_code, r.text)
+        return r.json().get("usage") or {}
+
+    async def unload(self) -> None:
+        """Ask Ollama to free the model's memory now (best effort; other servers have no such call)."""
+        root = self.base_url.removesuffix("/v1")
+        try:
+            async with httpx.AsyncClient(timeout=5, transport=self.transport) as client:
+                await client.post(f"{root}/api/generate", json={"model": self.model, "keep_alive": 0})
+        except httpx.HTTPError:
+            pass
 
     def _convert(self, system: str, messages: list[dict]) -> list[dict]:
         out = [{"role": "system", "content": system}]
@@ -116,7 +152,9 @@ class OpenAICompatProvider:
     async def complete(self, system, messages, tools, on_text: OnText | None = None, meta=None) -> LLMResponse:
         body: dict = {"model": self.model, "messages": self._convert(system, messages)}
         if tools:
-            body["tools"] = [{"type": "function", "function": {"name": t["name"], "description": t["description"], "parameters": t["input_schema"]}} for t in tools]
+            body["tools"] = self._tool_specs(tools)
+        if self.keep_alive:
+            body["keep_alive"] = self.keep_alive
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         url = f"{self.base_url}/chat/completions"
         try:

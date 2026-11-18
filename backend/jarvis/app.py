@@ -15,7 +15,7 @@ from .db import Database, new_id
 from .events import EventBus
 from .knowledge import KnowledgeBase, Memory, make_embedder
 from .llm.base import FORCE_PROVIDER, LLMProvider, LLMRouter
-from .llm.offline import Env, OfflineProvider, match_rules
+from .llm.offline import Env, OfflineProvider, fast_talk, match_rules
 from .security import AuditLog, PathGuard
 from .tools import browser, coding, desktop, files, images, personal, research, system
 from .tools.registry import ToolExecutor, ToolRegistry, ToolResult
@@ -23,8 +23,10 @@ from .voice import build_voice
 
 AFFIRM_ALL = re.compile(r"^\s*(hey\s+)?(jarvis[,\s]+)?(approve all|yes to all|approve (them|these|everything)( all)?|approve for (this|the) (whole )?task|always allow( this)?( for (this|the) task)?)[\s.!]*$", re.I)
 MAX_CONTINUATIONS = 20
-AFFIRM = re.compile(r"^\s*(hey\s+)?(jarvis[,\s]+)?(yes|yep|approve[d]?|go ahead|do it|confirm(ed)?|proceed|yes,? (do it|please|go ahead))[\s.!]*$", re.I)
-DENY = re.compile(r"^\s*(hey\s+)?(jarvis[,\s]+)?(no|nope|deny|denied|cancel( it| that)?|don'?t|stop|abort)[\s.!]*$", re.I)
+AFFIRM = re.compile(r"^\s*(hey\s+)?((jarvis|ஜார்விஸ்)[,\s]+)?(yes|yep|approve[d]?|go ahead|do it|confirm(ed)?|proceed|yes,? (do it|please|go ahead)"
+                    r"|சரி|ஆமா|ஆமாம்|சரி,?\s*(செய்|பண்ணு)\S*|செய்|பண்ணு|அனுமதிக்கிறேன்)[\s.!]*$", re.I)  # Tamil: OK / yes / do it
+DENY = re.compile(r"^\s*(hey\s+)?((jarvis|ஜார்விஸ்)[,\s]+)?(no|nope|deny|denied|cancel( it| that)?|don'?t|stop|abort"
+                  r"|வேண்டாம்|இல்லை|ரத்து\s*(செய்|பண்ணு)?\S*)[\s.!]*$", re.I)  # Tamil: don't / no / cancel
 HISTORY_CHAR_BUDGET = 16_000
 LOCAL_HISTORY_CHAR_BUDGET = 5_000  # local models usually run with a small context window
 
@@ -32,6 +34,7 @@ LOCAL_HISTORY_CHAR_BUDGET = 5_000  # local models usually run with a small conte
 class Jarvis:
     def __init__(self, settings: Settings | None = None, providers: list[LLMProvider] | None = None):
         self.settings = settings or load_settings()
+        self.model_warm: dict = {}  # last preload of the local model (see _keep_model_warm)
         self.db = Database(self.settings.db_path)
         self.bus = EventBus()
         self.audit = AuditLog(self.db)
@@ -81,7 +84,7 @@ class Jarvis:
         if want == "anthropic" or (want == "auto" and has_anthropic):
             chain.append(AnthropicProvider(s.anthropic_model, s.anthropic_effort, get_secret("ANTHROPIC_API_KEY")))
         if s.openai_base_url and s.openai_model and want in ("auto", "openai_compat", "anthropic"):
-            compat = OpenAICompatProvider(s.openai_base_url, s.openai_model, get_secret("OPENAI_API_KEY"), stream=s.openai_stream)
+            compat = OpenAICompatProvider(s.openai_base_url, s.openai_model, get_secret("OPENAI_API_KEY"), stream=s.openai_stream, keep_alive=s.openai_keep_alive)
             chain.insert(0, compat) if want == "openai_compat" else chain.append(compat)
         chain.append(self.offline)  # always last: graceful degradation
         return chain
@@ -110,8 +113,43 @@ class Jarvis:
         self.monitor.start()
         self.proactive.start()
         self.automation.start()
+        self._warm_task = asyncio.create_task(self._keep_model_warm(), name="jarvis-model-warm")
+
+    WARM_EVERY = 45 * 60  # seconds; shorter than the 2 h keep-alive, so the model stays loaded while JARVIS runs
+
+    async def _keep_model_warm(self) -> None:
+        """Load the local model at start-up with its fixed prompt already processed, and refresh that now and then, so a
+        request after a quiet hour is as fast as one a minute later. Failures (Ollama not running, not enough memory)
+        are reported once and retried quietly; requests still work, they are just slower."""
+        reported = False
+        while True:
+            delay = self.WARM_EVERY
+            try:
+                t0 = time.time()
+                usage = await agents_mod.warm_local_model(self)
+                if usage is None:
+                    return  # no local model to warm
+                self.model_warm = {"at": time.time(), "seconds": round(time.time() - t0, 1), "prompt_tokens": usage.get("prompt_tokens"),
+                                   "cached_tokens": (usage.get("prompt_tokens_details") or {}).get("cached_tokens")}
+                reported = False
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 - warming is best effort
+                self.model_warm = {"at": time.time(), "error": str(e)[:300]}
+                if not reported:
+                    note = self.db.notify("warning", "Local model could not be preloaded", f"{e}. The first reply may be slow.")
+                    self.bus.emit("notification", notification=note)
+                    reported = True
+                delay = 10 * 60
+            await asyncio.sleep(delay)
 
     async def stop(self) -> None:
+        task = getattr(self, "_warm_task", None)
+        if task:
+            task.cancel()
+        primary = self.llm.primary
+        if getattr(primary, "keep_alive", "") and hasattr(primary, "unload"):
+            await primary.unload()  # give the model's memory back when JARVIS quits
         await self.monitor.stop()
         await self.proactive.stop()
         await self.browser.close()
@@ -191,7 +229,7 @@ class Jarvis:
                 reply = {"executed": "Approved and done.", "failed": f"Approved, but it failed: {ap['result']}", "denied": "Understood - cancelled. Nothing was changed."}[ap["status"]]
                 return self._finish(conversation_id, reply, {"approval": ap["id"], "provider": "policy"})
             if len(pending) > 1:
-                return self._finish(conversation_id, f"There are {len(pending)} actions waiting. Please approve or deny each one in the Command Center so I act on the right one.", {"provider": "policy"})
+                return self._finish(conversation_id, f"There are {len(pending)} actions waiting. Please approve or deny each one on screen so I act on the right one.", {"provider": "policy"})
 
         history, summary = self._history(conversation_id, user_msg["id"])
         notes = []
@@ -225,7 +263,8 @@ class Jarvis:
         finally:
             if pin is not None:
                 FORCE_PROVIDER.reset(pin)
-            self._chat_tasks.pop(conversation_id, None)
+            if self._chat_tasks.get(conversation_id) is asyncio.current_task():  # an interrupted turn ending late must not
+                self._chat_tasks.pop(conversation_id, None)                      # forget the newer turn (it could not be cancelled)
             self.bus.active_task = None
         meta = {"task_id": result.task_id, "provider": result.provider, "tools": result.tools_used, "pending_approvals": result.pending_approvals,
                 "errors": result.errors, "agents": sorted({t["agent"] for t in result.tools_used} | {"orchestrator"})}
@@ -286,7 +325,9 @@ class Jarvis:
         if self.llm.primary.name == "offline" or not self.db.get_setting("fast_path", True) or len(text.split()) > 14:
             return False
         hit = match_rules(text, self.offline.env)
-        return bool(hit) and hit[1][0] not in self.NOT_FAST
+        if hit:
+            return hit[1][0] not in self.NOT_FAST
+        return fast_talk(text) is not None  # the time, the date, hello, thanks: no reason to wait for a model
 
     def cancel(self, conversation_id: str) -> bool:
         """Barge-in: the user interrupted. Stops the turn at its next await point."""

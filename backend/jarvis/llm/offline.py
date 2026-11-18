@@ -140,6 +140,141 @@ def R(agent: str, pattern: str, build, whole: bool = False) -> Rule:
     return Rule(agent, re.compile(pattern, re.I), build, whole)
 
 
+# -- per-request context for local models ---------------------------------------------------------------------
+# A local model's system prompt is kept identical between requests so the model server can reuse it; the time and
+# recalled memories are put in front of the user's words instead. The rule engine strips them again.
+_CONTEXT = re.compile(r"^<context>\n.*?\n</context>\n\n", re.S)
+
+
+def with_context(task: str, note: str = "") -> str:
+    lines = [f"Current time: {time.strftime('%A %Y-%m-%d %H:%M')}."] + ([note] if note else [])
+    return "<context>\n" + "\n\n".join(lines) + "\n</context>\n\n" + task
+
+
+def strip_context(text: str) -> str:
+    return _CONTEXT.sub("", text, count=1)
+
+
+# -- Tamil -------------------------------------------------------------------------------------------------------
+# Common voice commands in Tamil, as Edge's ta-IN recogniser writes them: Tamil words, English loanwords written in
+# Tamil script (வால்யூம், குரோம்) and sometimes English words in Latin script. Matching uses word stems so inflected
+# forms match too (சத்தம் / சத்தத்தை, குரோம் / குரோமை). Replies to Tamil requests are in Tamil.
+_TAMIL = re.compile(r"[஀-௿]")
+_TA_WAKE = re.compile(r"^\s*(?:(?:hey|ok|ஹே|ஓகே)\s+)?(?:jarvis|ஜார்விஸ்|ஜார்வீஸ்)[\s,.!:]*", re.I)
+
+
+def is_tamil(text: str) -> bool:
+    return bool(_TAMIL.search(text or ""))
+
+
+def TR(agent: str, pattern: str, build, whole: bool = False) -> Rule:
+    """A rule that only fires on text containing Tamil script (some alternatives are English loanwords, which must
+    not steal English requests from the English rules)."""
+    return R(agent, pattern, lambda t, m, e: build(t, m, e) if is_tamil(t) else None, whole)
+
+
+TA_APPS = {"குரோம்": "chrome", "க்ரோம்": "chrome", "எட்ஜ்": "edge", "நோட்பேட்": "notepad", "நோட்பேடு": "notepad", "கால்குலேட்டர்": "calculator",
+           "கணிப்பான்": "calculator", "வேர்ட்": "word", "எக்செல்": "excel", "பவர்பாயிண்ட்": "powerpoint", "பவர் பாயிண்ட்": "powerpoint",
+           "ஸ்பாட்டிஃபை": "spotify", "ஸ்பாட்டிபை": "spotify", "வாட்ஸ்அப்": "whatsapp", "வாட்ஸ் அப்": "whatsapp", "வாட்ஸப்": "whatsapp",
+           "டெலிகிராம்": "telegram", "கேமரா": "camera", "செட்டிங்ஸ்": "settings", "அமைப்புகள்": "settings", "எக்ஸ்ப்ளோரர்": "explorer",
+           "ஃபைல் எக்ஸ்ப்ளோரர்": "explorer", "பைல் எக்ஸ்ப்ளோரர்": "explorer", "பெயிண்ட்": "paint", "டெர்மினல்": "terminal",
+           "விஎஸ் கோட்": "code", "வி எஸ் கோட்": "code", "ஜூம்": "zoom", "டீம்ஸ்": "teams", "ஃபயர்பாக்ஸ்": "firefox", "விஎல்சி": "vlc", "வி எல் சி": "vlc"}
+TA_SITES = {"யூடியூப்": "youtube.com", "யூட்யூப்": "youtube.com", "ஜிமெயில்": "gmail.com", "கூகுள்": "google.com", "விக்கிபீடியா": "wikipedia.org"}
+_TA_SOUND = r"(?:சத்த|ஒலி|சவுண்ட|வால்யூம|volume|sound)"
+_TA_SONG = r"(?:பாட்டு|பாட்ட|பாடல|மியூசிக்|இசை|வீடியோ|song|music|video)"
+
+
+def _ta_name(raw: str) -> str:
+    """'குரோமை' -> 'chrome': drop the accusative ending, then look the name up; Latin names pass through."""
+    raw = raw.strip(" ,.-")
+    raw = re.sub(r"\s*-?\s*(?:ஐ|ஆப்|அப்ளிகேஷன்|அப்ளிகேஷனை|app)$", "", raw).strip()
+    for cand in (raw, raw[:-1] + "்" if raw.endswith("ை") else "", raw[:-2] if raw.endswith(("வை", "யை")) else ""):
+        if cand and (cand in TA_APPS or cand in TA_SITES):
+            return TA_APPS.get(cand) or TA_SITES[cand]
+    return raw
+
+
+def _ta_open(text: str, m: re.Match, env: Env):
+    name = _ta_name(m.group(1))
+    if not name:
+        return None
+    if "." in name and " " not in name:
+        return "browser_open", {"url": name}
+    return "open_application", {"name": name}
+
+
+def _ta_reminder(text: str, m: re.Match, env: Env):
+    minutes = int(m.group(1)) * (60 if m.group(2).startswith("மணி") else 1)
+    title = re.sub(r"\s*(?:என்று|ன்னு|என)$", "", m.group(3).strip(" ,.")).strip()
+    return ("add_dev_task", {"title": title, "due_in_minutes": minutes}) if title else None
+
+
+TA_RULES: list[Rule] = [
+    TR("orchestrator", r"(?:எனக்கு\s*)?(\d+)\s*(நிமிட|நிமிஷ|மணி)\S*(?:\s+நேர\S*)?(?:\s+(?:கழித்து|கழிச்சு))?\s+(.+?)\s*(?:நினைவூட்டு|நினைவுபடுத்து|ஞாபகப்படுத்து|ஞாபகம்\s*படுத்து|ரிமைண்ட்\s*பண்ணு)\S*\s*[.!]?$", _ta_reminder, whole=True),
+    TR("computer", r"(?:மியூட்|ம்யூட்|\bmute\b)|" + _TA_SOUND + r"\S*\s*.{0,12}?(?:நிறுத்து|அணை|ஆஃப்|\boff\b)", lambda t, m, e: ("system_control", {"action": "volume_mute"})),
+    TR("computer", _TA_SOUND + r".{0,25}?(?:அதிக|கூட்டு|கூட்ட|ஏத்து|ஏற்று|உயர்த்து|ஜாஸ்தி|increase|\bup\b)", lambda t, m, e: ("system_control", {"action": "volume_up", "value": int(n.group(1)) if (n := re.search(r"(\d+)", t)) else 5})),
+    TR("computer", _TA_SOUND + r".{0,25}?(?:குறை|கம்மி|இறக்கு|decrease|\bdown\b)", lambda t, m, e: ("system_control", {"action": "volume_down", "value": int(n.group(1)) if (n := re.search(r"(\d+)", t)) else 5})),
+    TR("computer", r"அடுத்த\s*" + _TA_SONG + r"|அடுத்த\s*(?:ட்ராக்|track)", lambda t, m, e: ("system_control", {"action": "media_next"})),
+    TR("computer", r"(?:முந்தைய|முந்தின|முன்னாடி|போன)\s*" + _TA_SONG, lambda t, m, e: ("system_control", {"action": "media_previous"})),
+    TR("computer", _TA_SONG + r".{0,20}?(?:நிறுத்து|நிப்பாட்டு|போடு|ப்ளே|பிளே|பாஸ்|தொடர்|play|pause)", lambda t, m, e: ("system_control", {"action": "media_play_pause"})),
+    TR("computer", r"(?:வெளிச்ச|பிரைட்னஸ|ப்ரைட்னஸ|brightness).*?(\d{1,3})", lambda t, m, e: ("system_control", {"action": "set_brightness", "value": min(int(m.group(1)), 100)})),
+    TR("computer", r"(?:ஸ்கிரீன|திரை|கம்ப்யூட்டர|கணினி|லேப்டாப|சிஸ்டம)\S*\s*.{0,12}?(?:லாக்|பூட்டு|\block\b)", lambda t, m, e: ("system_control", {"action": "lock_screen"})),
+    TR("computer", r"(?:திரையில|திரைல|ஸ்கிரீன்ல|ஸ்கிரீனில|ஸ்க்ரீன்ல).{0,20}?(?:என்ன|படி|வாசி)", lambda t, m, e: ("screen_read", {})),
+    TR("computer", r"என்ன.{0,20}?(?:காப்பி|நகலெடு)|(?:காப்பி|நகலெடு|கிளிப்போர்ட|கிளிப்போர்டு)\S*\s*.{0,20}?(?:என்ன|படி|காட்டு)|கிளிப்போர்ட", lambda t, m, e: ("clipboard_read", {})),
+    TR("monitoring", r"(?:கம்ப்யூட்டர|கணினி|லேப்டாப|சிஸ்டம|பிசி)\S*\s*.{0,25}?(?:எப்படி|நிலை|வேகம|ஸ்லோ|மெதுவா|மெதுவாக)|சிபியு|ரேம்|மெமரி|\bcpu\b|\bram\b", lambda t, m, e: ("system_stats", {})),
+    TR("research", r"^(.+?)\s*(?:பற்றி|பத்தி)?\s*(?:இணையத்தில்|இணையத்துல|நெட்ல|கூகுள்ல|ஆன்லைன்ல)?\s*(?:தேடு|தேடுங்க|தேடவும்|தேடிப்\s*பார்|சர்ச்\s*பண்ணு|கூகுள்\s*பண்ணு)\S*\s*[.!]?$",
+       lambda t, m, e: ("web_search", {"query": _TA_WAKE.sub("", m.group(1)).strip()}), whole=True),
+    TR("computer", r"^(?:\s*(?:ஜார்விஸ்|jarvis)[\s,]*)?(.+?)\s*(?:திற(?:ந்து\s*விடு|ங்க|க்கவும்|)|ஓ(?:ப்)?பன்\s*(?:பண்ணு|செய்)\S*|open\s*(?:பண்ணு|செய்)\S*|ஸ்டார்ட்\s*பண்ணு\S*)\s*[.!]?$", _ta_open, whole=True),
+]
+
+
+# Requests answered instantly from facts JARVIS already has (no tool, no model). Strict whole-utterance patterns,
+# so "hi, write me a poem" or "help me plan a trip" still reach the model.
+TA_DAYS = ["திங்கட்கிழமை", "செவ்வாய்க்கிழமை", "புதன்கிழமை", "வியாழக்கிழமை", "வெள்ளிக்கிழமை", "சனிக்கிழமை", "ஞாயிற்றுக்கிழமை"]
+TA_MONTHS = ["ஜனவரி", "பிப்ரவரி", "மார்ச்", "ஏப்ரல்", "மே", "ஜூன்", "ஜூலை", "ஆகஸ்ட்", "செப்டம்பர்", "அக்டோபர்", "நவம்பர்", "டிசம்பர்"]
+
+
+def _en_time() -> str:
+    return time.strftime("It's %I:%M %p.").replace("It's 0", "It's ")
+
+
+def _ta_time() -> str:
+    t = time.localtime()
+    part = "காலை" if 5 <= t.tm_hour < 12 else "மதியம்" if t.tm_hour < 16 else "மாலை" if t.tm_hour < 19 else "இரவு"
+    return f"இப்போது {part} {t.tm_hour % 12 or 12}:{t.tm_min:02d}."
+
+
+def _ta_date() -> str:
+    t = time.localtime()
+    return f"இன்று {TA_DAYS[t.tm_wday]}, {TA_MONTHS[t.tm_mon - 1]} {t.tm_mday}, {t.tm_year}."
+
+
+_END = r"\s*[?.!]*\s*$"
+FAST_TALK: list[tuple[re.Pattern, Callable[[], str]]] = [(re.compile(p, re.I), f) for p, f in [
+    (r"^(?:what(?:'s| is) the time|what time is it|tell me the time|time please)(?: now| right now)?" + _END, _en_time),
+    (r"^(?:what(?:'s| is) (?:the |today'?s )?date(?: today)?|what day is (?:it|today)|which day is (?:it|today)|what(?:'s| is) today)" + _END,
+     lambda: time.strftime("Today is %A, %d %B %Y.").replace(" 0", " ")),
+    (r"^(?:hi|hello|hey|good (?:morning|afternoon|evening))(?: there| jarvis)?" + _END, lambda: "Hello! What can I do for you?"),
+    (r"^(?:thanks|thank you)(?: so much| very much| a lot)?(?: jarvis)?" + _END, lambda: "You're welcome."),
+    (r"^(?:who are you|what(?:'s| is) your name|what are you)" + _END, lambda: "I'm JARVIS, your personal assistant on this computer."),
+    (r"^(?:இப்போ\S*\s*)?(?:(?:நேரம்|மணி|டைம்)\s*(?:இப்போ\S*\s*)?(?:என்ன|எவ்வளவு|ஆச்சு|ஆகுது|ஆகிறது|சொல்லு)\S*(?:\s+(?:ஆச்சு|ஆகுது|ஆகிறது|சொல்லு|சொல்லுங்க))?|என்ன\s*(?:நேரம்|டைம்)\S*)" + _END, _ta_time),
+    (r"^(?:இன்று|இன்னைக்கு|இன்றைக்கு)?\s*(?:என்ன\s*(?:நாள்|கிழமை|தேதி)|(?:தேதி|கிழமை)\s*(?:என்ன|எது|சொல்லு))\S*" + _END, _ta_date),
+    (r"^(?:ஹாய்|ஹலோ|வணக்கம்)(?:\s*(?:ஜார்விஸ்|jarvis))?" + _END, lambda: "வணக்கம்! நான் என்ன செய்ய வேண்டும்?"),
+    (r"^(?:ரொம்ப\s*)?(?:நன்றி|தேங்க்ஸ்|தேங்க்யூ|தேங்க் யூ)(?:\s*(?:ஜார்விஸ்|jarvis))?" + _END, lambda: "மகிழ்ச்சி! வேறு ஏதாவது வேண்டுமா?"),
+    (r"^(?:நீ|நீங்க|நீங்கள்)\s*(?:யார்|யாரு)\S*" + _END + r"|^(?:உன்|உங்க|உங்கள்)\s*(?:பெயர்|பேர்)\s*(?:என்ன)?" + _END,
+     lambda: "நான் JARVIS, இந்தக் கணினியில் உங்கள் தனிப்பட்ட உதவியாளர்."),
+]]
+
+
+def fast_talk(text: str) -> str | None:
+    """An instant reply for greetings, thanks, the time and the date (English and Tamil), or None."""
+    t = _TA_WAKE.sub("", strip_context(text)).strip()
+    for pattern, reply in FAST_TALK:
+        if pattern.search(t):
+            return reply()
+    return None
+
+
 def _p(tool: str, key: str = "path", **extra):
     """Builder for tools that take one path argument."""
     def build(text, m, env):
@@ -173,6 +308,7 @@ def _calendar_view(text: str, m: re.Match, env: Env):
 
 
 RULES: list[Rule] = [
+    *TA_RULES,  # Tamil first: they only fire on Tamil script, so they never take an English request
     R("orchestrator", r"^\s*(?:jarvis[,\s]+)?(?:please\s+)?(?:schedule|add|book|put|create|set up)\b.*\b(meeting|event|appointment|call|lunch|dinner|interview|session|class|calendar)\b", _calendar_add, whole=True),
     R("orchestrator", r"\b(my|the) (calendar|agenda|schedule)\b|\b(any|what|which|do i have)\b.*\b(meetings?|appointments?|events?)\b|\bwhat (do i have|is planned|am i doing) (today|tomorrow|this week)\b", _calendar_view),
     R("orchestrator", r"^\s*(?:jarvis[,\s]+)?(?:please\s+)?(?:send\s+(?:an?\s+)?e-?mail\s+to|e-?mail)\s+([^\s,]+@[^\s,]+)\s*(?:with (?:the )?subject\s+[\"']?(.+?)[\"']?\s+)?(?:saying|that says|telling (?:him|her|them)(?: that)?|:|about)\s*(.+)$",
@@ -314,7 +450,7 @@ class OfflineProvider:
         agent = (meta or {}).get("agent", "orchestrator")
         available = {t["name"] for t in tools}
         turn_start = max(i for i, m in enumerate(messages) if m["role"] == "user")
-        question = messages[turn_start]["content"]
+        question = strip_context(messages[turn_start]["content"])
         if messages[-1]["role"] == "tool":
             resp = self._after_tools(agent, question, messages[turn_start:], available)
         else:
@@ -332,6 +468,8 @@ class OfflineProvider:
             hit = match_rules(text, self.env)
             if hit and hit[1][0] in available:
                 return LLMResponse(tool_calls=[ToolCall(self._id(), *hit[1])])
+            if quick := fast_talk(text):
+                return LLMResponse(text=quick)
             for pattern, reply in SMALL_TALK:
                 if re.search(pattern, text, re.I):
                     return LLMResponse(text=reply())
@@ -355,6 +493,8 @@ class OfflineProvider:
                 return self._route(hits, clauses)
         if whole:
             return self._route([whole])
+        if quick := fast_talk(text):
+            return LLMResponse(text=quick)
         for pattern, reply in SMALL_TALK:
             if re.search(pattern, text, re.I):
                 return LLMResponse(text=reply())
@@ -402,25 +542,28 @@ class OfflineProvider:
             if r["name"] == "web_search" and d.get("results") and "fetch_url" not in called_names and "fetch_url" in available:
                 return LLMResponse(tool_calls=[ToolCall(self._id(), "fetch_url", {"url": x["url"], "max_chars": 3000}) for x in d["results"][:2]])
 
-        parts = []
+        parts, ta = [], is_tamil(question)
         for call in called:
             r = results.get(call.id)
             if r is None:
                 continue
             d = data(r)
             if r.get("is_error"):
-                parts.append(render_error(call.name, d))
+                parts.append(ta_error(d) if ta else render_error(call.name, d))
+            elif isinstance(d, dict) and d.get("status") == "pending_approval" and ta:
+                parts.append(f"இந்தச் செயல் உங்கள் கணினியில் மாற்றம் செய்யும், அதனால் உங்கள் அனுமதிக்காகக் காத்திருக்கிறது:\n\n> {d.get('preview', call.name).splitlines()[0]}\n\n"
+                             f"அனுமதிக்க \"சரி\" என்று சொல்லுங்கள்; வேண்டாம் என்றால் \"வேண்டாம்\" (request `{d['approval_id']}`).")
             elif isinstance(d, dict) and d.get("status") == "pending_approval":
                 parts.append(f"I've prepared this action, but it changes your system, so it's waiting for your approval:\n\n> {d.get('preview', call.name).splitlines()[0]}\n\n"
-                             f"Approve or deny it in the Command Center, or just say \"approve\" (request `{d['approval_id']}`).")
+                             f"Approve or deny it on screen, or just say \"approve\" (request `{d['approval_id']}`).")
             elif call.name == "repo_overview" and "create_plan" in called_names:
                 continue  # the plan already incorporates the overview
             else:
-                renderer = RENDERERS.get(call.name)
+                renderer = (TA_RENDERERS.get(call.name) if ta else None) or RENDERERS.get(call.name)
                 text = renderer(d, question, turn) if renderer else f"`{call.name}` returned: {str(d)[:600]}"
                 if text:
                     parts.append(text)
-        return LLMResponse(text="\n\n".join(parts) or "Done.")
+        return LLMResponse(text="\n\n".join(parts) or ("முடிந்தது." if ta else "Done."))
 
 
 def plan_steps(goal: str, repo: dict | None) -> list[dict]:
@@ -634,6 +777,42 @@ def _r_calendar(d, q, t):
     return "\n".join(lines) + ("\n\nCould not read: " + "; ".join(d["problems"]) if d.get("problems") else "")
 
 
+EN_CONTROL = {"volume_up": "Volume up.", "volume_down": "Volume down.", "volume_mute": "Toggled mute.", "media_play_pause": "Play/pause.",
+              "media_next": "Next track.", "media_previous": "Previous track.", "set_brightness": "Brightness set to {value}%.", "lock_screen": "Locking the screen."}
+TA_CONTROL = {"volume_up": "சத்தத்தை அதிகரித்தேன்.", "volume_down": "சத்தத்தைக் குறைத்தேன்.", "volume_mute": "மியூட் நிலையை மாற்றினேன்.",
+              "media_play_pause": "சரி, பாடலை ப்ளே/பாஸ் செய்தேன்.", "media_next": "அடுத்த பாடலைப் போட்டேன்.", "media_previous": "முந்தைய பாடலைப் போட்டேன்.",
+              "set_brightness": "வெளிச்சத்தை {value}% ஆக மாற்றினேன்.", "lock_screen": "திரையைப் பூட்டுகிறேன்."}
+
+
+def _say_control(d: dict, table: dict) -> str:
+    return table.get(d["done"], d["done"].replace("_", " ") + ".").format(value=d.get("value", ""))
+
+
+def ta_error(d) -> str:
+    err = d.get("error") if isinstance(d, dict) else str(d)
+    return f"மன்னிக்கவும், அதைச் செய்ய முடியவில்லை: {err}"
+
+
+def _ta_stats(d, q, t):
+    c, m, k = d["cpu"], d["memory"], d["disk"]
+    top = ", ".join(p["name"] for p in d.get("top_memory", [])[:2])
+    return (f"CPU {c['percent']}% பயன்பாட்டில் உள்ளது. நினைவகம் (RAM) {m['percent']}% பயன்பாட்டில், {m['available_gb']} GB காலியாக உள்ளது. "
+            f"டிஸ்க்கில் {k['free_gb']} GB இடம் உள்ளது." + (f" அதிக நினைவகம் எடுப்பவை: {top}." if top else ""))
+
+
+# Replies to Tamil requests; tools not listed here answer in English (their output is mostly names, paths and numbers).
+TA_RENDERERS: dict[str, Callable] = {
+    "system_control": lambda d, q, t: _say_control(d, TA_CONTROL),
+    "open_application": lambda d, q, t: f"{d.get('opened') or 'அப்ளிகேஷனை'} திறக்கிறேன்.",
+    "browser_open": lambda d, q, t: f"{d.get('title') or d.get('url')} பக்கத்தைத் திறந்தேன்.",
+    "system_stats": _ta_stats,
+    "clipboard_read": lambda d, q, t: (f"கிளிப்போர்டில் {d['chars']} எழுத்துகள் உள்ளன:\n```\n{d['text'][:1500]}\n```" if d["text"].strip() else "கிளிப்போர்டு காலியாக உள்ளது."),
+    "screen_read": lambda d, q, t: (f"திரையில் உள்ள எழுத்துகள்:\n```\n{d['text'][:1800]}\n```" if d["text"].strip() else "திரையில் எந்த எழுத்தும் தெரியவில்லை."),
+    "add_dev_task": lambda d, q, t: (f"சரி, \"{d['title']}\" என்பதை {time.strftime('%H:%M', time.localtime(d['due']))} மணிக்கு நினைவூட்டுகிறேன்." if d.get("due")
+                                     else f"சரி, \"{d['title']}\" என்று குறித்துக்கொண்டேன்."),
+    "remember": lambda d, q, t: f"சரி, நினைவில் வைத்துக்கொள்கிறேன்: \"{d['content']}\".",
+}
+
 RENDERERS: dict[str, Callable] = {
     "calendar_events": _r_calendar,
     "calendar_add": lambda d, q, t: f"Added \"{d['title']}\" on {d['start']} ({d['duration_minutes']} min). I'll remind you shortly before it starts.",
@@ -654,7 +833,7 @@ RENDERERS: dict[str, Callable] = {
     "mouse_click": lambda d, q, t: f"Clicked at {d['clicked_at']}.",
     "type_text": lambda d, q, t: f"Typed {d['typed_chars']} characters" + (" and pressed Enter." if d["pressed_enter"] else "."),
     "press_keys": lambda d, q, t: f"Pressed {d['pressed']}.",
-    "system_control": lambda d, q, t: f"Done: {d['done'].replace('_', ' ')}" + (f" ({d['value']})." if d.get("value") else "."),
+    "system_control": lambda d, q, t: _say_control(d, EN_CONTROL),
     "browser_open": _r_page, "browser_read": _r_page, "browser_click": _r_page, "browser_fill": _r_page,
     "browser_close": lambda d, q, t: "Closed the browser.",
     "daily_briefing": lambda d, q, t: d["text"],
@@ -682,6 +861,6 @@ RENDERERS: dict[str, Callable] = {
     "run_workflow": lambda d, q, t: f"Workflow run `{d['run_id']}` finished with status **{d['status']}** ({len(d['log'])} step(s) logged).",
     "create_workflow": lambda d, q, t: f"Workflow \"{d['name']}\" created (`{d['id']}`).",
     "conversation_search": lambda d, q, t: ("\n".join(f"- {m['title']}: {m['snippet']}" for m in d["matches"]) or "No earlier conversation matches that."),
-    "open_application": lambda d, q, t: f"Launched {' '.join(d['launched'])}.",
+    "open_application": lambda d, q, t: f"Opening {d.get('opened') or ' '.join(d['launched'])}.",
     "save_note": lambda d, q, t: f"Saved the note \"{d['title']}\" to the '{d['space']}' space.",
 }
