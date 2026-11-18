@@ -1,8 +1,11 @@
 # JARVIS setup for Windows. Run from the project folder in PowerShell:
 #     powershell -ExecutionPolicy Bypass -File scripts\windows\setup.ps1
-# Optional:  -Model qwen2.5:7b   (better answers, needs ~16 GB RAM and is slow without a GPU)
+# Optional:  -Model qwen2.5:3b   (smaller and lighter, ~2.3 GB in memory, but it misunderstands Tamil)
+# Optional:  -SkipTranslator     (do not download the ~630 MB Tamil/Indian-language translation model)
 # Optional:  -Python C:\path\to\python.exe   use a specific Python (the one-click installer passes this)
-param([string]$Model = "qwen2.5:3b", [switch]$SkipModel, [string]$Python = "")
+# Default model: Qwen3 4B Instruct (~3.7 GB in memory with an 8192-token context). On the owner's laptop it understood
+# 10/10 Tamil requests where qwen2.5:3b understood 4/10; JARVIS writes Tamil replies with the translation model.
+param([string]$Model = "qwen3:4b-instruct-2507-q4_K_M", [switch]$SkipModel, [switch]$SkipTranslator, [string]$Python = "")
 $ErrorActionPreference = "Stop"
 Set-Location (Join-Path $PSScriptRoot "..\..")
 
@@ -45,6 +48,14 @@ elseif (Get-Command ollama -ErrorAction SilentlyContinue) {
 } else {
   Write-Host "   Ollama is not installed. Install it from https://ollama.com/download , then run:  ollama pull $Model" -ForegroundColor Yellow
   Write-Host "   Until then JARVIS runs on its built-in rule engine."
+}
+
+Write-Host "== Tamil / Indian-language translation model" -ForegroundColor Cyan
+if ($SkipTranslator -or $SkipModel) { Write-Host "   skipped" }
+else {
+  Write-Host "   downloading NLLB-200 600M (~630 MB, resumable; safe to re-run)..."
+  & backend\.venv\Scripts\python.exe -m jarvis.translate
+  if ($LASTEXITCODE -ne 0) { Write-Host "   download incomplete - re-run this script later. Tamil still works, with weaker replies." -ForegroundColor Yellow }
 }
 
 Write-Host "== 4/4  Done" -ForegroundColor Cyan

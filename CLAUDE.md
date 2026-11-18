@@ -19,8 +19,10 @@ Built and first tested on Linux. **The first Windows run was done on 2026-11-17 
 Still do not assume the Windows-only parts that were not exercised work (list under "Still untested").
 
 The laptop: Windows 11 Pro, 16 GB RAM (often under 3 GB free - other heavy apps run alongside), no GPU,
-1366x768 screen, Python 3.13 (system install, the only one), Ollama 0.40.16, model `qwen2.5:3b` built as
-`jarvis-model` (num_ctx 8192). JARVIS is installed in this folder; `.venv` and `.env` exist; a desktop
+1366x768 screen, Python 3.13 (system install, the only one), Ollama 0.40.16, model
+`qwen3:4b-instruct-2507-q4_K_M` built as `jarvis-model` (num_ctx 8192; since 2026-11-19 - the previous
+`qwen2.5:3b` build is kept as `jarvis-model-qwen2.5`), plus the NLLB translation model in
+`~/.jarvis/models/nllb-200-distilled-600M-ct2-int8`. JARVIS is installed in this folder; `.venv` and `.env` exist; a desktop
 shortcut "JARVIS" starts `scripts\windows\start.bat`.
 
 ## Everyday commands (Windows)
@@ -165,6 +167,21 @@ docs/               ARCHITECTURE, GAP_ANALYSIS, WINDOWS, LOCAL_MODELS, ACCEPTANC
   `offline.fast_talk` without the model. Tamil commands (`offline.TA_RULES`, only fire on Tamil script) cover
   volume, media, brightness, lock, open app/site, system status, screen/clipboard, reminders, web search;
   Tamil requests get Tamil replies (`TA_RENDERERS`). "சரி"/"வேண்டாம்" approve/deny a pending action.
+- **Tamil through English** (`app._run_via_english`, `translate.py`): a Tamil (or other Indian-script) request
+  that needs the local model is read into English by the chat model (same cached prefix, ~5-8 s), answered in
+  English with all tools, and the answer is written in Tamil by NLLB-200 600M (CTranslate2 int8, ~1 s, ~680 MB
+  while loaded, unloads after 10 idle min). Measured: Qwen3 4B reads Tamil 10/10 (qwen2.5:3b 4/10) but writes it
+  badly; NLLB writes it well but misread "Who wrote the Thirukkural?" as "Who wrote the crime?". Only the Tamil
+  reply is streamed/spoken; `meta.via_english` keeps the English request and answer. Off with
+  `JARVIS_TRANSLATE_VIA_ENGLISH=0`; without the model files it is skipped. `python -m jarvis.translate` downloads
+  them (setup.ps1 does). NLLB's licence is CC-BY-NC (personal use).
+- **Auto speech language** (`frontend/src/lang.ts`, default `language: "auto"`): browsers cannot detect the
+  spoken language, so JARVIS listens in the language last used (en-IN/ta-IN, remembered), switches on "Jarvis,
+  Tamil" / "Vanakkam Jarvis" / "Jarvis, English" / "இங்கிலீஷ்ல பேசு", on Latin-only text from the Tamil
+  recogniser, and on what is typed. Replies are spoken with a voice for the language they are written in.
+  Test: `node frontend/e2e/lang.test.mjs`.
+- **Local-model replies are capped** (`JARVIS_OPENAI_MAX_TOKENS`, default 1024): one Tamil answer once ran 15+ min.
+  `<think>` text is hidden while streaming even when the tag arrives in pieces (`providers.visible_text`).
 
 ## Conventions
 
@@ -198,6 +215,9 @@ Windows laptop (2026-11-17, Python 3.13):
   France" 7-14 s with 1054-1133 of 1140 prompt tokens cached (1.1 s on a quiet machine, was 17-21 s);
   time/date/hello in English and Tamil 0.1-0.4 s; Tamil "is my computer OK" -> Tamil reply in 26 s (system_stats
   itself is slow under load). Tamil open questions from the 3B model are still wrong ("capital of India" -> nonsense).
+- Qwen3 4B + Tamil through English + auto speech language (2026-11-19): 236 passed, 3 skipped (then the Tamil
+  midnight time-of-day fix; its file passes 64/64); `node frontend/e2e/lang.test.mjs` 6/6, wake 6/6; Auto switching
+  checked in a 460x704 view against a throwaway instance (typed "Jarvis, Tamil" -> Tamil, English text -> back).
 - Earlier, a full run under heavy memory pressure (0.4 GB free, 72 min) had timing-based failures in the
   failover tests: they pass on an unloaded machine. Expect timeouts when RAM is nearly exhausted.
 - Frontend browser checks (`frontend/e2e/*.mjs`) and `scripts/acceptance.py` were not run on Windows.
@@ -207,14 +227,17 @@ Windows laptop (2026-11-17, Python 3.13):
 1. Windows: finish the checks under "Still untested" above (tray menu, hotkey press, voice, media keys,
    window switching, autostart, a double-click install).
 2. Real model: with prompt caching a short answer is 1-3 s on a quiet machine, 7-20 s when other apps load
-   the CPU. Planning tools are no longer offered in flat mode and tools that change things are not offered on
-   shared words alone. In Tamil/Hindi it answers in the right language but with wrong facts: a better
-   multilingual model is the fix (`qwen2.5:7b` needs ~5 GB free RAM; a 3-4B multilingual model is worth trying).
-   Still untested: real speech through the microphone (wake word while minimised, Tamil recognition by Edge),
-   whether Edge speaks Tamil replies with a Tamil voice on this laptop, the tray/hotkey bringing the window back.
+   the CPU (Qwen3 4B is ~30-50% slower than qwen2.5:3b and uses ~3.7 GB instead of 2.3 GB). Tamil open questions
+   now answer correctly through English (2026-11-19, real JARVIS: capital of India, Thiruvalluvar, sun rises in the
+   east, a rain poem - 14-30 s each with the CPU loaded). Models tried and rejected: qwen3.5:2b (Tamil 0/6, thinking
+   could not be turned off, called web_search for a poem); a "think in English" prompt rule (unreliable, and it made
+   qwen2.5:3b worse); Edge's on-device Translator API (present in Edge 157 but "unavailable" for every pair on this
+   laptop). Still untested: real speech through the microphone (wake word while minimised, Tamil recognition by
+   Edge, auto switching by voice), whether Edge has a Tamil voice here, the tray/hotkey bringing the window back.
 3. Memory: with other apps open the laptop can drop under 2 GB free; Ollama then fails to load the model
-   ("out-of-memory") and JARVIS falls back to the rule engine. A smaller model (`qwen2.5:1.5b`) is an
-   option if this keeps happening.
+   ("out-of-memory") and JARVIS falls back to the rule engine. Since the switch to Qwen3 4B, JARVIS needs ~3.7 GB
+   for the model plus ~0.7 GB for the translator during Tamil replies. To go back: `ollama cp jarvis-model-qwen2.5
+   jarvis-model` (English stays fine; Tamil understanding drops to 4/10).
 4. Tool shortlist is lexical (hand-written hints in `robust.TOOL_HINTS`). A neural embedder
    (`JARVIS_EMBEDDER=openai:nomic-embed-text`) is supported but untested.
 5. Flat mode gives up permission separation between agents; approvals and the untrusted-content

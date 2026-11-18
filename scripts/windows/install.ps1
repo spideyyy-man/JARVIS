@@ -1,8 +1,8 @@
 # JARVIS one-click installer. Normally started by double-clicking Install-JARVIS.bat.
-#   -Model qwen2.5:7b   use a larger model (needs ~16 GB RAM; slow without a GPU)
+#   -Model qwen2.5:3b   use a smaller model (less memory, but it misunderstands Tamil)
 #   -NoModel            skip Ollama and the model (JARVIS then runs on its built-in rule engine)
 #   -NoLaunch           install only, do not start JARVIS
-param([string]$Model = "qwen2.5:3b", [switch]$NoModel, [switch]$NoLaunch)
+param([string]$Model = "qwen3:4b-instruct-2507-q4_K_M", [switch]$NoModel, [switch]$NoLaunch)
 
 $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12

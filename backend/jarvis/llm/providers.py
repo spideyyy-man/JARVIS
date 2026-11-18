@@ -14,6 +14,19 @@ def _strip_think(text: str) -> str:
     return re.sub(r"<think>.*?(</think>|$)", "", text, flags=re.S).strip()
 
 
+def visible_text(text: str) -> str:
+    """What may be shown of a reply that is still streaming: <think> blocks removed (an unclosed one hides everything
+    after it), leading whitespace dropped, and a trailing fragment that could be the start of a tag held back."""
+    import re
+
+    visible = re.sub(r"<think>.*?(</think>|$)", "", text, flags=re.S).lstrip()
+    for k in range(min(len(visible), len("</think>")), 0, -1):
+        tail = visible[-k:]
+        if "<think>".startswith(tail) or "</think>".startswith(tail):
+            return visible[:-k]
+    return visible
+
+
 class AnthropicProvider:
     """Claude via the official SDK: streaming, adaptive thinking, client tools.
 
@@ -97,11 +110,14 @@ class OpenAICompatProvider:
     name = "openai_compat"
 
     def __init__(self, base_url: str, model: str, api_key: str | None = None, transport: httpx.AsyncBaseTransport | None = None, stream: bool = True,
-                 keep_alive: str = ""):
+                 keep_alive: str = "", max_tokens: int = 0):
         self.base_url, self.model, self.api_key, self.transport, self.stream = base_url.rstrip("/"), model, api_key, transport, stream
         # Ollama only: how long the model stays loaded after a request ("2h", "-1"). Unloading means the next request
         # reloads it and re-reads the whole prompt - 20 s or more on a CPU. Other servers ignore the field.
         self.keep_alive = keep_alive
+        # Cap on one reply's length (0 = server default). A small model sometimes never stops: on the owner's laptop one
+        # Tamil answer ran past 15 minutes. JARVIS's answers are meant to be spoken, so a cap costs nothing.
+        self.max_tokens = max_tokens
 
     def _tool_specs(self, tools: list[dict]) -> list[dict]:
         return [{"type": "function", "function": {"name": t["name"], "description": t["description"], "parameters": t["input_schema"]}} for t in tools]
@@ -155,6 +171,8 @@ class OpenAICompatProvider:
             body["tools"] = self._tool_specs(tools)
         if self.keep_alive:
             body["keep_alive"] = self.keep_alive
+        if self.max_tokens:
+            body["max_tokens"] = self.max_tokens
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         url = f"{self.base_url}/chat/completions"
         try:
@@ -191,7 +209,7 @@ class OpenAICompatProvider:
             return raw
 
     async def _streamed(self, client, url, body, headers, on_text) -> LLMResponse:
-        text, slots, in_think = "", {}, False
+        text, slots, shown = "", {}, 0
         async with client.stream("POST", url, json=body, headers=headers) as r:
             if r.status_code >= 400:
                 self._raise_for_status(r.status_code, (await r.aread()).decode(errors="replace"))
@@ -211,10 +229,12 @@ class OpenAICompatProvider:
                 piece = delta.get("content") or ""
                 if piece:
                     text += piece
-                    # reasoning models wrap private thoughts in <think>...</think>: never speak or show those
-                    in_think = text.rfind("<think>") > text.rfind("</think>")
-                    if on_text and not in_think and "<think>" not in piece and "</think>" not in piece:
-                        on_text(piece)
+                    # Private working in <think>...</think> (reasoning models; local models also work Tamil answers out
+                    # in English there) is never shown or spoken - even when a tag arrives split across pieces.
+                    visible = visible_text(text)
+                    if on_text and len(visible) > shown:
+                        on_text(visible[shown:])
+                        shown = len(visible)
                 for tc in delta.get("tool_calls") or []:
                     slot = slots.setdefault(tc.get("index", 0), {"id": "", "name": "", "args": ""})
                     fn = tc.get("function") or {}

@@ -12,7 +12,7 @@ const CAPTION: Record<AssistantState, string> = {
   idle: "Standing by", listening: "Listening…", thinking: "Thinking…", speaking: "Speaking…", executing: "Working…", error: "Something went wrong",
 };
 const getLevel = () => voice.getLevel();
-const LANGS = [{ code: "en-IN", label: "English" }, { code: "ta-IN", label: "தமிழ்" }] as const;
+const LANGS = [{ code: "auto", label: "Auto" }, { code: "en-IN", label: "English" }, { code: "ta-IN", label: "தமிழ்" }] as const;
 
 /** The whole assistant on one screen: talk (wake word, hotkey or mic), read the conversation, approve actions. */
 export function Assistant({ listen = false }: { listen?: boolean }) {
@@ -26,7 +26,7 @@ export function Assistant({ listen = false }: { listen?: boolean }) {
   const vs = settings?.voice;
   const wake = (vs?.wake_word || "jarvis").split(",")[0].trim();
   const speakReplies = vs?.speak_replies !== false;
-  const lang = vs?.language?.startsWith("ta") ? "ta-IN" : "en-IN";
+  const lang = vs?.language === "auto" ? "auto" : vs?.language?.startsWith("ta") ? "ta-IN" : "en-IN";
 
   const state: AssistantState = v.phase === "thinking" ? (server === "executing" ? "executing" : "thinking") : v.phase !== "idle" ? v.phase : server === "error" ? "error" : "idle";
   const busy = v.phase === "thinking" || v.phase === "speaking";
@@ -68,7 +68,7 @@ export function Assistant({ listen = false }: { listen?: boolean }) {
           <div className="seg" role="group" aria-label="Language">
             {LANGS.map((l) => (
               <button key={l.code} type="button" className={lang === l.code ? "on" : ""} aria-pressed={lang === l.code} onClick={() => void saveVoice({ language: l.code })} data-testid={`lang-${l.code}`}>
-                {l.label}
+                {l.label}{l.code === "auto" && lang === "auto" ? <span className="dim"> · {v.listenLang.startsWith("ta") ? "த" : "EN"}</span> : null}
               </button>
             ))}
           </div>
@@ -86,6 +86,7 @@ export function Assistant({ listen = false }: { listen?: boolean }) {
           <div className="asst-empty dim">
             <p>Say <b>“{wake}”</b> and your request, press <b>Ctrl+Alt+J</b>, or tap the mic.</p>
             <p>Try: “what time is it” · “turn the volume up” · “open notepad” · “நேரம் என்ன”</p>
+            {lang === "auto" && <p>Auto language: say <b>“Jarvis, Tamil”</b> or <b>“Vanakkam Jarvis”</b> to talk in Tamil, <b>“Jarvis, English”</b> to switch back. Typing in either language switches too.</p>}
           </div>
         )}
         {v.turns.map((t, i) => (

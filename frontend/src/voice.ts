@@ -4,6 +4,17 @@
 // `window` at call time, so tests can install fakes before the page loads.
 import type { VoiceSettings } from "./api";
 import { norm, wakeRegex, wakeWords } from "./wake";
+import { AUTO, EN, TA, languageSwitch, nextListenLang, replyVoiceLang, switchedMessage, typedLang } from "./lang";
+
+const AUTO_KEY = "jarvis.autoLang"; // last language heard in auto mode (per browser profile)
+function loadAutoLang(): string {
+  try {
+    const v = localStorage.getItem(AUTO_KEY);
+    return v === TA || v === EN ? v : EN;
+  } catch {
+    return EN;
+  }
+}
 
 export type VoicePhase = "idle" | "listening" | "thinking" | "speaking";
 export interface VoiceTurn { role: "user" | "assistant"; text: string }
@@ -23,6 +34,7 @@ export interface VoiceState {
   error: string;
   conversationId: string | null;
   turns: VoiceTurn[];
+  listenLang: string; // the language speech is being recognised in right now (in auto mode it follows the user)
 }
 export interface VoiceDeps {
   sendChat: (text: string, conversationId: string) => Promise<unknown>;
@@ -87,12 +99,15 @@ export class VoiceEngine {
   private pulseAt = 0;
   private audio: { ctx: AudioContext; analyser: AnalyserNode; stream: MediaStream; buf: Uint8Array<ArrayBuffer> } | null = null;
   private micRequested = false;
+  private autoLang = loadAutoLang();
 
   constructor(private deps: VoiceDeps) {
     this.s = {
       sttSupported: !!recCtor(), ttsSupported: !!synth() && !!win().SpeechSynthesisUtterance, wakeMode: false, capturing: false, phase: "idle",
       interim: "", heard: "", heardStatus: "", wakeHeardAt: 0, reply: "", replyStreaming: false, micLive: false, error: "", conversationId: null, turns: [],
+      listenLang: "",
     };
+    this.s.listenLang = this.lang;
     deps.on("chat.delta", (e) => this.onDelta(e));
     deps.on("chat.done", (e) => this.onDone(e));
   }
@@ -111,18 +126,34 @@ export class VoiceEngine {
     const before = this.lang;
     this.cfg = { ...this.cfg, ...v };
     if (!this.cfg.wake_word?.trim()) this.cfg.wake_word = DEFAULTS.wake_word;
-    if (this.lang !== before && this.rec) {
-      // recognition keeps the language it started with; stopping it makes onend restart it in the new one
-      try {
-        this.rec.stop();
-      } catch {
-        /* ignore */
-      }
+    if (this.lang !== before) this.restartRecognition();
+    if (this.s.listenLang !== this.lang) this.set({ listenLang: this.lang });
+  }
+  /** Speech-recognition language: in auto mode the one the user last used, else the user's choice, else the browser's. */
+  get lang(): string {
+    if (this.cfg.language === AUTO) return this.autoLang;
+    return this.cfg.language || navigator.language || "en-US";
+  }
+  private restartRecognition() {
+    // recognition keeps the language it started with; stopping it makes onend restart it in the new one
+    if (!this.rec) return;
+    try {
+      this.rec.stop();
+    } catch {
+      /* ignore */
     }
   }
-  /** Speech-recognition language: the user's choice, else the browser's. */
-  get lang(): string {
-    return this.cfg.language || navigator.language || "en-US";
+  /** Auto mode: listen in `lang` from the next utterance on (remembered across restarts). */
+  private setListenLang(lang: string) {
+    if (this.cfg.language !== AUTO || lang === this.autoLang) return;
+    this.autoLang = lang;
+    try {
+      localStorage.setItem(AUTO_KEY, lang);
+    } catch {
+      /* not remembered after a restart, still used now */
+    }
+    this.set({ listenLang: lang });
+    this.restartRecognition();
   }
   get settings(): VoiceSettings {
     return this.cfg;
@@ -195,7 +226,13 @@ export class VoiceEngine {
   }
   sendText(text: string) {
     const t = text.trim();
-    if (t) this.submit(t);
+    if (!t) return;
+    if (this.cfg.language === AUTO) {
+      const sw = languageSwitch(t, true);
+      if (sw) return this.switchLanguage(sw, t);
+      this.setListenLang(typedLang(this.autoLang, t));
+    }
+    this.submit(t);
   }
   newSession() {
     this.interrupt();
@@ -276,8 +313,22 @@ export class VoiceEngine {
       this.set({ error: `Could not start speech recognition: ${err instanceof Error ? err.message : String(err)}` });
     }
   }
+  /** Wake-word spellings to accept: in auto mode both English and Tamil script, whichever language is listening. */
+  private wakeList() {
+    return wakeWords(this.cfg.wake_word, this.cfg.language === AUTO ? TA : this.lang);
+  }
   private wakeRe() {
-    return wakeRegex(wakeWords(this.cfg.wake_word, this.lang));
+    return wakeRegex(this.wakeList());
+  }
+  /** "Jarvis, Tamil" and the like: change the listening language, confirm in that language, and listen for the
+   * command without needing the wake word again. */
+  private switchLanguage(lang: string, heard: string) {
+    this.setListenLang(lang);
+    this.capture = "none";
+    this.armedUntil = Date.now() + 12000;
+    this.set({ capturing: false, interim: "", heard, heardStatus: "", wakeHeardAt: Date.now(), phase: "listening", turns: [...this.s.turns, { role: "user", text: heard }, { role: "assistant", text: switchedMessage(lang) }] });
+    this.deps.report("listening");
+    this.speak(switchedMessage(lang));
   }
   private isEcho(text: string) {
     const n = norm(text);
@@ -310,8 +361,13 @@ export class VoiceEngine {
     if (!text) return;
     const re = this.wakeRe();
     const hasWake = re.test(norm(text));
-    const stripped = text.replace(wakeRegex(wakeWords(this.cfg.wake_word, this.lang), true), " ").replace(/\s+/g, " ").trim();
+    const stripped = text.replace(wakeRegex(this.wakeList(), true), " ").replace(/\s+/g, " ").trim();
     const direct = this.capture !== "none" || Date.now() < this.armedUntil;
+    if (this.cfg.language === AUTO && (direct || hasWake)) {
+      const sw = languageSwitch(text, direct);
+      if (sw) return this.switchLanguage(sw, text);
+      if (stripped || direct) this.setListenLang(nextListenLang(this.autoLang, hasWake ? stripped : text)); // follow the language actually spoken
+    }
     if (direct) {
       const command = hasWake ? stripped : text;
       if (!command) return; // just the wake word again: keep listening
@@ -410,13 +466,14 @@ export class VoiceEngine {
     if (this.cfg.pitch) u.pitch = this.cfg.pitch;
     try {
       const voices = engine.getVoices();
-      // the chosen voice, else (with a speech language set) one that speaks that language - so Tamil replies
-      // are not read out by an English voice
-      const lang = this.cfg.language;
-      const v = (this.cfg.voice_name && voices.find((x) => x.name === this.cfg.voice_name))
-        || (lang && (voices.find((x) => x.lang === lang) || voices.find((x) => x.lang.split("-")[0] === lang.split("-")[0])));
+      // the chosen voice, else one for the language the reply is written in - Tamil text gets a Tamil voice and
+      // English text an English one, whatever is being listened to
+      const lang = replyVoiceLang(text, this.cfg.language ?? "");
+      const chosen = this.cfg.voice_name ? voices.find((x) => x.name === this.cfg.voice_name) : undefined;
+      const fits = chosen && (!lang || chosen.lang.split("-")[0] === lang.split("-")[0]);
+      const v = (fits && chosen) || (lang && (voices.find((x) => x.lang === lang) || voices.find((x) => x.lang.split("-")[0] === lang.split("-")[0]))) || chosen;
       if (v) u.voice = v;
-      if (lang && !this.cfg.voice_name) u.lang = lang;
+      if (lang && !(fits && chosen)) u.lang = lang;
     } catch {
       /* ignore */
     }

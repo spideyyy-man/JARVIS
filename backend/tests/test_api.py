@@ -68,7 +68,8 @@ def test_settings_endpoints_enforce_policy(client, home):
 
 def test_voice_speech_language_setting(client):
     h = client.auth_headers
-    assert client.get("/api/settings", headers=h).json()["voice"]["language"] == ""  # browser default
+    assert client.get("/api/settings", headers=h).json()["voice"]["language"] == "auto"  # English + Tamil, follows the user
+    assert client.put("/api/settings", json={"voice": {"language": "auto"}}, headers=h).status_code == 200
     assert client.put("/api/settings", json={"voice": {"language": "ta-IN"}}, headers=h).json()["voice"]["language"] == "ta-IN"
     assert client.get("/api/settings", headers=h).json()["voice"]["language"] == "ta-IN"  # persisted
     for bad in ("tamil", "ta_IN", "x" * 40, "<script>"):

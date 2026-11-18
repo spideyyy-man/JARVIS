@@ -15,10 +15,11 @@ from .db import Database, new_id
 from .events import EventBus
 from .knowledge import KnowledgeBase, Memory, make_embedder
 from .llm.base import FORCE_PROVIDER, LLMProvider, LLMRouter
-from .llm.offline import Env, OfflineProvider, fast_talk, match_rules
+from .llm.offline import Env, OfflineProvider, fast_talk, match_rules, with_context
 from .security import AuditLog, PathGuard
 from .tools import browser, coding, desktop, files, images, personal, research, system
 from .tools.registry import ToolExecutor, ToolRegistry, ToolResult
+from .translate import NLLB, Translator, language_of
 from .voice import build_voice
 
 AFFIRM_ALL = re.compile(r"^\s*(hey\s+)?(jarvis[,\s]+)?(approve all|yes to all|approve (them|these|everything)( all)?|approve for (this|the) (whole )?task|always allow( this)?( for (this|the) task)?)[\s.!]*$", re.I)
@@ -35,6 +36,7 @@ class Jarvis:
     def __init__(self, settings: Settings | None = None, providers: list[LLMProvider] | None = None):
         self.settings = settings or load_settings()
         self.model_warm: dict = {}  # last preload of the local model (see _keep_model_warm)
+        self.translator = Translator(self.settings.translator_dir or self.settings.data_dir / "models" / "nllb-200-distilled-600M-ct2-int8")
         self.db = Database(self.settings.db_path)
         self.bus = EventBus()
         self.audit = AuditLog(self.db)
@@ -84,7 +86,7 @@ class Jarvis:
         if want == "anthropic" or (want == "auto" and has_anthropic):
             chain.append(AnthropicProvider(s.anthropic_model, s.anthropic_effort, get_secret("ANTHROPIC_API_KEY")))
         if s.openai_base_url and s.openai_model and want in ("auto", "openai_compat", "anthropic"):
-            compat = OpenAICompatProvider(s.openai_base_url, s.openai_model, get_secret("OPENAI_API_KEY"), stream=s.openai_stream, keep_alive=s.openai_keep_alive)
+            compat = OpenAICompatProvider(s.openai_base_url, s.openai_model, get_secret("OPENAI_API_KEY"), stream=s.openai_stream, keep_alive=s.openai_keep_alive, max_tokens=s.openai_max_tokens)
             chain.insert(0, compat) if want == "openai_compat" else chain.append(compat)
         chain.append(self.offline)  # always last: graceful degradation
         return chain
@@ -253,9 +255,15 @@ class Jarvis:
         self._chat_tasks[conversation_id] = asyncio.current_task()  # type: ignore[assignment]
         # Fast path: a slow local model should not be made to think about "turn the volume up".
         pin = FORCE_PROVIDER.set("offline") if actor == "chat" and self.fast_path_applies(text) else None
+        via = self.translation_language(text) if pin is None and actor == "chat" else None
         try:
-            result = await self.agents.run(self.root_agent(pinned_offline=pin is not None), text, conversation_id=conversation_id, history=history,
-                                           context_note="\n\n".join(notes), actor=actor, on_text=on_text)
+            if via:
+                result, via_english = await self._run_via_english(text, via, conversation_id=conversation_id, history=history,
+                                                                  context_note="\n\n".join(notes), actor=actor, on_text=on_text)
+            else:
+                via_english = None
+                result = await self.agents.run(self.root_agent(pinned_offline=pin is not None), text, conversation_id=conversation_id, history=history,
+                                               context_note="\n\n".join(notes), actor=actor, on_text=on_text)
         except asyncio.CancelledError:
             partial = "".join(streamed).strip()
             self._finish(conversation_id, (partial + "\n\n" if partial else "") + "_(interrupted)_", {"interrupted": True}, state="idle")
@@ -268,6 +276,8 @@ class Jarvis:
             self.bus.active_task = None
         meta = {"task_id": result.task_id, "provider": result.provider, "tools": result.tools_used, "pending_approvals": result.pending_approvals,
                 "errors": result.errors, "agents": sorted({t["agent"] for t in result.tools_used} | {"orchestrator"})}
+        if via_english:
+            meta["via_english"] = via_english
         failed = bool(result.errors) and not result.tools_used
         if actor == "chat":
             learned = self.auto_memory(text)
@@ -319,6 +329,58 @@ class Jarvis:
         if mode == "auto":
             mode = "flat" if self.llm.current().name == "openai_compat" else "team"
         return "assistant" if mode == "flat" else "orchestrator"
+
+    def translation_language(self, text: str) -> str | None:
+        """The language to route through English for this request, or None. Only for a local model (hosted models
+        write Tamil well), only when the translation model is installed, and only for a request in an Indian script."""
+        if not self.settings.translate_via_english or self.llm.current().name != "openai_compat":
+            return None
+        lang = language_of(text)
+        return lang if lang in NLLB and self.translator.available() else None
+
+    TO_ENGLISH = "Translate the user's request below into English. Reply with only the English translation, nothing else.\n\n"
+
+    async def _read_in_english(self, text: str, lang: str) -> tuple[str, str]:
+        """(English version of the request, problem). Asks the chat model first, with the flat agent's fixed prompt and
+        tools so the cached prefix is reused (~5-8 s); falls back to the translation model (~1 s)."""
+        provider = self.llm.current()
+        try:
+            tools = [t for t in self.tools.all() if t.name != "delegate"]
+            resp = await provider.complete(agents_mod.flat_system(self), [{"role": "user", "content": with_context(self.TO_ENGLISH + text)}],
+                                           [agents_mod.lean_spec(t) for t in agents_mod.flat_core(tools)], None, {"agent": "translate"})
+            english = resp.text.strip().strip('"“”').strip()
+            if english and not resp.tool_calls and language_of(english) is None:
+                return english, ""
+        except Exception:  # noqa: BLE001 - fall back to the translation model below
+            pass
+        try:
+            english = (await asyncio.to_thread(self.translator.translate, text, lang, "en")).strip()
+            return english, "" if english else "empty translation"
+        except Exception as e:  # noqa: BLE001 - without a translation the model gets the original words
+            return "", f"translation to English failed: {e}"
+
+    async def _run_via_english(self, text: str, lang: str, *, conversation_id, history, context_note, actor, on_text):
+        """Translate the request to English, let the model answer (and use tools) in English, translate the answer
+        back. The English answer is not streamed: only the translated reply is shown and spoken.
+        Measured on the owner's laptop: the chat model (Qwen3 4B) reads Tamil requests correctly (10/10) but writes poor
+        Tamil; the translation model writes good Tamil but misread 2 of 8 requests. So the chat model reads, the
+        translation model writes."""
+        english, problem = await self._read_in_english(text, lang)
+        if not english:
+            result = await self.agents.run(self.root_agent(), text, conversation_id=conversation_id, history=history,
+                                           context_note=context_note, actor=actor, on_text=on_text)
+            return result, {"language": lang, "error": problem}
+        result = await self.agents.run(self.root_agent(), english, conversation_id=conversation_id, history=history,
+                                       context_note=context_note, actor=actor, on_text=None)
+        english_reply = result.text
+        try:
+            reply = await asyncio.to_thread(self.translator.translate, english_reply, "en", lang)
+        except Exception as e:  # noqa: BLE001 - better an English answer than none
+            reply, english_reply = english_reply, english_reply + f"\n\n[translation back failed: {e}]"
+        result.text = reply
+        if reply:
+            on_text(reply)
+        return result, {"language": lang, "request": english, "reply": english_reply}
 
     def fast_path_applies(self, text: str) -> bool:
         """True when a model is configured but this request is a simple command the rule engine can do instantly."""

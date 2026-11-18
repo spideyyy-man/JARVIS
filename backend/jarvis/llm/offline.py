@@ -238,10 +238,14 @@ def _en_time() -> str:
     return time.strftime("It's %I:%M %p.").replace("It's 0", "It's ")
 
 
+def _ta_day_part(hour: int) -> str:
+    """காலை morning 5-11, மதியம் afternoon 12-15, மாலை evening 16-18, இரவு night 19-4 (midnight is night, not noon)."""
+    return "காலை" if 5 <= hour < 12 else "மதியம்" if 12 <= hour < 16 else "மாலை" if 16 <= hour < 19 else "இரவு"
+
+
 def _ta_time() -> str:
     t = time.localtime()
-    part = "காலை" if 5 <= t.tm_hour < 12 else "மதியம்" if t.tm_hour < 16 else "மாலை" if t.tm_hour < 19 else "இரவு"
-    return f"இப்போது {part} {t.tm_hour % 12 or 12}:{t.tm_min:02d}."
+    return f"இப்போது {_ta_day_part(t.tm_hour)} {t.tm_hour % 12 or 12}:{t.tm_min:02d}."
 
 
 def _ta_date() -> str:

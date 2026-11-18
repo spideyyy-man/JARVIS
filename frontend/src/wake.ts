@@ -27,6 +27,7 @@ export const WAKE_ALIASES: Record<string, string[]> = {
 
 /** Speech-recognition languages offered in Settings. "" = the browser's own language. */
 export const SPEECH_LANGUAGES: { code: string; label: string }[] = [
+  { code: "auto", label: "Auto: English + தமிழ் (follows you)" },
   { code: "", label: "Browser default" },
   { code: "en-IN", label: "English (India)" },
   { code: "en-US", label: "English (US)" },

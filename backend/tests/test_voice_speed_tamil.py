@@ -228,3 +228,115 @@ def test_provider_sends_keep_alive_and_a_one_token_warm_up():
     plain = OpenAICompatProvider("http://other/v1", "m", transport=httpx.MockTransport(handler), stream=False)
     run(plain.complete("sys", [{"role": "user", "content": "hi"}], []))
     assert "keep_alive" not in bodies[-1][1]  # only sent when configured (servers other than Ollama)
+
+
+def test_private_english_working_is_never_shown_or_spoken_even_when_tags_arrive_in_pieces():
+    from jarvis.llm.providers import visible_text
+
+    pieces = ["<", "think", ">", "The capital of India is New Delhi.", "</", "think", ">", "\n\n", "இந்தியாவின் ", "தலைநகரம் ", "புது தில்லி."]
+    shown, emitted = "", 0
+    text = ""
+    for p in pieces:
+        text += p
+        v = visible_text(text)
+        assert v.startswith(shown), (shown, v)  # what was already shown never changes
+        shown = v
+    assert shown == "இந்தியாவின் தலைநகரம் புது தில்லி."
+    assert "<" not in shown and "Delhi" not in shown
+    assert visible_text("Answer <th") == "Answer "  # a tag may be starting: hold it back
+    assert visible_text("x < y") == "x < y"
+
+
+def test_streamed_reply_hides_the_working_and_caps_its_length():
+    seen_bodies, spoken = [], []
+    chunks = ["<", "think>Delhi</think>", "\n", "புது ", "தில்லி."]
+
+    def handler(req: httpx.Request):
+        seen_bodies.append(json.loads(req.content))
+        sse = "".join(f"data: {json.dumps({'choices': [{'delta': {'content': c}}]})}\n\n" for c in chunks) + "data: [DONE]\n\n"
+        return httpx.Response(200, text=sse, headers={"content-type": "text/event-stream"})
+
+    p = OpenAICompatProvider("http://local:11434/v1", "m", transport=httpx.MockTransport(handler), max_tokens=1024)
+    resp = run(p.complete("sys", [{"role": "user", "content": "இந்தியாவின் தலைநகரம் எது?"}], [], on_text=spoken.append))
+    assert "".join(spoken) == "புது தில்லி." and resp.text == "புது தில்லி."
+    assert seen_bodies[0]["max_tokens"] == 1024
+
+
+class FakeTranslator:
+    """Stands in for the NLLB model: a fixed dictionary, and a record of what was translated."""
+    def __init__(self, table):
+        self.table, self.calls = table, []
+
+    def available(self):
+        return True
+
+    def translate(self, text, src, tgt):
+        self.calls.append((src, tgt, text))
+        return self.table[text]
+
+
+def test_tamil_request_goes_through_english_and_only_the_tamil_reply_is_shown(home, tmp_path):
+    llm = _local([("What is the capital of India?", []), ("The capital of India is New Delhi.", [])])  # reads, then answers
+    j = _with(home, tmp_path, llm)
+    j.translator = FakeTranslator({"The capital of India is New Delhi.": "இந்தியாவின் தலைநகரம் புது தில்லி."})  # writes
+    deltas = []
+    j.bus.emit = lambda type_, **d: deltas.append(d.get("text")) if type_ == "chat.delta" else None
+    try:
+        r = run(j.chat("இந்தியாவின் தலைநகரம் எது?"))
+        assert r["text"] == "இந்தியாவின் தலைநகரம் புது தில்லி."
+        assert llm.seen[0]["messages"][-1]["content"].endswith(j.TO_ENGLISH + "இந்தியாவின் தலைநகரம் எது?")
+        assert llm.seen[0]["system"] == llm.seen[1]["system"]  # same cached prefix for reading and answering
+        assert llm.seen[1]["messages"][-1]["content"].endswith("What is the capital of India?")  # the model works in English
+        assert j.translator.calls == [("en", "ta", "The capital of India is New Delhi.")]
+        assert deltas == ["இந்தியாவின் தலைநகரம் புது தில்லி."]  # the English answer is never streamed (shown/spoken)
+        assert r["via_english"] == {"language": "ta", "request": "What is the capital of India?", "reply": "The capital of India is New Delhi."}
+        msgs = j.db.query("SELECT role, content FROM messages ORDER BY created")
+        assert [m["content"] for m in msgs] == ["இந்தியாவின் தலைநகரம் எது?", "இந்தியாவின் தலைநகரம் புது தில்லி."]
+    finally:
+        j.db.close()
+
+
+def test_tamil_commands_and_english_requests_do_not_go_through_translation(home, tmp_path):
+    llm = _local([("Paris.", [])])
+    j = _with(home, tmp_path, llm)
+    j.translator = FakeTranslator({})
+    try:
+        assert run(j.chat("நேரம் என்ன"))["provider"] == "offline"  # fast path, instant, already Tamil
+        run(j.chat("what is the capital of France?"))
+        assert j.translator.calls == []
+        j.translator.available = lambda: False  # model not installed: Tamil goes to the model directly, as before
+        assert j.translation_language("இந்தியாவின் தலைநகரம் எது?") is None
+    finally:
+        j.db.close()
+
+
+def test_translation_keeps_markdown_code_and_identifiers():
+    from jarvis.translate import Translator, language_of
+
+    t = Translator(Path("unused"))
+    t._load = lambda: None
+    t._batch = lambda sentences, src, tgt: [f"<{s}>" for s in sentences]
+    text = "Done. It is ready!\n- First item\n```\ncode stays\n```\nRequest `ap_123` is waiting.\nSee https://example.org\n42"
+    assert t.translate(text, "en", "ta") == "<Done.> <It is ready!>\n- <First item>\n```\ncode stays\n```\nRequest `ap_123` is waiting.\nSee https://example.org\n42"
+    assert language_of("நேரம் என்ன") == "ta" and language_of("समय क्या है") == "hi" and language_of("what time") is None
+
+
+
+def test_reading_falls_back_to_the_translation_model_when_the_chat_model_does_not_translate(home, tmp_path):
+    llm = _local([("அது ஒரு கேள்வி", []), ("Seven.", [])])  # replied in Tamil instead of translating
+    j = _with(home, tmp_path, llm)
+    j.translator = FakeTranslator({"ஒரு வாரத்தில் எத்தனை நாட்கள்?": "How many days in a week?", "Seven.": "ஏழு."})
+    try:
+        r = run(j.chat("ஒரு வாரத்தில் எத்தனை நாட்கள்?"))
+        assert r["text"] == "ஏழு." and llm.seen[1]["messages"][-1]["content"].endswith("How many days in a week?")
+        assert ("ta", "en", "ஒரு வாரத்தில் எத்தனை நாட்கள்?") in j.translator.calls
+    finally:
+        j.db.close()
+
+
+def test_tamil_time_of_day_words():
+    from jarvis.llm.offline import _ta_day_part
+
+    parts = {h: _ta_day_part(h) for h in range(24)}
+    assert parts[0] == parts[3] == parts[19] == parts[23] == "இரவு"  # 12:04 at midnight was announced as "afternoon"
+    assert parts[5] == parts[11] == "காலை" and parts[12] == parts[15] == "மதியம்" and parts[16] == parts[18] == "மாலை"
