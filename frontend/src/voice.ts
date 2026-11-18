@@ -3,6 +3,7 @@
 // Browser dependencies (SpeechRecognition, speechSynthesis, SpeechSynthesisUtterance, getUserMedia) are read from
 // `window` at call time, so tests can install fakes before the page loads.
 import type { VoiceSettings } from "./api";
+import { norm, wakeRegex, wakeWords } from "./wake";
 
 export type VoicePhase = "idle" | "listening" | "thinking" | "speaking";
 export interface VoiceTurn { role: "user" | "assistant"; text: string }
@@ -49,9 +50,7 @@ const win = () => window as unknown as Win;
 const recCtor = () => win().SpeechRecognition || win().webkitSpeechRecognition;
 const synth = () => win().speechSynthesis;
 
-const DEFAULTS: VoiceSettings = { wake_word: "jarvis", continuous: false, voice_name: "", rate: 1, speak_replies: true };
-const norm = (t: string) => t.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
-const escapeRe = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const DEFAULTS: VoiceSettings = { wake_word: "jarvis", continuous: false, voice_name: "", rate: 1, speak_replies: true, language: "" };
 
 /** Turn Markdown into plain speakable text. */
 export function speakable(md: string): string {
@@ -108,8 +107,21 @@ export class VoiceEngine {
     this.listeners.forEach((l) => l());
   }
   configure(v: Partial<VoiceSettings>) {
+    const before = this.lang;
     this.cfg = { ...this.cfg, ...v };
     if (!this.cfg.wake_word?.trim()) this.cfg.wake_word = DEFAULTS.wake_word;
+    if (this.lang !== before && this.rec) {
+      // recognition keeps the language it started with; stopping it makes onend restart it in the new one
+      try {
+        this.rec.stop();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  /** Speech-recognition language: the user's choice, else the browser's. */
+  get lang(): string {
+    return this.cfg.language || navigator.language || "en-US";
   }
   get settings(): VoiceSettings {
     return this.cfg;
@@ -234,7 +246,7 @@ export class VoiceEngine {
     const rec = new Ctor();
     rec.continuous = true;
     rec.interimResults = true;
-    rec.lang = navigator.language || "en-US";
+    rec.lang = this.lang;
     rec.onresult = (e) => this.onResult(e);
     rec.onerror = (e) => {
       const code = e?.error ?? "";
@@ -260,7 +272,7 @@ export class VoiceEngine {
     }
   }
   private wakeRe() {
-    return new RegExp(`(?:\\b(?:hey|ok|okay|hi)[\\s,]+)?\\b${escapeRe(norm(this.cfg.wake_word) || "jarvis")}\\b`, "i");
+    return wakeRegex(wakeWords(this.cfg.wake_word, this.lang));
   }
   private isEcho(text: string) {
     const n = norm(text);
@@ -293,7 +305,7 @@ export class VoiceEngine {
     if (!text) return;
     const re = this.wakeRe();
     const hasWake = re.test(norm(text));
-    const stripped = text.replace(new RegExp(`(?:\\b(?:hey|ok|okay|hi)[\\s,]+)?\\b${escapeRe(this.cfg.wake_word.trim() || "jarvis")}\\b[\\s,.!?:;-]*`, "i"), " ").replace(/\s+/g, " ").trim();
+    const stripped = text.replace(wakeRegex(wakeWords(this.cfg.wake_word, this.lang), true), " ").replace(/\s+/g, " ").trim();
     const direct = this.capture !== "none" || Date.now() < this.armedUntil;
     if (direct) {
       const command = hasWake ? stripped : text;
@@ -387,13 +399,17 @@ export class VoiceEngine {
     const u = new Utter(text);
     u.rate = Math.min(2, Math.max(0.5, Number(this.cfg.rate) || 1));
     if (this.cfg.pitch) u.pitch = this.cfg.pitch;
-    if (this.cfg.voice_name) {
-      try {
-        const v = engine.getVoices().find((x) => x.name === this.cfg.voice_name);
-        if (v) u.voice = v;
-      } catch {
-        /* ignore */
-      }
+    try {
+      const voices = engine.getVoices();
+      // the chosen voice, else (with a speech language set) one that speaks that language - so Tamil replies
+      // are not read out by an English voice
+      const lang = this.cfg.language;
+      const v = (this.cfg.voice_name && voices.find((x) => x.name === this.cfg.voice_name))
+        || (lang && (voices.find((x) => x.lang === lang) || voices.find((x) => x.lang.split("-")[0] === lang.split("-")[0])));
+      if (v) u.voice = v;
+      if (lang && !this.cfg.voice_name) u.lang = lang;
+    } catch {
+      /* ignore */
     }
     u.onstart = () => {
       if (gen !== this.ttsGen) return;

@@ -276,6 +276,24 @@ def test_flat_mode_survives_failover_to_the_rule_engine(home, tmp_path):
     assert r["provider"] == "offline" and "System performance" in r["text"]
 
 
+def test_failover_summary_survives_a_tool_result_too_long_for_the_local_model(home, tmp_path, monkeypatch):
+    """Local models get tool results cut to 3000 chars. On a busy Windows machine system_stats is longer (long
+    process command lines); the cut JSON did not parse and the rule engine's summary crashed after a failover."""
+    from jarvis.llm.base import LLMError, LLMRouter
+    from jarvis.tools import system
+
+    monkeypatch.setattr(system, "_top_processes", lambda *a, **k: [
+        {"pid": i, "name": f"proc{i}.exe", "user": "u", "cpu_percent": 1.0, "memory_percent": 1.0, "status": "running",
+         "command": "C:\\Program Files\\App\\proc.exe --flag " + "x" * 400} for i in range(5)])
+    dead = ScriptedLLM([LLMError("connection refused")] * 3)
+    dead.name = "openai_compat"
+    j = make(home, tmp_path)
+    j.llm = LLMRouter([dead, j.offline], backoff=0.01)
+    j.db.set_setting("fast_path", False)
+    r = run(j.chat("how is my computer performing?"))
+    assert r["provider"] == "offline" and "System performance" in r["text"] and "proc0.exe" in r["text"]
+
+
 def test_doctor_reports_model_tool_calling_and_local_abilities(home, tmp_path):
     import json as _json
 

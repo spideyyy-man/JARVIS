@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { Cpu, Eye, FolderLock, History, Mic, ScrollText, ShieldCheck, ShieldQuestion, Zap } from "lucide-react";
 import { api } from "../api";
 import type { DoctorResult, VoiceSettings } from "../api";
-import { errText, useApi, useStore } from "../store";
+import { errText, useApi, useStore, voice as voiceEngine } from "../store";
+import { SPEECH_LANGUAGES } from "../wake";
 import { dateTime } from "../util";
 import { Loading, Panel, ScreenHead, StatusBadge, Switch } from "../components/Panel";
 
@@ -63,7 +64,10 @@ export function SettingsScreen() {
     if (on) current.add(name); else current.delete(name);
     void put({ trusted_tools: [...current] }, on ? `${name} now runs without asking.` : `${name} requires approval again.`);
   };
-  const voice = (patch: Partial<VoiceSettings>) => void put({ voice: patch }, "Voice settings saved.");
+  const voice = (patch: Partial<VoiceSettings>) => {
+    voiceEngine.configure(patch); // apply at once (a new speech language restarts recognition)
+    void put({ voice: patch }, "Voice settings saved.");
+  };
 
   return (
     <>
@@ -183,6 +187,18 @@ export function SettingsScreen() {
                   <label className="field grow"><span>Wake word</span><input className="input" value={wake ?? s.voice.wake_word} onChange={(e) => setWake(e.target.value)} data-testid="wake-word" /></label>
                   <button type="submit" className="btn" disabled={!wake?.trim() || wake.trim().toLowerCase() === s.voice.wake_word} data-testid="wake-save">Save</button>
                 </form>
+                <label className="field"><span>Speech language (what you speak to JARVIS in)</span>
+                  <select className="select" value={s.voice.language ?? ""} onChange={(e) => voice({ language: e.target.value })} data-testid="voice-language">
+                    {SPEECH_LANGUAGES.map((l) => <option key={l.code} value={l.code}>{l.label}{l.code ? ` (${l.code})` : ""}</option>)}
+                  </select>
+                </label>
+                {s.voice.language && !s.voice.language.startsWith("en") && (
+                  <p className="soft" data-testid="voice-language-note">
+                    Say “Jarvis” as usual - it is also recognised when written in this language's script. JARVIS replies in the
+                    language you use, but its local model is small: expect more mistakes than in English, and simple commands
+                    like “volume up” work best in English. With no voice chosen below, one that speaks this language is used if Edge has it.
+                  </p>
+                )}
                 <label className="field"><span>Voice</span>
                   <select className="select" value={s.voice.voice_name} onChange={(e) => voice({ voice_name: e.target.value })} data-testid="voice-name">
                     <option value="">Browser default</option>

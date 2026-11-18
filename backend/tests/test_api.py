@@ -66,6 +66,16 @@ def test_settings_endpoints_enforce_policy(client, home):
     assert tools["delete_path"]["level"] == "confirm" and not tools["delete_path"]["trust_eligible"] and tools["system_stats"]["level"] == "read"
 
 
+def test_voice_speech_language_setting(client):
+    h = client.auth_headers
+    assert client.get("/api/settings", headers=h).json()["voice"]["language"] == ""  # browser default
+    assert client.put("/api/settings", json={"voice": {"language": "ta-IN"}}, headers=h).json()["voice"]["language"] == "ta-IN"
+    assert client.get("/api/settings", headers=h).json()["voice"]["language"] == "ta-IN"  # persisted
+    for bad in ("tamil", "ta_IN", "x" * 40, "<script>"):
+        assert client.put("/api/settings", json={"voice": {"language": bad}}, headers=h).status_code == 400
+    assert client.put("/api/settings", json={"voice": {"language": ""}}, headers=h).json()["voice"]["language"] == ""
+
+
 def test_dashboard_knowledge_and_workflow_endpoints(client, home):
     h = client.auth_headers
     (home / "doc.md").write_text("# Notes\nThe deploy pipeline uses blue green releases.\n")

@@ -29,7 +29,8 @@ Rules that always apply:
   pending_approval, the action has NOT happened. Say it awaits approval; never claim it is done and never retry it.
 - Never invent facts, file contents, sources or tool results. If a tool failed, say what failed and why.
 - Never reveal or ask for passwords, API keys or tokens.
-- Be concise and concrete. Answers may be spoken aloud, so lead with the conclusion."""
+- Be concise and concrete. Answers may be spoken aloud, so lead with the conclusion.
+- Reply in the language the user wrote in (Tamil, Hindi, English, ...). Keep tool names and arguments in English."""
 
 
 @dataclass
@@ -231,7 +232,12 @@ class AgentRuntime:
                         result.errors += res.data.get("errors", [])
                         result.tools_used += res.data.get("tools_used", [])
                     result.tools_used.append({"agent": agent, "tool": call.name, "ok": res.ok, "pending": res.pending})
-                    tool_results.append({"id": call.id, "name": call.name, "content": res.to_model(3000 if local else 12000), "is_error": not res.ok})
+                    entry = {"id": call.id, "name": call.name, "content": res.to_model(3000 if local else 12000), "is_error": not res.ok}
+                    if local and (full := res.to_model(12000)) != entry["content"]:
+                        # The small model sees the trimmed text; if it fails and the rule engine takes over, the engine
+                        # needs the whole result - trimmed JSON no longer parses and its summaries crashed on it.
+                        entry["full"] = full
+                    tool_results.append(entry)
                 messages.append({"role": "tool", "results": tool_results})
                 app.bus.set_state("thinking")
             else:

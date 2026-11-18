@@ -11,7 +11,7 @@ export interface LlmInfo {
 }
 export interface RunningAgent { task_id: string; agent: string; title: string; started: number; parent_id?: string | null }
 export interface ActiveTask { conversation_id: string; title: string; started: number }
-export interface VoiceSettings { wake_word: string; continuous: boolean; voice_name: string; rate: number; speak_replies: boolean; pitch?: number; wake_on_start?: boolean }
+export interface VoiceSettings { wake_word: string; continuous: boolean; voice_name: string; rate: number; speak_replies: boolean; pitch?: number; wake_on_start?: boolean; language?: string }
 export interface Status {
   state: AssistantState;
   active_task: ActiveTask | null;

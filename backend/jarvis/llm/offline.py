@@ -385,7 +385,7 @@ class OfflineProvider:
 
         def data(r):
             try:
-                return json.loads(r["content"])
+                return json.loads(r.get("full") or r["content"])  # "full": untrimmed result kept for local-model turns
             except (ValueError, TypeError):
                 return r["content"]
 

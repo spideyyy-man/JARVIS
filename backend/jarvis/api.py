@@ -302,7 +302,7 @@ def create_app(jarvis: Jarvis | None = None) -> FastAPI:
 
     def settings_payload() -> dict:
         return {"trusted_tools": j.executor.trusted_tools(), "default_project": j.db.get_setting("default_project", ""),
-                "voice": {"wake_word": j.settings.wake_word, "continuous": False, "voice_name": "", "rate": 1.0, "speak_replies": True, "wake_on_start": False, **j.db.get_setting("voice", {})},
+                "voice": {"wake_word": j.settings.wake_word, "continuous": False, "voice_name": "", "rate": 1.0, "speak_replies": True, "wake_on_start": False, "language": "", **j.db.get_setting("voice", {})},
                 "capabilities": {name: {"enabled": on, "description": j.CAPABILITIES[name]} for name, on in j.capabilities().items()},
                 "proactive": {"briefing_time": "", **j.db.get_setting("proactive", {})},
                 "behavior": {k: bool(j.db.get_setting(k, True)) for k in BEHAVIOR},
@@ -344,7 +344,10 @@ def create_app(jarvis: Jarvis | None = None) -> FastAPI:
                 raise ValueError("briefing_time must be HH:MM (24-hour) or empty")
             j.db.set_setting("proactive", {"briefing_time": at})
         if body.voice is not None:
-            allowed = {"wake_word", "continuous", "voice_name", "rate", "speak_replies", "pitch", "wake_on_start"}
+            allowed = {"wake_word", "continuous", "voice_name", "rate", "speak_replies", "pitch", "wake_on_start", "language"}
+            lang = body.voice.get("language")
+            if lang is not None and not (lang == "" or (isinstance(lang, str) and re.fullmatch(r"[a-z]{2,3}(-[A-Z]{2})?", lang))):
+                raise ValueError("language must be a speech language code like 'ta-IN' or 'hi-IN', or empty for the browser default")
             j.db.set_setting("voice", {**j.db.get_setting("voice", {}), **{k: v for k, v in body.voice.items() if k in allowed}})
         return settings_payload()
 
