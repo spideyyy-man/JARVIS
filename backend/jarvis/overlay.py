@@ -2,39 +2,50 @@
 
     python -m jarvis.overlay [--parent PID]      (the desktop app starts it; it exits when that process ends)
 
-Its colour shows the state (cyan idle, green listening, amber thinking, orange working, blue speaking, red error,
-grey when JARVIS is not reachable). Hover over it - or click it to keep it open - for a panel with what JARVIS is
-doing right now, what it heard and answered, actions waiting for approval (Approve / Deny), recent activity, a box to
-type a command, Talk (listen now, no wake word), Window (the full JARVIS window) and Self-test (create a file with code,
-run it in the browser, delete it). Drag the circle to move it; the position is remembered.
+The circle's colour shows the state (cyan ready, green listening, amber thinking, orange working, blue speaking, red
+error, grey when JARVIS is not reachable).
+- Hover (or click to keep it open): a compact panel that fades in - one status line, the last request and reply,
+  a "Last 5" drop-down, a command box, and Talk / Window / Self-test.
+- An action waiting for approval shows by itself, without hovering: a small bar under the circle with what it is,
+  a moving progress line, and Allow / Deny.
+Drag the circle to move it; the position is remembered.
 
 A separate process with tkinter (part of Python): it only talks to the local API, polling /api/overlay twice a second.
+Widgets are built once and only their text changes, so nothing jumps or flickers while it is open.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import queue
 import threading
 import time
 import tkinter as tk
 import urllib.error
 import urllib.request
-from pathlib import Path
 
 from .config import load_settings
 
 ORB = 46
-PANEL_W = 380
+PANEL_W = 300
+BAR_W = 250
 KEY = "#010203"  # transparent colour around the circle
-BG, CARD, FG, MUTED, LINE = "#0b1220", "#111a2e", "#e2e8f0", "#8b98ad", "#1f2a44"
+BG, CARD, FG, MUTED, LINE, ACCENT, AMBER = "#0b1220", "#131c30", "#e2e8f0", "#8b98ad", "#1f2a44", "#22d3ee", "#f59e0b"
 COLORS = {"idle": "#22d3ee", "waiting": "#22d3ee", "listening": "#22c55e", "recording": "#22c55e", "transcribing": "#a3e635",
           "thinking": "#f59e0b", "executing": "#fb923c", "speaking": "#60a5fa", "error": "#ef4444", "offline": "#64748b", "loading": "#94a3b8"}
-LABELS = {"idle": "Ready", "waiting": "Listening for “Hey Jarvis”", "recording": "Listening…", "transcribing": "Understanding what you said…",
-          "thinking": "Thinking…", "executing": "Working…", "speaking": "Speaking", "error": "Something went wrong", "offline": "JARVIS is not running",
-          "loading": "Loading the speech model…", "listening": "Listening…"}
+LABELS = {"idle": "Ready", "waiting": "Listening for “Hey Jarvis”", "recording": "Listening…", "transcribing": "Understanding…",
+          "thinking": "Thinking…", "executing": "Working…", "speaking": "Speaking", "error": "Something went wrong", "offline": "Not running",
+          "loading": "Loading speech model…", "listening": "Listening…"}
 FONT = ("Segoe UI", 9)
-FONT_B = ("Segoe UI Semibold", 10)
+SMALL = ("Segoe UI", 8)
+BOLD = ("Segoe UI Semibold", 9)
+FADE_STEP, FADE_MS, PANEL_ALPHA = 0.16, 15, 0.97
+
+
+def elide(text: str, n: int) -> str:
+    t = " ".join(str(text or "").split())
+    return t if len(t) <= n else t[: n - 1].rstrip() + "…"
 
 
 class Api:
@@ -58,17 +69,65 @@ def work_area() -> tuple[int, int, int, int] | None:
         return None
 
 
+class Fader:
+    """Fades a Toplevel in and out with its window alpha (Windows supports -alpha on toplevels)."""
+
+    def __init__(self, win: tk.Toplevel, top: float = PANEL_ALPHA):
+        self.win, self.top, self.alpha, self.target, self._job = win, top, 0.0, 0.0, None
+        try:
+            win.attributes("-alpha", 0.0)
+        except tk.TclError:
+            pass
+
+    @property
+    def shown(self) -> bool:
+        return self.target > 0
+
+    def show(self) -> None:
+        if self.target == self.top:
+            return
+        self.target = self.top
+        self.win.deiconify()
+        self._step()
+
+    def hide(self) -> None:
+        if self.target == 0:
+            return
+        self.target = 0.0
+        self._step()
+
+    def _step(self) -> None:
+        if self._job:
+            self.win.after_cancel(self._job)
+            self._job = None
+        diff = self.target - self.alpha
+        if abs(diff) <= FADE_STEP:
+            self.alpha = self.target
+        else:
+            self.alpha += FADE_STEP if diff > 0 else -FADE_STEP
+        try:
+            self.win.attributes("-alpha", self.alpha)
+        except tk.TclError:
+            return
+        if self.alpha != self.target:
+            self._job = self.win.after(FADE_MS, self._step)
+        elif self.alpha == 0:
+            self.win.withdraw()
+
+
 class Overlay:
     def __init__(self, api: Api, settings, parent_pid: int | None = None):
         self.api, self.settings, self.parent_pid = api, settings, parent_pid
         self.data: dict | None = None
         self.updates: queue.Queue = queue.Queue()
         self.pinned = False
-        self.panel_open = False
+        self.history_open = False
         self.outside_since: float | None = None
+        self.hover_since: float | None = None
         self.conversation: str | None = None
         self.phase = 0.0
         self.pos_file = settings.data_dir / "overlay.json"
+        self._texts: dict[str, str] = {}
 
         self.root = tk.Tk()
         self.root.title("JARVIS icon")
@@ -86,9 +145,9 @@ class Overlay:
         self.canvas.bind("<ButtonPress-1>", self._press)
         self.canvas.bind("<B1-Motion>", self._drag)
         self.canvas.bind("<ButtonRelease-1>", self._release)
-        self.canvas.bind("<Enter>", lambda _e: self.root.after(200, self._hover_open))
         self.canvas.bind("<Button-3>", lambda _e: self._talk())
         self._build_panel()
+        self._build_approval_bar()
         threading.Thread(target=self._poll, daemon=True, name="overlay-poll").start()
         self.root.after(100, self._tick)
 
@@ -99,8 +158,7 @@ class Overlay:
             return int(p["x"]), int(p["y"])
         except (OSError, ValueError, KeyError):
             pass
-        area = work_area() or (0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight() - 40)
-        x, y, w, h = area
+        x, y, w, h = work_area() or (0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight() - 40)
         return x + w - ORB - 6, y + h - ORB - 110
 
     def _press(self, e):
@@ -113,8 +171,8 @@ class Overlay:
         if abs(dx) + abs(dy) > 3:
             self._moved = True
             self.root.geometry(f"+{wx + dx}+{wy + dy}")
-            if self.panel_open:
-                self._place_panel()
+            self._place_panel()
+            self._place_bar()
 
     def _release(self, _e):
         if self._moved:
@@ -122,112 +180,193 @@ class Overlay:
                 self.pos_file.write_text(json.dumps({"x": self.root.winfo_x(), "y": self.root.winfo_y()}))
             except OSError:
                 pass
-        elif self.panel_open and self.pinned:  # a click: keep the panel open, or close a kept-open one
+        elif self.panel_fade.shown and self.pinned:  # a click keeps the panel open, a second click closes it
             self.pinned = False
             self._hide_panel()
         else:
             self.pinned = True
             self._show_panel()
 
-    # -- panel ----------------------------------------------------------------------------------------------------------
+    def _area(self) -> tuple[int, int, int, int]:
+        return work_area() or (0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight())
+
+    def _geometry(self, win: tk.Toplevel, geo: str) -> None:
+        """Move/resize only when something changed (setting it every poll makes Windows redraw the frame)."""
+        if self._texts.get(f"geo{id(win)}") != geo:
+            self._texts[f"geo{id(win)}"] = geo
+            win.geometry(geo)
+
+    # -- widgets helpers --------------------------------------------------------------------------------------------------
+    def _set_text(self, key: str, widget: tk.Widget, text: str, **extra) -> None:
+        """Change a label only when its text changed: no flicker, no relayout every poll."""
+        if self._texts.get(key) != text or extra:
+            self._texts[key] = text
+            widget.configure(text=text, **extra)
+
+    def _button(self, parent, text: str, cmd, bg: str = "#1e293b", fg: str = FG, font=SMALL) -> tk.Label:
+        b = tk.Label(parent, text=text, font=font, bg=bg, fg=fg, padx=8, pady=2, cursor="hand2")
+        b.bind("<Button-1>", lambda _e: cmd())
+        b.bind("<Enter>", lambda _e: b.configure(bg=_lighter(bg)))
+        b.bind("<Leave>", lambda _e: b.configure(bg=bg))
+        return b
+
+    # -- the hover panel ----------------------------------------------------------------------------------------------------
     def _build_panel(self):
         p = self.panel = tk.Toplevel(self.root)
         p.overrideredirect(True)
         p.attributes("-topmost", True)
         p.configure(bg=BG, highlightthickness=1, highlightbackground=LINE)
         p.withdraw()
-        pad = {"padx": 12}
+        self.panel_fade = Fader(p)
+
         head = tk.Frame(p, bg=BG)
-        head.pack(fill="x", pady=(10, 2), **pad)
-        self.title = tk.Label(head, text="JARVIS", font=("Segoe UI Semibold", 12), fg=FG, bg=BG, anchor="w")
-        self.title.pack(side="left")
-        self.pin_btn = tk.Label(head, text="📌", font=FONT, fg=MUTED, bg=BG, cursor="hand2")
-        self.pin_btn.pack(side="right")
-        self.pin_btn.bind("<Button-1>", lambda _e: self._toggle_pin())
-        self.sub = tk.Label(p, text="", font=FONT, fg=MUTED, bg=BG, anchor="w", justify="left", wraplength=PANEL_W - 24)
-        self.sub.pack(fill="x", **pad)
+        head.pack(fill="x", padx=10, pady=(8, 0))
+        self.dot = tk.Canvas(head, width=10, height=10, bg=BG, highlightthickness=0)
+        self.dot.pack(side="left", pady=(2, 0))
+        self.status = tk.Label(head, text="", font=BOLD, fg=FG, bg=BG, anchor="w")
+        self.status.pack(side="left", padx=(6, 0))
+        self.pin = tk.Label(head, text="📌", font=SMALL, fg=MUTED, bg=BG, cursor="hand2")
+        self.pin.pack(side="right")
+        self.pin.bind("<Button-1>", lambda _e: self._toggle_pin())
+        self.meta = tk.Label(p, text="", font=SMALL, fg=MUTED, bg=BG, anchor="w")
+        self.meta.pack(fill="x", padx=10)
 
-        self.now = self._card(p, "Now")
-        self.now_text = self._text_label(self.now)
-        self.exchange = self._card(p, "Last request")
-        self.req_text = self._text_label(self.exchange)
-        self.reply_text = self._text_label(self.exchange, fg=FG)
-        self.approvals = tk.Frame(p, bg=BG)
-        self.approvals.pack(fill="x", **pad)
-        self.activity = self._card(p, "Activity")
-        self.activity_text = self._text_label(self.activity, fg=MUTED)
-        self.test = self._card(p, "Self-test")
-        self.test_text = self._text_label(self.test)
-        self.test_buttons = tk.Frame(self.test, bg=CARD)
-        self.test_buttons.pack(fill="x", pady=(4, 0))
+        card = tk.Frame(p, bg=CARD, padx=8, pady=6)
+        card.pack(fill="x", padx=10, pady=(6, 0))
+        self.you = tk.Label(card, text="", font=SMALL, fg=MUTED, bg=CARD, anchor="w", justify="left")
+        self.you.pack(fill="x")
+        self.reply = tk.Label(card, text="", font=FONT, fg=FG, bg=CARD, anchor="w", justify="left", wraplength=PANEL_W - 40)
+        self.reply.pack(fill="x", pady=(2, 0))
 
-        box = tk.Frame(p, bg=BG)
-        box.pack(fill="x", pady=(8, 4), **pad)
-        self.entry = tk.Entry(box, font=("Segoe UI", 10), bg=CARD, fg=FG, insertbackground=FG, relief="flat", highlightthickness=1,
-                              highlightbackground=LINE, highlightcolor="#22d3ee")
-        self.entry.pack(side="left", fill="x", expand=True, ipady=5)
+        self.hist_toggle = tk.Label(p, text="▸ Last 5", font=SMALL, fg=ACCENT, bg=BG, anchor="w", cursor="hand2")
+        self.hist_toggle.pack(fill="x", padx=10, pady=(4, 0))
+        self.hist_toggle.bind("<Button-1>", lambda _e: self._toggle_history())
+        self.hist = tk.Frame(p, bg=BG)
+        self.hist_rows = []
+        for _ in range(5):
+            row = tk.Label(self.hist, text="", font=SMALL, fg=MUTED, bg=BG, anchor="w", justify="left", wraplength=PANEL_W - 24)
+            row.pack(fill="x", pady=(0, 3))
+            self.hist_rows.append(row)
+
+        self.box = tk.Frame(p, bg=BG)
+        self.box.pack(fill="x", padx=10, pady=(6, 0))
+        self.entry = tk.Entry(self.box, font=FONT, bg=CARD, fg=FG, insertbackground=FG, relief="flat", highlightthickness=1,
+                              highlightbackground=LINE, highlightcolor=ACCENT)
+        self.entry.pack(side="left", fill="x", expand=True, ipady=3)
         self.entry.bind("<Return>", lambda _e: self._send())
-        self._button(box, "Send", self._send).pack(side="left", padx=(6, 0))
+        self._button(self.box, "➤", self._send, bg="#0e7490").pack(side="left", padx=(4, 0))
+
         row = tk.Frame(p, bg=BG)
-        row.pack(fill="x", pady=(2, 10), **pad)
+        row.pack(fill="x", padx=10, pady=(6, 8))
         self._button(row, "🎤 Talk", self._talk).pack(side="left")
-        self._button(row, "Window", self._open_window).pack(side="left", padx=6)
+        self._button(row, "Window", self._open_window).pack(side="left", padx=4)
         self._button(row, "Self-test", self._selftest).pack(side="left")
-        self.note = tk.Label(row, text="", font=FONT, fg=MUTED, bg=BG)
-        self.note.pack(side="left", padx=8)
-
-    def _card(self, parent, title: str) -> tk.Frame:
-        f = tk.Frame(parent, bg=CARD, padx=10, pady=6, highlightthickness=0)
-        f.pack(fill="x", padx=12, pady=(6, 0))
-        tk.Label(f, text=title.upper(), font=("Segoe UI", 7, "bold"), fg=MUTED, bg=CARD, anchor="w").pack(fill="x")
-        return f
-
-    def _text_label(self, parent, fg: str = FG) -> tk.Label:
-        lbl = tk.Label(parent, text="", font=FONT, fg=fg, bg=CARD, anchor="w", justify="left", wraplength=PANEL_W - 48)
-        lbl.pack(fill="x")
-        return lbl
-
-    def _button(self, parent, text: str, cmd, color: str = "#1e293b") -> tk.Button:
-        return tk.Button(parent, text=text, command=cmd, font=FONT, bg=color, fg=FG, activebackground="#334155", activeforeground=FG,
-                         relief="flat", padx=10, pady=3, cursor="hand2", bd=0)
+        self.note = tk.Label(row, text="", font=SMALL, fg=MUTED, bg=BG, anchor="e")
+        self.note.pack(side="right")
+        p.bind("<Enter>", lambda _e: setattr(self, "outside_since", None))
 
     def _toggle_pin(self):
         self.pinned = not self.pinned
-        self.pin_btn.configure(fg="#22d3ee" if self.pinned else MUTED)
+        self.pin.configure(fg=ACCENT if self.pinned else MUTED)
 
-    def _hover_open(self):
-        if self._pointer_in(self.root):
-            self._show_panel()
+    def _toggle_history(self):
+        self.history_open = not self.history_open
+        self.hist_toggle.configure(text=("▾ Last 5" if self.history_open else "▸ Last 5"))
+        if self.history_open:
+            self.hist.pack(fill="x", padx=10, pady=(2, 0), before=self.box)
+        else:
+            self.hist.pack_forget()
+        self._place_panel()
 
     def _show_panel(self):
-        self.panel_open = True
         self.outside_since = None
         self._render()
-        self.panel.deiconify()
         self._place_panel()
-        self.pin_btn.configure(fg="#22d3ee" if self.pinned else MUTED)
+        self.panel_fade.show()
+        self.pin.configure(fg=ACCENT if self.pinned else MUTED)
 
     def _hide_panel(self):
-        self.panel_open = False
-        self.panel.withdraw()
+        self.panel_fade.hide()
 
     def _place_panel(self):
+        if not self.panel_fade.shown:
+            return
         self.panel.update_idletasks()
         h = self.panel.winfo_reqheight()
         ox, oy = self.root.winfo_x(), self.root.winfo_y()
-        area = work_area() or (0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight())
-        ax, ay, aw, ah = area
+        ax, ay, aw, ah = self._area()
         x = ox - PANEL_W - 8 if ox - PANEL_W - 8 >= ax else ox + ORB + 8
         y = max(ay + 4, min(oy + ORB - h, ay + ah - h - 4))
-        self.panel.geometry(f"{PANEL_W}x{h}+{x}+{y}")
+        self._geometry(self.panel, f"{PANEL_W}x{h}+{x}+{y}")
 
-    def _pointer_in(self, w, margin: int = 12) -> bool:
+    def _pointer_in(self, w, margin: int = 10) -> bool:
         try:
+            if not w.winfo_viewable():
+                return False
             px, py = w.winfo_pointerxy()
             x, y, ww, hh = w.winfo_rootx(), w.winfo_rooty(), w.winfo_width(), w.winfo_height()
         except tk.TclError:
             return False
         return x - margin <= px <= x + ww + margin and y - margin <= py <= y + hh + margin
+
+    # -- the approval bar (no hover needed) ----------------------------------------------------------------------------------
+    def _build_approval_bar(self):
+        b = self.bar = tk.Toplevel(self.root)
+        b.overrideredirect(True)
+        b.attributes("-topmost", True)
+        b.configure(bg=BG, highlightthickness=1, highlightbackground=AMBER)
+        b.withdraw()
+        self.bar_fade = Fader(b, top=0.98)
+        self.bar_title = tk.Label(b, text="", font=BOLD, fg=AMBER, bg=BG, anchor="w")
+        self.bar_title.pack(fill="x", padx=8, pady=(6, 0))
+        self.bar_text = tk.Label(b, text="", font=SMALL, fg=FG, bg=BG, anchor="w", justify="left", wraplength=BAR_W - 16)
+        self.bar_text.pack(fill="x", padx=8)
+        self.bar_line = tk.Canvas(b, width=BAR_W - 16, height=3, bg=LINE, highlightthickness=0)
+        self.bar_line.pack(padx=8, pady=(5, 5))
+        row = tk.Frame(b, bg=BG)
+        row.pack(fill="x", padx=8, pady=(0, 7))
+        self._button(row, "✓ Allow", lambda: self._decide_current(True), bg="#166534").pack(side="left")
+        self._button(row, "✕ Deny", lambda: self._decide_current(False), bg="#7f1d1d").pack(side="left", padx=6)
+        self.bar_count = tk.Label(row, text="", font=SMALL, fg=MUTED, bg=BG)
+        self.bar_count.pack(side="right")
+        self.current_approval: str | None = None
+        self.deciding: set[str] = set()
+
+    def _place_bar(self):
+        if not self.bar_fade.shown:
+            return
+        self.bar.update_idletasks()
+        h = self.bar.winfo_reqheight()
+        ox, oy = self.root.winfo_x(), self.root.winfo_y()
+        ax, ay, aw, ah = self._area()
+        x = max(ax + 4, min(ox + ORB // 2 - BAR_W // 2, ax + aw - BAR_W - 4))
+        y = oy + ORB + 6 if oy + ORB + 6 + h <= ay + ah else oy - h - 6  # under the circle, or above it near the bottom
+        self._geometry(self.bar, f"{BAR_W}x{h}+{x}+{y}")
+
+    def _render_bar(self, approvals: list[dict]):
+        waiting = [a for a in approvals if a["id"] not in self.deciding]
+        if not waiting:
+            self.current_approval = None
+            self.bar_fade.hide()
+            return
+        ap = waiting[0]
+        self.current_approval = ap["id"]
+        self._set_text("bar_title", self.bar_title, "Allow " + ap["tool"].replace("_", " ") + "?")
+        self._set_text("bar_text", self.bar_text, elide(ap["preview"].splitlines()[0] if ap["preview"] else "", 110))
+        self._set_text("bar_count", self.bar_count, f"1 of {len(waiting)}" if len(waiting) > 1 else "")
+        if not self.bar_fade.shown:
+            self.bar_fade.show()
+        self._place_bar()
+
+    def _draw_bar_line(self):
+        """An indeterminate progress line: a soft segment sliding back and forth while the action waits."""
+        if not self.bar_fade.shown:
+            return
+        c, w = self.bar_line, BAR_W - 16
+        c.delete("all")
+        seg = w * 0.32
+        x = (math.sin(self.phase * 0.9) * 0.5 + 0.5) * (w - seg)
+        c.create_rectangle(x, 0, x + seg, 3, fill=AMBER, outline="")
 
     # -- data -----------------------------------------------------------------------------------------------------------
     def _poll(self):
@@ -242,7 +381,7 @@ class Overlay:
             if self.parent_pid and misses and not _alive(self.parent_pid):
                 self.updates.put("quit")
                 return
-            time.sleep(0.5 if self.panel_open else 0.8)
+            time.sleep(0.5)
 
     def _state(self) -> str:
         d = self.data
@@ -265,117 +404,115 @@ class Overlay:
                     self.root.destroy()
                     return
                 self.data = item
-                if self.panel_open:
+                if self.panel_fade.shown:
                     self._render()
+                self._render_bar((item or {}).get("approvals") or [])
         except queue.Empty:
             pass
+        self.phase += 0.12
         self._draw()
-        if self.panel_open and not self.pinned:
-            inside = self._pointer_in(self.root) or self._pointer_in(self.panel)
-            typing = self.root.focus_get() is self.entry and self.entry.get().strip()
-            if inside or typing:
-                self.outside_since = None
-            elif self.outside_since is None:
-                self.outside_since = time.time()
-            elif time.time() - self.outside_since > 0.8:
-                self._hide_panel()
-        self.root.after(50, self._tick)
+        self._draw_bar_line()
+        self._hover()
+        self.root.after(40, self._tick)
+
+    def _hover(self):
+        """Open after a short, deliberate hover; close shortly after the pointer leaves (not while typing)."""
+        on_orb = self._pointer_in(self.root, margin=2)
+        if not self.panel_fade.shown:
+            if on_orb:
+                self.hover_since = self.hover_since or time.time()
+                if time.time() - self.hover_since > 0.15:
+                    self._show_panel()
+            else:
+                self.hover_since = None
+            return
+        if self.pinned:
+            return
+        inside = on_orb or self._pointer_in(self.panel) or self._pointer_in(self.bar)
+        typing = self.root.focus_get() is self.entry and self.entry.get().strip()
+        if inside or typing:
+            self.outside_since = None
+        elif self.outside_since is None:
+            self.outside_since = time.time()
+        elif time.time() - self.outside_since > 0.45:
+            self.hover_since = None
+            self._hide_panel()
 
     def _draw(self):
         state = self._state()
         color = COLORS.get(state, COLORS["idle"])
         c = self.canvas
         c.delete("all")
-        self.phase += 0.12
-        import math
-
         cx = cy = ORB / 2
-        r = ORB / 2 - 4
+        r = ORB / 2 - 5
+        waiting = bool(self.data and self.data.get("approvals"))
         if state in ("recording", "listening", "speaking"):
-            grow = 2.5 + 2.5 * math.sin(self.phase * 1.6)
-            c.create_oval(cx - r - grow + 2, cy - r - grow + 2, cx + r + grow - 2, cy + r + grow - 2, outline=color, width=1)
+            grow = 2 + 2 * math.sin(self.phase * 1.6)
+            c.create_oval(cx - r - grow, cy - r - grow, cx + r + grow, cy + r + grow, outline=color, width=1)
         c.create_oval(cx - r, cy - r, cx + r, cy + r, fill="#0b1220", outline=color, width=3)
         if state in ("thinking", "executing", "transcribing", "loading"):
-            start = (self.phase * 120) % 360
-            c.create_arc(cx - r + 5, cy - r + 5, cx + r - 5, cy + r - 5, start=start, extent=100, style="arc", outline=color, width=3)
-        inner = 7 if state not in ("recording", "speaking") else 7 + 2 * abs(math.sin(self.phase * 2.2))
+            c.create_arc(cx - r + 5, cy - r + 5, cx + r - 5, cy + r - 5, start=(self.phase * 120) % 360, extent=100, style="arc", outline=color, width=3)
+        if waiting:  # an amber arc sweeping round the rim: something needs you
+            c.create_arc(cx - r - 3, cy - r - 3, cx + r + 3, cy + r + 3, start=(-self.phase * 90) % 360, extent=70, style="arc", outline=AMBER, width=3)
+        inner = 6 + (2 * abs(math.sin(self.phase * 2.2)) if state in ("recording", "speaking") else 0)
         c.create_oval(cx - inner, cy - inner, cx + inner, cy + inner, fill=color, outline="")
-        if self.data and self.data.get("approvals"):
-            c.create_oval(ORB - 14, 2, ORB - 2, 14, fill="#ef4444", outline=KEY)
 
     def _render(self):
         d = self.data
         state = self._state()
-        self.title.configure(text="JARVIS · " + LABELS.get(state, state), fg=COLORS.get(state, FG))
+        color = COLORS.get(state, FG)
+        self.dot.delete("all")
+        self.dot.create_oval(1, 1, 9, 9, fill=color, outline="")
+        self._set_text("status", self.status, LABELS.get(state, state))
         if not d:
-            self.sub.configure(text="Start it from the desktop shortcut. This icon reconnects by itself.")
+            self._set_text("meta", self.meta, "Start JARVIS from the desktop shortcut - this reconnects by itself.")
             return
         v = d.get("voice") or {}
-        voice = ("Voice: offline listener, say “Hey Jarvis”" if v.get("running") else
-                 "Voice: " + (v.get("unavailable") or ("off" if not v.get("enabled") else v.get("error") or "starting")))
-        if v.get("running") and not v.get("speech_model_ready"):
-            voice += " (loading speech model…)"
-        if v.get("error"):
-            voice += f" - {v['error']}"
-        self.sub.configure(text=f"Model: {d.get('model')}   ·   {voice}")
-        task = d.get("task") or {}
-        now = []
-        if d.get("detail"):
-            now.append("Running: " + d["detail"])
-        if task.get("title"):
-            now.append(f"Task: {task['title'][:140]}  ({int(time.time() - task.get('started', time.time()))} s)")
         last = v.get("last") or {}
-        if last.get("heard"):
-            now.append(f"Heard ({last.get('language')}, {last.get('seconds')} s): {last['heard'][:160]}")
+        bits = [] if v.get("running") else ["voice off" if not v.get("enabled") else (v.get("unavailable") or v.get("error") or "voice starting")]
+        if d.get("detail"):
+            bits.append(elide(d["detail"], 40))
+        if last.get("seconds") is not None and last.get("heard"):
+            bits.append(f"heard in {last['seconds']} s")
         elif last.get("note"):
-            now.append("Heard: " + last["note"])
-        self.now_text.configure(text="\n".join(now) or "Nothing running.")
+            bits.append(elide(last["note"], 40))
+        self._set_text("meta", self.meta, " · ".join(bits))
         ex = d.get("last") or {}
-        self.req_text.configure(text="You: " + (ex.get("request") or "-")[:200], fg=MUTED)
-        self.reply_text.configure(text="JARVIS: " + (ex.get("reply") or "-")[:500])
-        self._render_approvals(d.get("approvals") or [])
-        acts = d.get("activity") or []
-        self.activity_text.configure(text="\n".join(time.strftime("%H:%M:%S ", time.localtime(a["ts"])) + a["text"] for a in acts[-7:]) or "-")
+        self._set_text("you", self.you, "You: " + elide(ex.get("request") or "-", 48))
+        self._set_text("reply", self.reply, elide(ex.get("reply") or "-", 170))
+        history = d.get("history") or []
+        for i, row in enumerate(self.hist_rows):
+            h = history[i] if i < len(history) else None
+            txt = (time.strftime("%H:%M ", time.localtime(h["at"])) + elide(h["request"], 40) + "\n  → " + elide(h["reply"] or "…", 70)) if h else ""
+            self._set_text(f"hist{i}", row, txt)
         st = d.get("selftest") or {}
-        marks = {"passed": "✓", "failed": "✗", "skipped": "–", "running": "…", "pending": "·"}
-        lines = [f"{marks.get(s['status'], '?')} {s['title']}" + (f"  ({s['seconds']} s)" if s.get("seconds") is not None else "") +
-                 (f"\n    {s['detail'][:160]}" if s.get("detail") else "") for s in st.get("steps") or []]
-        head = "Running…" if st.get("running") else (time.strftime("Last run %H:%M", time.localtime(st["finished"])) if st.get("finished") else "Not run yet.")
-        self.test_text.configure(text=head + ("\n" + "\n".join(lines) if lines else ""))
-        need_browser = not (d.get("capabilities") or {}).get("browser_control")
-        if need_browser != bool(self.test_buttons.winfo_children()):
-            for w in self.test_buttons.winfo_children():
-                w.destroy()
-            if need_browser:
-                self._button(self.test_buttons, "Allow browser control (for the browser step)", self._allow_browser).pack(side="left")
-        if self.panel_open:
-            self._place_panel()
-
-    def _render_approvals(self, approvals: list[dict]) -> None:
-        """Rebuilt only when the pending set changes, so a button is never replaced under the mouse."""
-        key = tuple(a["id"] for a in approvals)
-        if key == getattr(self, "_approval_key", None):
-            return
-        self._approval_key = key
-        for w in self.approvals.winfo_children():
-            w.destroy()
-        for ap in approvals:
-            f = tk.Frame(self.approvals, bg="#2a1d0a", padx=10, pady=6)
-            f.pack(fill="x", pady=(6, 0))
-            tk.Label(f, text=f"Approve {ap['tool']}?", font=FONT_B, fg="#fbbf24", bg="#2a1d0a", anchor="w").pack(fill="x")
-            tk.Label(f, text=ap["preview"][:240], font=FONT, fg=FG, bg="#2a1d0a", anchor="w", justify="left", wraplength=PANEL_W - 48).pack(fill="x")
-            b = tk.Frame(f, bg="#2a1d0a")
-            b.pack(fill="x", pady=(4, 0))
-            self._button(b, "Approve", lambda i=ap["id"]: self._decide(i, True), "#166534").pack(side="left")
-            self._button(b, "Deny", lambda i=ap["id"]: self._decide(i, False), "#7f1d1d").pack(side="left", padx=6)
+        steps = st.get("steps") or []
+        if st.get("running"):
+            done = sum(1 for s in steps if s["status"] not in ("pending", "running"))
+            note = f"Self-test {done}/{len(steps)}…"
+        elif steps:
+            passed = sum(1 for s in steps if s["status"] == "passed")
+            note = f"Self-test {passed}/{len(steps)} {'✓' if passed == len(steps) else '✗'}"
+        else:
+            note = ""
+        if not (d.get("capabilities") or {}).get("browser_control") and not st.get("running"):
+            note = (note + "  " if note else "") + "(browser step off)"
+        if not self._texts.get("note_override"):
+            self._set_text("note", self.note, note)
+        self._place_panel()
 
     # -- actions --------------------------------------------------------------------------------------------------------
+    def _flash(self, text: str):
+        self._texts["note_override"] = "1"
+        self.note.configure(text=text)
+        self.root.after(2500, lambda: self._texts.pop("note_override", None))
+
     def _bg(self, fn, done_note: str = ""):
         def run():
             try:
                 fn()
                 if done_note:
-                    self.root.after(0, lambda: self.note.configure(text=done_note))
+                    self.root.after(0, lambda: self._flash(done_note))
             except Exception as e:  # noqa: BLE001
                 msg = str(e)
                 if isinstance(e, urllib.error.HTTPError):
@@ -383,7 +520,7 @@ class Overlay:
                         msg = json.loads(e.read()).get("detail", msg)
                     except ValueError:
                         pass
-                self.root.after(0, lambda: self.note.configure(text=msg[:60]))
+                self.root.after(0, lambda: self._flash(elide(msg, 40)))
         threading.Thread(target=run, daemon=True).start()
 
     def _send(self):
@@ -400,15 +537,24 @@ class Overlay:
     def _talk(self):
         self._bg(lambda: self.api.call("POST", "/api/ui/listen"), "listening…")
 
-    def _decide(self, aid: str, approve: bool):
-        self._bg(lambda: self.api.call("POST", f"/api/approvals/{aid}/decide", {"approve": approve, "scope": "once"}, timeout=120),
-                 "approved" if approve else "denied")
+    def _decide_current(self, approve: bool):
+        aid = self.current_approval
+        if not aid:
+            return
+        self.deciding.add(aid)  # hide it at once; the next poll shows the next one, if any
+        self._render_bar((self.data or {}).get("approvals") or [])
+
+        def go():
+            try:
+                self.api.call("POST", f"/api/approvals/{aid}/decide", {"approve": approve, "scope": "once"}, timeout=120)
+            finally:
+                self.root.after(3000, lambda: self.deciding.discard(aid))
+        self._bg(go, "allowed" if approve else "denied")
 
     def _selftest(self):
+        if not (self.data or {}).get("capabilities", {}).get("browser_control"):
+            self._flash("browser step needs Browser control")
         self._bg(lambda: self.api.call("POST", "/api/selftest"), "self-test started")
-
-    def _allow_browser(self):
-        self._bg(lambda: self.api.call("PUT", "/api/settings", {"capabilities": {"browser_control": True}}), "browser control on")
 
     def _open_window(self):
         def go():
@@ -416,12 +562,16 @@ class Overlay:
 
             from . import desktop_app
 
-            shim = SimpleNamespace(settings=self.settings)
-            desktop_app.bring_up(shim)
+            desktop_app.bring_up(SimpleNamespace(settings=self.settings))
         self._bg(go)
 
     def run(self):
         self.root.mainloop()
+
+
+def _lighter(color: str) -> str:
+    r, g, b = (int(color[i:i + 2], 16) for i in (1, 3, 5))
+    return "#{:02x}{:02x}{:02x}".format(*(min(255, int(v + (255 - v) * 0.18)) for v in (r, g, b)))
 
 
 def _alive(pid: int) -> bool:

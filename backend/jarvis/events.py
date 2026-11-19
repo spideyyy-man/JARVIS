@@ -18,7 +18,9 @@ def describe(event: dict) -> str | None:
     if t == "voice.wake":
         return "Listening (" + event.get("trigger", "wake word") + ")"
     if t == "voice.heard":
-        return f"Heard [{event.get('language', '?')}, {event.get('seconds', '?')} s]: {_short(event.get('text'))}"
+        return f"Heard [{event.get('language', '?')}, {event.get('seconds', '?')} s, {event.get('model', '?')}]: {_short(event.get('text'))}"
+    if t == "voice.slow":
+        return f"Too slow ({event.get('seconds', 0):.0f} s), not acted on: {_short(event.get('text'))}"
     if t == "voice.state" and event.get("note"):
         return "Voice: " + event["note"]
     if t == "voice.state" and event.get("state") == "error":

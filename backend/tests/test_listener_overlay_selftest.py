@@ -122,6 +122,7 @@ def test_overlay_shows_a_pending_approval_and_the_last_exchange(client, jarvis, 
     r = client.post("/api/chat", json={"text": "delete the file notes.txt in my downloads", "wait": True}, headers=client.h).json()
     d = client.get("/api/overlay", headers=client.h).json()
     assert d["last"]["request"].startswith("delete the file") and d["last"]["reply"]
+    assert d["history"][0]["request"].startswith("delete the file") and d["history"][0]["reply"] == d["last"]["reply"][:300]
     if r.get("pending_approvals"):
         assert d["approvals"][0]["tool"] == "delete_path"
         assert any("Needs approval" in a["text"] for a in d["activity"])

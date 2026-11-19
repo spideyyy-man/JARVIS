@@ -171,9 +171,17 @@ def create_app(jarvis: Jarvis | None = None) -> FastAPI:
                     last = None
         reply = j.db.one("SELECT content, conversation_id, created FROM messages WHERE role='assistant' ORDER BY created DESC LIMIT 1")
         request = j.db.one("SELECT content, created FROM messages WHERE role='user' ORDER BY created DESC LIMIT 1")
+        # The last 5 exchanges (each request with the first reply after it), newest first, for the icon's history list.
+        asks = j.db.query("SELECT content, conversation_id, created FROM messages WHERE role='user' ORDER BY created DESC LIMIT 5")
+        history = []
+        for a in asks:
+            r = j.db.one("SELECT content FROM messages WHERE role='assistant' AND conversation_id=? AND created>=? ORDER BY created LIMIT 1",
+                         (a["conversation_id"], a["created"]))
+            history.append({"request": a["content"][:200], "reply": (r or {}).get("content", "")[:300], "at": a["created"]})
         return {"state": j.bus.assistant_state, "detail": j.bus.state_detail, "task": j.bus.active_task, "voice": j.voice.status(),
                 "last": {"request": (request or {}).get("content", "")[:300], "reply": (reply or {}).get("content", "")[:700],
                          "reply_at": (reply or {}).get("created"), "conversation_id": (reply or {}).get("conversation_id")},
+                "history": history,
                 "approvals": [{**a, "preview": (a["preview"] or "").strip()[:300]} for a in pending],
                 "activity": list(j.bus.activity)[-14:], "selftest": j.selftest.summary() if j.selftest else last,
                 "capabilities": j.capabilities(), "model": j.llm.current().name, "windows": len(j.bus._subscribers)}

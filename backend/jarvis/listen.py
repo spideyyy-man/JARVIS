@@ -27,6 +27,8 @@ from pathlib import Path
 from typing import Callable
 
 RATE = 16000
+CHIME_FRAMES = 3  # 0.24 s after the wake word: the chime (speak.Speaker.chime, 0.18 s) is not the user's speech
+STALE_AFTER = 20.0  # s: a request heard this slowly is not acted on (on the laptop one took 912 s while the CPU was full)
 FAST_TEXT_LANGUAGES = {"en"}  # languages whose text the fast model writes well enough (its Tamil was poor)
 FRAME = 1280  # 80 ms: what openWakeWord expects per call
 FRAME_S = FRAME / RATE
@@ -170,7 +172,8 @@ class LocalListener:
             from faster_whisper import WhisperModel
 
             self._whisper = self._model(self.fast_size)
-            self._whisper.transcribe(__import__("numpy").zeros(16000, "float32"), language="en")  # first call is slow: do it now
+            # The first real decode is slow (it sets everything up); do it now. transcribe() is lazy: consume it.
+            list(self._whisper.transcribe(__import__("numpy").zeros(16000, "float32"), language="en")[0])
         except Exception as e:  # noqa: BLE001
             self.error = f"speech model failed to load: {e}"
         self._whisper_ready.set()
@@ -231,6 +234,7 @@ class LocalListener:
         self.error = ""
         self._set("waiting")
         recording: list = []
+        skip = 0
         cooldown_until = 0.0
         try:
             while not self._stop.is_set():
@@ -249,10 +253,14 @@ class LocalListener:
                         wake.reset()
                         endpoint.reset()
                         recording = []
+                        skip = CHIME_FRAMES  # the "I'm listening" chime is playing: neither speech nor silence
                         self._set("recording", trigger="hotkey" if by_hotkey else "wake word", score=round(float(score), 2))
                         self.on_event("voice.wake", {"trigger": "hotkey" if by_hotkey else "wake word"})
                     continue
                 if self.state == "recording":
+                    if skip:
+                        skip -= 1
+                        continue
                     recording.append(frame)
                     verdict = endpoint.feed(rms)
                     if verdict == "timeout":
@@ -281,6 +289,7 @@ class LocalListener:
         opts = {"beam_size": 1, "vad_filter": True, "condition_on_previous_text": False, "without_timestamps": True}
         segments, info = self._whisper.transcribe(audio, language=None, **opts)
         segments = list(segments)
+        fast_s = time.time() - t0
         probs = dict(info.all_language_probs or [])
         lang = pick_language(info.language, probs, self.languages)
         model_used = self.fast_size
@@ -294,7 +303,7 @@ class LocalListener:
         logprob = min((s.avg_logprob for s in segments), default=-9.0)
         info_out = {"seconds": round(time.time() - t0, 1), "audio_seconds": round(len(audio) / RATE, 1), "detected": info.language,
                     "probability": round(info.language_probability, 2), "no_speech": round(no_speech, 2), "logprob": round(logprob, 2),
-                    "model": model_used}
+                    "model": model_used, "fast_seconds": round(fast_s, 1)}
         if is_noise(text, no_speech, logprob):
             return "", lang, info_out
         return clean_transcript(text), lang, info_out
@@ -307,6 +316,10 @@ class LocalListener:
             self.on_event("voice.state", {"state": "error", "error": self.error})
             return
         self.last = {"heard": text, "language": lang, "at": time.time(), **info}
+        if text and info["seconds"] > STALE_AFTER:  # the user has long moved on: say so instead of acting on it
+            self.last["note"] = f"too slow ({info['seconds']:.0f} s) - not acted on"
+            self.on_event("voice.slow", {"text": text, "seconds": info["seconds"]})
+            return
         if not text:
             self.on_event("voice.state", {"state": "waiting", "note": "didn't catch that"})
             return
@@ -370,6 +383,7 @@ class VoiceService:
             return False
         if self.speaker:
             self.speaker.stop()
+            self.speaker.chime()
         self.listener.listen_now()
         return True
 
@@ -377,6 +391,9 @@ class VoiceService:
     def _event(self, type_: str, data: dict) -> None:
         if type_ == "voice.wake" and self.speaker:
             self.speaker.stop()  # "Hey Jarvis" while it talks: stop talking and listen
+            self.speaker.chime()  # ...and let the user hear that it is listening
+        if type_ == "voice.slow" and self.speaker:
+            self.speaker.say("Sorry, I was too slow to catch that. Please say it again.")
         if self.loop and not self.loop.is_closed():
             self.loop.call_soon_threadsafe(lambda: self.app.bus.emit(type_, **data))
 

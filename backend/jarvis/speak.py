@@ -128,6 +128,19 @@ class Speaker:
         self._queue.put((self._gen, lang, words))
         return True
 
+    def chime(self) -> None:
+        """A short rising two-note tone, played at once: "I heard 'Hey Jarvis', go ahead"."""
+        if os.name != "nt":
+            return
+        try:
+            import winsound
+
+            if not getattr(self, "_chime_path", None):
+                self._chime_path = _write_chime()
+            winsound.PlaySound(self._chime_path, winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
+        except Exception as e:  # noqa: BLE001 - a missing chime must never stop listening
+            self._error = f"chime: {e}"
+
     def stop(self) -> None:
         """Barge-in: drop everything queued and cut the sentence being spoken."""
         self._gen += 1
@@ -203,3 +216,24 @@ class Speaker:
             if self._queue.empty():
                 self._set(False)
 
+
+
+def _write_chime() -> str:
+    """880 Hz then 1320 Hz, 90 ms each, soft, as a 16 kHz WAV in the temp folder (made once)."""
+    import math
+    import struct
+    import wave
+
+    rate, notes, out = 16000, (880, 1320), bytearray()
+    for freq in notes:
+        n = int(rate * 0.09)
+        for i in range(n):
+            fade = min(1.0, i / 160, (n - i) / 160)  # no clicks
+            out += struct.pack("<h", int(6000 * fade * math.sin(2 * math.pi * freq * i / rate)))
+    path = os.path.join(tempfile.gettempdir(), "jarvis-chime.wav")
+    with wave.open(path, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(bytes(out))
+    return path

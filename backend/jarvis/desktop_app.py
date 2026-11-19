@@ -340,6 +340,13 @@ def main(argv: list[str] | None = None) -> int:
             bring_up(jarvis)
         print("  JARVIS is already running - brought its window to the front.")
         return 0
+    if platform.system() == "Windows":
+        try:  # a voice request must not wait behind background apps (seen: one took 912 s while the CPU was full)
+            import psutil
+
+            psutil.Process().nice(psutil.ABOVE_NORMAL_PRIORITY_CLASS)
+        except Exception:  # noqa: BLE001
+            pass
     jarvis.settings.listen_on_start = True  # the offline listener, if its packages are installed and the user has not turned it off
     server, thread = start_server(jarvis)
     wake = "Hey Jarvis" if jarvis.voice.status()["running"] else jarvis.settings.wake_word

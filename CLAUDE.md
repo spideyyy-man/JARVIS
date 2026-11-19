@@ -68,7 +68,11 @@ Since 2026-11-19 (Edge's online recogniser failed on the laptop with "Speech rec
   to spoken requests sentence by sentence as they stream, with Windows' offline voices (WinRT
   `Windows.Media.SpeechSynthesis` -> WAV -> winsound; first audio ~0.2 s after the text). No Tamil voice is
   installed in Windows here, so Tamil replies go to the window (`voice.say` / `voice.heard.server_speaks`).
-  "Hey Jarvis" or the hotkey stops it talking. `desktop_app.window_watchdog` reopens the window when it is open
+  "Hey Jarvis" or the hotkey stops it talking and plays a short chime (`Speaker.chime`; the listener skips the
+  first 0.24 s so the chime is not taken for speech). One request took 912 s to transcribe while the CPU was full
+  (cause not pinned down; standalone runs under the same load took 8-50 s), so: a request heard in over 20 s is
+  not acted on (`STALE_AFTER`, spoken apology), the desktop app runs at above-normal priority, the fast model is
+  really warmed at start (first request 1.3 s), and each request's `seconds`/`fast_seconds`/`model` are shown. `desktop_app.window_watchdog` reopens the window when it is open
   but its page has been disconnected for a minute. The speaker is created only by `VoiceService.start` (desktop
   app), so tests never play sound.
 - **Floating icon** (`overlay.py`, tkinter, its own `pythonw` process started by the desktop app with

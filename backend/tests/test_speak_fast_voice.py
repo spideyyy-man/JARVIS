@@ -36,6 +36,9 @@ class FakeSpeaker:
     def stop(self):
         self.stopped += 1
 
+    def chime(self):
+        self.chimes = getattr(self, "chimes", 0) + 1
+
     def voices(self):
         return {lang: "fake" for lang in self.langs}
 
@@ -111,7 +114,7 @@ def test_wake_word_or_hotkey_stops_jarvis_talking(home, tmp_path):
     svc = VoiceService(j, speaker=speaker)
     svc._event("voice.wake", {"trigger": "wake word"})
     svc.listener = SimpleNamespace(running=lambda: True, listen_now=lambda: None)
-    assert svc.listen_now() and speaker.stopped == 2
+    assert svc.listen_now() and speaker.stopped == 2 and speaker.chimes == 2  # heard: stop talking, chime
     j.db.close()
 
 
@@ -148,3 +151,26 @@ def test_tamil_is_written_by_the_accurate_model(tmp_path):
     lst._accurate_model = lambda: accurate
     text, lang, info = lst.transcribe(np.zeros(16000, "float32"))
     assert (text, lang, info["model"]) == ("ஸ்ரீரங்கம் கோவிலில்", "ta", "small") and accurate.calls == ["ta"]
+
+
+def test_a_request_heard_too_slowly_is_not_acted_on(tmp_path, monkeypatch):
+    """On the laptop one transcription took 912 s while the CPU was full; acting on it then would surprise the user."""
+    import jarvis.listen as listen
+
+    events, done = [], []
+    lst = LocalListener(tmp_path, lambda t, d: events.append((t, d)), lambda *a: done.append(a), model_size="base", fast_size="base")
+    lst.transcribe = lambda audio: ("delete my notes", "en", {"seconds": 25.0, "model": "base"})
+    lst._transcribe(np.zeros(16000, "float32"))
+    assert done == [] and events[-1][0] == "voice.slow" and "too slow" in lst.last["note"]
+    lst.transcribe = lambda audio: ("what time is it", "en", {"seconds": 2.0, "model": "base"})
+    lst._transcribe(np.zeros(16000, "float32"))
+    assert done and done[0][0] == "what time is it"
+    assert listen.STALE_AFTER == 20.0
+
+
+def test_slow_request_is_apologised_for_out_loud(home, tmp_path):
+    j = make(home, tmp_path)
+    speaker = FakeSpeaker()
+    VoiceService(j, speaker=speaker)._event("voice.slow", {"text": "x", "seconds": 30})
+    assert speaker.said == ["Sorry, I was too slow to catch that. Please say it again."]
+    j.db.close()
