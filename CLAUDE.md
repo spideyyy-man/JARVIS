@@ -75,6 +75,18 @@ Since 2026-11-19 (Edge's online recogniser failed on the laptop with "Speech rec
   really warmed at start (first request 1.3 s), and each request's `seconds`/`fast_seconds`/`model` are shown. `desktop_app.window_watchdog` reopens the window when it is open
   but its page has been disconnected for a minute. The speaker is created only by `VoiceService.start` (desktop
   app), so tests never play sound.
+- **Flaw fixes from the owner's real session** (2026-11-20, all from the request log):
+  - Hearing: free language detection heard accented English as Malay/Indonesian (29% word errors on 28 Indian-English
+    laptop-mic test clips). Now base decides only en-vs-ta (28/28 + 12/12), English goes to `base.en` with JARVIS's
+    vocabulary as context (`listen.VOCABULARY`, 2.3% errors, ~1 s; `JARVIS_STT_ENGLISH_MODEL`), Tamil to `small`.
+    The last 30 utterances are kept in `~/.jarvis/voice-samples` (voice setting `keep_samples`) to tune on the real voice.
+  - Acting: the flat prompt now says Desktop for unnamed folders (`agents.desktop_folder`, OneDrive-aware), web_search for
+    organisations/portals, no promises; plus one deterministic nudge per turn when a local model promises without a tool
+    call (`PROMISE`) or claims "no access" without searching (`NO_ACCESS`).
+  - `open_url` (new, CONFIRM, trust-eligible): websites open in the user's own browser; rules route "open x.com" there.
+    `browser_open` stays for reading pages / local files. `open_application` finds Store apps (`Get-StartApps`, cached),
+    strips "which is already open"-style tails (`clean_app_name`), and switches to an already-open window.
+  - A new user message cancels the answer still running in that conversation (no more two contradicting replies).
 - **Floating icon** (`overlay.py`, tkinter, its own `pythonw` process started by the desktop app with
   `--parent PID`): a 46 px always-on-top circle, coloured by state; hover (or click to pin) shows a panel from
   `GET /api/overlay` - now/heard/last exchange, approvals with Approve/Deny, activity (`EventBus.activity`,

@@ -81,6 +81,7 @@ class Settings:
     stt_model: str = "whisper-1"
     listen_on_start: bool = False  # set by the desktop app: run the offline listener (tests and the bare server do not)
     stt_local_model: str = "small"  # offline listener (listen.py): the model for Tamil text: tiny | base | small | medium
+    stt_english_model: str = "base.en"  # offline listener: writes English (with JARVIS's vocabulary); "" = use stt_fast_model
     stt_fast_model: str = "base"  # offline listener: hears the language and writes English (fast); same as local = one model
     tts_model: str = "tts-1"
     tts_voice: str = "alloy"
@@ -163,6 +164,7 @@ def load_settings(env_file: Path | None = None) -> Settings:
         stt_model=env("JARVIS_STT_MODEL", "whisper-1"),
         stt_local_model=env("JARVIS_STT_LOCAL_MODEL", "small"),
         stt_fast_model=env("JARVIS_STT_FAST_MODEL", "base"),
+        stt_english_model=env("JARVIS_STT_ENGLISH_MODEL", "base.en"),
         tts_model=env("JARVIS_TTS_MODEL", "tts-1"),
         tts_voice=env("JARVIS_TTS_VOICE", "alloy"),
         image_provider=env("JARVIS_IMAGE_PROVIDER", "none"),

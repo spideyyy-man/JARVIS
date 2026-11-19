@@ -29,7 +29,13 @@ from typing import Callable
 RATE = 16000
 CHIME_FRAMES = 3  # 0.24 s after the wake word: the chime (speak.Speaker.chime, 0.18 s) is not the user's speech
 STALE_AFTER = 20.0  # s: a request heard this slowly is not acted on (on the laptop one took 912 s while the CPU was full)
-FAST_TEXT_LANGUAGES = {"en"}  # languages whose text the fast model writes well enough (its Tamil was poor)
+FAST_TEXT_LANGUAGES = {"en"}
+# The words people say to JARVIS, given to the English model as context. Measured on today's real commands spoken by
+# Windows' Indian-English voices through a simulated laptop mic: 12.3% word errors without it, 2.3% with it; silence
+# still comes out empty (no invented words).
+VOCABULARY = ("JARVIS, what time is it? Open Notepad, Claude, Chrome, Google, YouTube. Create a file, a folder, on my Desktop, "
+              "Documents, Downloads. index.html, notes.txt, hi.txt. Search the web. Volume, brightness. Remind me. Delete, rename, move.")
+KEEP_SAMPLES = 30  # the last utterances are kept (only on this computer) to tune recognition on the user's real voice  # languages whose text the fast model writes well enough (its Tamil was poor)
 FRAME = 1280  # 80 ms: what openWakeWord expects per call
 FRAME_S = FRAME / RATE
 
@@ -103,14 +109,16 @@ def pick_language(detected: str, probs: dict[str, float], allowed: tuple[str, ..
 # -- the listener -------------------------------------------------------------------------------------------------------
 class LocalListener:
     def __init__(self, models_dir: Path, on_event: Callable[[str, dict], None], on_utterance: Callable[[str, str, dict], None], *,
-                 model_size: str = "small", fast_size: str = "base", languages: tuple[str, ...] = ("en", "ta"), wake_threshold: float = 0.5,
+                 model_size: str = "small", fast_size: str = "base", english_size: str = "base.en", languages: tuple[str, ...] = ("en", "ta"), wake_threshold: float = 0.5,
                  threads: int = 0, accurate_idle: float = 15 * 60):
         self.models_dir, self.on_event, self.on_utterance = Path(models_dir), on_event, on_utterance
         # all cores: measured on the owner's laptop under load, 8 threads took 4-8 s per request where 4 took ~15 s
         self.model_size, self.languages, self.wake_threshold, self.threads = model_size, languages, wake_threshold, threads or min(8, os.cpu_count() or 4)
         # Two models (measured on the owner's laptop, CPU half busy): base hears the language right and writes English
         # well in ~2.5 s; small takes ~8 s but is needed for Tamil text. So base first, small only for Tamil.
-        self.fast_size, self.accurate_idle = fast_size, accurate_idle
+        self.fast_size, self.accurate_idle, self.english_size = fast_size, accurate_idle, english_size
+        self._english = None
+        self.keep_samples = True
         self._accurate = None
         self._accurate_lock = threading.Lock()
         self._accurate_timer: threading.Timer | None = None
@@ -155,7 +163,9 @@ class LocalListener:
         self._listen_now.set()
 
     def status(self) -> dict:
-        model = f"whisper-{self.fast_size}" + (f" (+ {self.model_size} for Tamil)" if self.model_size != self.fast_size else "")
+        model = f"whisper-{self.english_size} (English)" if self.english_size else f"whisper-{self.fast_size}"
+        if self.model_size != self.fast_size:
+            model += f" + {self.model_size} (Tamil)"
         return {"state": self.state, "error": self.error, "model": model, "speech_model_ready": self._whisper_ready.is_set(),
                 "wake_phrase": "Hey Jarvis", "last": self.last}
 
@@ -174,6 +184,9 @@ class LocalListener:
             self._whisper = self._model(self.fast_size)
             # The first real decode is slow (it sets everything up); do it now. transcribe() is lazy: consume it.
             list(self._whisper.transcribe(__import__("numpy").zeros(16000, "float32"), language="en")[0])
+            if self.english_size:
+                self._english = self._model(self.english_size)
+                list(self._english.transcribe(__import__("numpy").zeros(16000, "float32"), language="en")[0])
         except Exception as e:  # noqa: BLE001
             self.error = f"speech model failed to load: {e}"
         self._whisper_ready.set()
@@ -182,6 +195,11 @@ class LocalListener:
         from faster_whisper import WhisperModel
 
         return WhisperModel(size, device="cpu", compute_type="int8", cpu_threads=self.threads, download_root=str(self.models_dir / "whisper"))
+
+    def _english_model(self):
+        if self._english is None:
+            self._english = self._model(self.english_size)
+        return self._english
 
     def _accurate_model(self):
         """The bigger model for Tamil text: loaded on first use (~8 s), given back after quiet minutes (~0.5 GB)."""
@@ -287,26 +305,55 @@ class LocalListener:
             raise RuntimeError(self.error or "speech model not loaded")
         t0 = time.time()
         opts = {"beam_size": 1, "vad_filter": True, "condition_on_previous_text": False, "without_timestamps": True}
-        segments, info = self._whisper.transcribe(audio, language=None, **opts)
-        segments = list(segments)
-        fast_s = time.time() - t0
-        probs = dict(info.all_language_probs or [])
-        lang = pick_language(info.language, probs, self.languages)
-        model_used = self.fast_size
-        if lang not in FAST_TEXT_LANGUAGES and self.model_size != self.fast_size:  # Tamil: the bigger model writes it properly
-            segments = list(self._accurate_model().transcribe(audio, language=lang, **opts)[0])
-            model_used = self.model_size
-        elif lang != info.language:  # detected a language the user does not speak: read it again as the likelier allowed one
-            segments = list(self._whisper.transcribe(audio, language=lang, **opts)[0])
+        # 1. English or Tamil - never anything else. Left to choose freely, the model heard accented English through a
+        #    laptop mic as Malay or Indonesian and wrote gibberish (29% word errors on 28 test clips; 28/28 + 12/12 right
+        #    when only English and Tamil are allowed).
+        detected, probability, all_probs = self._whisper.detect_language(audio)
+        lang = pick_language(detected, dict(all_probs or []), self.languages)
+        detect_s = time.time() - t0
+        # 2. English: the English-only model with the words the user says to JARVIS (2.3% word errors, ~1 s);
+        #    Tamil: the bigger multilingual model, which writes Tamil properly.
+        if lang == "en" and self.english_size:
+            model, model_used, extra = self._english_model(), self.english_size, {"initial_prompt": VOCABULARY}
+        elif lang not in FAST_TEXT_LANGUAGES and self.model_size != self.fast_size:
+            model, model_used, extra = self._accurate_model(), self.model_size, {}
+        else:
+            model, model_used, extra = self._whisper, self.fast_size, ({"initial_prompt": VOCABULARY} if lang == "en" else {})
+        segments = list(model.transcribe(audio, language=lang, **opts, **extra)[0])
         text = " ".join(s.text.strip() for s in segments)
         no_speech = max((s.no_speech_prob for s in segments), default=1.0)
         logprob = min((s.avg_logprob for s in segments), default=-9.0)
-        info_out = {"seconds": round(time.time() - t0, 1), "audio_seconds": round(len(audio) / RATE, 1), "detected": info.language,
-                    "probability": round(info.language_probability, 2), "no_speech": round(no_speech, 2), "logprob": round(logprob, 2),
-                    "model": model_used, "fast_seconds": round(fast_s, 1)}
+        info_out = {"seconds": round(time.time() - t0, 1), "audio_seconds": round(len(audio) / RATE, 1), "detected": detected,
+                    "probability": round(probability, 2), "no_speech": round(no_speech, 2), "logprob": round(logprob, 2),
+                    "model": model_used, "fast_seconds": round(detect_s, 1)}
         if is_noise(text, no_speech, logprob):
             return "", lang, info_out
         return clean_transcript(text), lang, info_out
+
+    def _keep_sample(self, audio, text: str, lang: str, info: dict) -> None:
+        """Keep the last utterances (audio + what was heard) in <data>/voice-samples, on this computer only, so
+        recognition can be measured on the user's real voice. The voice setting keep_samples=false turns it off."""
+        if not self.keep_samples:
+            return
+        try:
+            import wave
+
+            import numpy as np
+
+            folder = self.models_dir.parent / "voice-samples"
+            folder.mkdir(parents=True, exist_ok=True)
+            stem = folder / time.strftime(f"%Y%m%d-%H%M%S-{lang}")
+            with wave.open(str(stem) + ".wav", "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(RATE)
+                w.writeframes((np.clip(audio, -1, 1) * 32767).astype(np.int16).tobytes())
+            (stem.with_suffix(".txt")).write_text(f"{text}\n{info}\n", encoding="utf-8")
+            for old in sorted(folder.glob("*.wav"))[:-KEEP_SAMPLES]:
+                old.unlink(missing_ok=True)
+                old.with_suffix(".txt").unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001 - keeping a sample must never break listening
+            pass
 
     def _transcribe(self, audio) -> None:
         try:
@@ -316,6 +363,7 @@ class LocalListener:
             self.on_event("voice.state", {"state": "error", "error": self.error})
             return
         self.last = {"heard": text, "language": lang, "at": time.time(), **info}
+        self._keep_sample(audio, text, lang, info)
         if text and info["seconds"] > STALE_AFTER:  # the user has long moved on: say so instead of acting on it
             self.last["note"] = f"too slow ({info['seconds']:.0f} s) - not acted on"
             self.on_event("voice.slow", {"text": text, "seconds": info["seconds"]})
@@ -368,7 +416,9 @@ class VoiceService:
             self.speaker = Speaker(self._speaking) if Speaker.supported() else None
         if self.listener is None:
             s = self.app.settings
-            self.listener = LocalListener(s.data_dir / "models", self._event, self._utterance, model_size=s.stt_local_model, fast_size=s.stt_fast_model)
+            self.listener = LocalListener(s.data_dir / "models", self._event, self._utterance, model_size=s.stt_local_model, fast_size=s.stt_fast_model,
+                                          english_size=s.stt_english_model)
+            self.listener.keep_samples = self.app.db.get_setting("voice", {}).get("keep_samples", True)
         self.listener.start()
         return True
 

@@ -405,13 +405,15 @@ def create_app(jarvis: Jarvis | None = None) -> FastAPI:
                 raise ValueError("briefing_time must be HH:MM (24-hour) or empty")
             j.db.set_setting("proactive", {"briefing_time": at})
         if body.voice is not None:
-            allowed = {"wake_word", "continuous", "voice_name", "rate", "speak_replies", "pitch", "wake_on_start", "language", "engine"}
+            allowed = {"wake_word", "continuous", "voice_name", "rate", "speak_replies", "pitch", "wake_on_start", "language", "engine", "keep_samples"}
             if body.voice.get("engine") not in (None, "local", "browser"):
                 raise ValueError("engine must be 'local' (offline listener on this computer) or 'browser' (the browser's speech service)")
             lang = body.voice.get("language")
             if lang is not None and not (lang in ("", "auto") or (isinstance(lang, str) and re.fullmatch(r"[a-z]{2,3}(-[A-Z]{2})?", lang))):
                 raise ValueError("language must be 'auto' (English + Tamil, follows the user), a speech language code like 'ta-IN', or empty for the browser default")
             j.db.set_setting("voice", {**j.db.get_setting("voice", {}), **{k: v for k, v in body.voice.items() if k in allowed}})
+            if "keep_samples" in body.voice and j.voice.listener:
+                j.voice.listener.keep_samples = bool(body.voice["keep_samples"])
             if "engine" in body.voice and j.settings.listen_on_start:  # switch listening over now, not at the next start
                 if j.voice.enabled():
                     j.voice.start(asyncio.get_running_loop())

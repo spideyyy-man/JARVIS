@@ -199,7 +199,7 @@ def _ta_open(text: str, m: re.Match, env: Env):
     if not name:
         return None
     if "." in name and " " not in name:
-        return "browser_open", {"url": name}
+        return "open_url", {"url": name}
     return "open_application", {"name": name}
 
 
@@ -345,8 +345,8 @@ RULES: list[Rule] = [
     R("computer", r"\b(pause|resume|play)\b.*\b(music|song|video|playback|media)\b", lambda t, m, e: ("system_control", {"action": "media_play_pause"})),
     R("computer", r"\b(next|skip)\b.*\b(song|track)\b", lambda t, m, e: ("system_control", {"action": "media_next"})),
     R("computer", r"\bprevious (song|track)\b", lambda t, m, e: ("system_control", {"action": "media_previous"})),
-    R("computer", r"^\s*(?:jarvis[,\s]+)?(?:please\s+)?(?:open|go to|browse to|navigate to|visit)\s+((?:https?://|www\.)\S+|[\w\-]+(?:\.[\w\-]+)*\.(?:com|org|net|io|dev|ai|app|co|edu|gov|in|uk)(?:/\S*)?)(?:\s+in\s+(?:the|my)\s+browser)?\s*[.!]?$",
-      lambda t, m, e: ("browser_open", {"url": m.group(1)}), whole=True),
+    R("computer", r"^\s*(?:jarvis[,\s]+)?(?:please\s+)?(?:open|go to|browse to|navigate to|visit)\s+((?:https?://|www\.)\S+|[\w\-]+(?:\.[\w\-]+)*\.(?:com|org|net|io|dev|ai|app|co|edu|gov|in|uk)(?:/\S*)?)(?:\s+(?:in|on)\s+(?:the|my|your|a)\s+(?:new\s+)?(?:browser|account|tab|chrome|edge))?\s*[.!]?$",
+      lambda t, m, e: ("open_url", {"url": m.group(1)}), whole=True),  # the user's own browser (signed in)
     # a page on this computer (e.g. one JARVIS just wrote): "open file:///C:/x/hello.html in your browser and tell me what it shows"
     R("computer", r"^\s*(?:jarvis[,\s]+)?(?:please\s+)?(?:open|show|view|run|load)\s+(file:///\S+?|[A-Za-z]:[\\/]\S+?\.html?)(?:\s+in\s+(?:the|your|my)\s+browser)?(?:\s+and\s+.*)?\s*[.!?]?$",
       lambda t, m, e: ("browser_open", {"url": m.group(1)}), whole=True),
@@ -812,6 +812,7 @@ TA_RENDERERS: dict[str, Callable] = {
     "system_control": lambda d, q, t: _say_control(d, TA_CONTROL),
     "open_application": lambda d, q, t: f"{d.get('opened') or 'அப்ளிகேஷனை'} திறக்கிறேன்.",
     "browser_open": lambda d, q, t: f"{d.get('title') or d.get('url')} பக்கத்தைத் திறந்தேன்.",
+    "open_url": lambda d, q, t: f"{d.get('opened')} உங்கள் பிரவுசரில் திறக்கிறேன்.",
     "system_stats": _ta_stats,
     "clipboard_read": lambda d, q, t: (f"கிளிப்போர்டில் {d['chars']} எழுத்துகள் உள்ளன:\n```\n{d['text'][:1500]}\n```" if d["text"].strip() else "கிளிப்போர்டு காலியாக உள்ளது."),
     "screen_read": lambda d, q, t: (f"திரையில் உள்ள எழுத்துகள்:\n```\n{d['text'][:1800]}\n```" if d["text"].strip() else "திரையில் எந்த எழுத்தும் தெரியவில்லை."),
@@ -868,6 +869,7 @@ RENDERERS: dict[str, Callable] = {
     "run_workflow": lambda d, q, t: f"Workflow run `{d['run_id']}` finished with status **{d['status']}** ({len(d['log'])} step(s) logged).",
     "create_workflow": lambda d, q, t: f"Workflow \"{d['name']}\" created (`{d['id']}`).",
     "conversation_search": lambda d, q, t: ("\n".join(f"- {m['title']}: {m['snippet']}" for m in d["matches"]) or "No earlier conversation matches that."),
-    "open_application": lambda d, q, t: f"Opening {d.get('opened') or ' '.join(d['launched'])}.",
+    "open_application": lambda d, q, t: (f"Switching to {d['focused']}." if d.get("already_open") else f"Opening {d.get('opened') or ' '.join(d['launched'])}."),
+    "open_url": lambda d, q, t: f"Opening {d.get('opened')} in your browser.",
     "save_note": lambda d, q, t: f"Saved the note \"{d['title']}\" to the '{d['space']}' space.",
 }

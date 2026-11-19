@@ -10,6 +10,7 @@ import re
 import json
 import threading
 import time
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -93,10 +94,16 @@ AGENTS: dict[str, AgentSpec] = {a.name: a for a in [
               ["system_stats", "list_processes", "disk_usage", "metrics_history"]),
     AgentSpec("assistant", "Single Assistant (flat mode)", "One agent with every tool; used with slow local models to avoid delegation round-trips",
               "You are JARVIS, a personal voice assistant running on the user's computer. Most replies are spoken aloud.\n"
-              "- Questions, conversation and writing (facts, explanations, advice, poems, messages, translations): answer directly in "
-              "plain text. Do not call any tool for these.\n"
-              "- Requests that need this computer, files, apps, the web, reminders, calendar or email: call the right tool yourself. "
+              "- Conversation, writing (poems, messages, translations) and well-known facts you are sure of: answer directly in "
+              "plain text, without tools.\n"
+              "- A specific organisation, product, website, portal, person, news or anything that changes: call `web_search` first "
+              "and answer from the results. You CAN search the web - never say you have no access to websites.\n"
+              "- Files: call `write_file` with a full path. If the user names no folder, use their Desktop. `write_file` creates "
+              "missing folders, so never create a folder first.\n"
+              "- Requests that need this computer, apps, the web, reminders, calendar or email: call the right tool yourself. "
               "If none of the tools you see fits, call `list_tools` to find one, then call it by name.\n"
+              "- Never say you will do something (\"let me do that\", \"I will create it\") without calling the tool in the same "
+              "reply. If you cannot do it, say so plainly.\n"
               "- Keep spoken answers short: one to three sentences unless the user asks for detail. No tables.\n"
               "- After a tool runs, answer from its result.", []),
 ]}
@@ -105,12 +112,34 @@ AGENTS: dict[str, AgentSpec] = {a.name: a for a in [
 # start of the tool list are identical on every request. Ollama then reuses the prompt it already processed instead
 # of re-reading ~1000 tokens (measured on the owner's laptop: 21 s -> 1.1 s). Simple commands never reach the model -
 # the fast path handles them - so the core covers what the model is actually asked to do.
-FLAT_CORE = ["list_tools", "web_search", "fetch_url", "open_application", "search_files", "list_dir", "read_file", "remember", "recall", "add_dev_task"]
+FLAT_CORE = ["list_tools", "web_search", "fetch_url", "open_application", "open_url", "search_files", "list_dir", "read_file", "remember", "add_dev_task"]
+# (recall left the core for open_url on 2026-11-20: recalled memories already travel in every request's <context>.)
+
+
+PROMISE = re.compile(r"\b(let me|i will|i'll|i am going to|i'm going to)\s+(now\s+)?(go ahead and\s+)?"
+                     r"(create|make|write|open|search|look|find|delete|remove|do|set|save|add|check|run|launch)\b", re.I)
+NO_ACCESS = re.compile(r"\b(don'?t|do not|can'?t|cannot|unable to)\s+(have\s+)?(\w+\s+){0,2}?(access|browse|look up|search|check)\b|"
+                       r"\bno (internet|web|real-time) access\b|\bmy (knowledge|training) (cutoff|data)\b", re.I)
+
+
+def desktop_folder(home: Path) -> Path:
+    """The user's Desktop (on Windows it may be redirected, e.g. into OneDrive), else <home>/Desktop."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        buf = ctypes.create_unicode_buffer(wintypes.MAX_PATH)
+        if ctypes.windll.shell32.SHGetFolderPathW(None, 0x0010, None, 0, buf) == 0 and buf.value:  # CSIDL_DESKTOPDIRECTORY
+            return Path(buf.value)
+    except Exception:  # noqa: BLE001 - not Windows
+        pass
+    return Path(home) / "Desktop"
 
 
 def flat_system(app: "Jarvis") -> str:
     """The flat agent's system prompt for a local model. Must not change between requests (see FLAT_CORE)."""
     return (f"{AGENTS['assistant'].prompt}\n{COMMON_RULES}\n\nHome folder: {app.settings.allowed_roots[0]}. "
+            f"Desktop: {desktop_folder(app.settings.allowed_roots[0])}. "
             "The user's message may begin with a <context> block (current time, things you remember about the user); "
             "use it when it is relevant and never mention the block itself.")
 
@@ -224,6 +253,7 @@ class AgentRuntime:
         allowed = {t.name for t in tools}
         schemas = {t.name: t.schema for t in tools}
         guard, used_names, trace = LoopGuard(), set(), []
+        nudged = False
         # the rule engine doubles as a tool recommender: if it recognises the request, that tool is always offered
         rule_hit = match_rules(task, app.offline.env)
         hinted = {rule_hit[1][0]} & allowed if rule_hit else set()
@@ -277,6 +307,18 @@ class AgentRuntime:
                 result.provider = resp.provider
                 messages.append(resp.as_message())
                 if not resp.tool_calls:
+                    # The small model sometimes talks instead of acting (seen on the owner's laptop): "Let me do that now." and
+                    # then nothing, or "I don't have access to portals" without searching. Hold it to the job once per turn.
+                    nudge = None
+                    if not nudged and app.llm.current().name == "openai_compat" and step + 1 < app.settings.max_agent_steps:
+                        if PROMISE.search(resp.text or ""):
+                            nudge = "You said you would do it but called no tool. Call the tool now, or say plainly that you cannot."
+                        elif NO_ACCESS.search(resp.text or "") and "web_search" in allowed and "web_search" not in used_names:
+                            nudge = "You can search the web. Call web_search for this now, then answer from the results."
+                    if nudge:
+                        nudged = True
+                        messages.append({"role": "user", "content": nudge})
+                        continue
                     result.text = resp.text
                     break
                 if on_text and resp.text:

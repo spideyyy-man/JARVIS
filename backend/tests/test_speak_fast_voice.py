@@ -118,39 +118,64 @@ def test_wake_word_or_hotkey_stops_jarvis_talking(home, tmp_path):
     j.db.close()
 
 
-# -- fast model for English, accurate model for Tamil -------------------------------------------------------------------
+# -- language decision, English model, Tamil model ----------------------------------------------------------------------
 class FakeWhisper:
     def __init__(self, name, language, probs, text):
         self.name, self.language, self.probs, self.text, self.calls = name, language, probs, text, []
 
+    def detect_language(self, audio):
+        return self.language, 0.9, list(self.probs.items())
+
     def transcribe(self, audio, language=None, **opts):
-        self.calls.append(language)
+        self.calls.append((language, opts.get("initial_prompt")))
         seg = SimpleNamespace(text=self.text, no_speech_prob=0.05, avg_logprob=-0.2)
         info = SimpleNamespace(language=language or self.language, language_probability=0.9, all_language_probs=list(self.probs.items()))
         return iter([seg]), info
 
 
-def _listener(tmp_path, fast, accurate):
-    lst = LocalListener(tmp_path, lambda *a: None, lambda *a: None, model_size="small", fast_size="base")
-    lst._whisper, lst._accurate = fast, accurate
+def _listener(tmp_path, detector, english, tamil):
+    lst = LocalListener(tmp_path, lambda *a: None, lambda *a: None, model_size="small", fast_size="base", english_size="base.en")
+    lst._whisper, lst._english, lst._accurate = detector, english, tamil
+    lst._accurate_model = lambda: tamil
+    lst.keep_samples = False
     lst._whisper_ready.set()
     return lst
 
 
-def test_english_uses_only_the_fast_model(tmp_path):
-    fast = FakeWhisper("base", "en", {"en": 0.95, "ta": 0.01}, " What time is it?")
-    accurate = FakeWhisper("small", "en", {}, "should not be used")
-    text, lang, info = _listener(tmp_path, fast, accurate).transcribe(np.zeros(16000, "float32"))
-    assert (text, lang, info["model"]) == ("What time is it?", "en", "base") and accurate.calls == []
+def test_english_goes_to_the_english_model_with_jarvis_vocabulary(tmp_path):
+    from jarvis.listen import VOCABULARY
+
+    detector = FakeWhisper("base", "ms", {"ms": 0.5, "en": 0.3, "ta": 0.01}, "unused")  # accented English heard as Malay
+    english = FakeWhisper("base.en", "en", {}, " Create a file named hi.txt on my Desktop.")
+    tamil = FakeWhisper("small", "ta", {}, "unused")
+    text, lang, info = _listener(tmp_path, detector, english, tamil).transcribe(np.zeros(16000, "float32"))
+    assert (text, lang, info["model"]) == ("Create a file named hi.txt on my Desktop.", "en", "base.en")
+    assert english.calls == [("en", VOCABULARY)] and detector.calls == [] and tamil.calls == []
 
 
-def test_tamil_is_written_by_the_accurate_model(tmp_path):
-    fast = FakeWhisper("base", "te", {"te": 0.4, "ta": 0.3, "en": 0.05}, "Sheerangam Kovilil")  # base's Tamil text is poor
-    accurate = FakeWhisper("small", "ta", {}, "ஸ்ரீரங்கம் கோவிலில்")
-    lst = _listener(tmp_path, fast, accurate)
-    lst._accurate_model = lambda: accurate
-    text, lang, info = lst.transcribe(np.zeros(16000, "float32"))
-    assert (text, lang, info["model"]) == ("ஸ்ரீரங்கம் கோவிலில்", "ta", "small") and accurate.calls == ["ta"]
+def test_tamil_is_written_by_the_tamil_model(tmp_path):
+    detector = FakeWhisper("base", "te", {"te": 0.4, "ta": 0.3, "en": 0.05}, "unused")  # Tamil heard as Telugu
+    english = FakeWhisper("base.en", "en", {}, "unused")
+    tamil = FakeWhisper("small", "ta", {}, "ஸ்ரீரங்கம் கோவிலில்")
+    text, lang, info = _listener(tmp_path, detector, english, tamil).transcribe(np.zeros(16000, "float32"))
+    assert (text, lang, info["model"]) == ("ஸ்ரீரங்கம் கோவிலில்", "ta", "small") and tamil.calls == [("ta", None)] and english.calls == []
+
+
+def test_utterances_are_kept_locally_and_only_the_last_ones(tmp_path, monkeypatch):
+    import jarvis.listen as listen
+
+    monkeypatch.setattr(listen, "KEEP_SAMPLES", 3)
+    lst = LocalListener(tmp_path / "models", lambda *a: None, lambda *a: None)
+    lst.transcribe = lambda audio: ("open notepad", "en", {"seconds": 1.0, "model": "base.en"})
+    import time as _t
+    for i in range(5):
+        monkeypatch.setattr(listen.time, "strftime", lambda fmt, i=i: f"2026-{i}-" + fmt.split("-")[-1])
+        lst._transcribe(np.zeros(1600, "float32"))
+    kept = sorted(p.name for p in (tmp_path / "voice-samples").glob("*.wav"))
+    assert len(kept) == 3 and all((tmp_path / "voice-samples" / k.replace(".wav", ".txt")).read_text(encoding="utf-8").startswith("open notepad") for k in kept)
+    lst.keep_samples = False
+    lst._transcribe(np.zeros(1600, "float32"))
+    assert len(list((tmp_path / "voice-samples").glob("*.wav"))) == 3
 
 
 def test_a_request_heard_too_slowly_is_not_acted_on(tmp_path, monkeypatch):
@@ -173,4 +198,106 @@ def test_slow_request_is_apologised_for_out_loud(home, tmp_path):
     speaker = FakeSpeaker()
     VoiceService(j, speaker=speaker)._event("voice.slow", {"text": "x", "seconds": 30})
     assert speaker.said == ["Sorry, I was too slow to catch that. Please say it again."]
+    j.db.close()
+
+
+# -- fixes from the owner's 2026-11-20 session ----------------------------------------------------------------------------
+class SlowLLM:
+    """A model that takes a while, so a second message can arrive while it is still answering the first."""
+    name, model = "openai_compat", "local"
+
+    def __init__(self):
+        self.calls = []
+
+    async def complete(self, system, messages, tools, on_text=None, meta=None):
+        self.calls.append(messages[-1]["content"])
+        await asyncio.sleep(0.3)
+        return LLMResponse(text=f"answer to: {messages[-1]['content'][-30:]}", tool_calls=[], provider=self.name, model=self.model)
+
+
+def test_a_new_message_replaces_the_answer_still_running(home, tmp_path):
+    from jarvis.llm.base import LLMRouter
+
+    j = make(home, tmp_path)
+    llm = SlowLLM()
+    j.llm = LLMRouter([llm, j.offline], backoff=0.01)
+    j.db.set_setting("fast_path", False)
+    j.settings.translate_via_english = False
+
+    async def scenario():
+        first = asyncio.create_task(j.chat("create a tab opening google", "c1"))
+        await asyncio.sleep(0.05)
+        second = await j.chat("in my account", "c1")
+        await asyncio.gather(first, return_exceptions=True)
+        return second
+
+    second = run(scenario())
+    replies = [m["content"] for m in j.db.query("SELECT content FROM messages WHERE role='assistant' ORDER BY created")]
+    assert replies[-1] == second["text"] and second["text"].startswith("answer to:")
+    assert sum(1 for r in replies if r.startswith("answer to:")) == 1  # only one real answer; the first was interrupted
+    assert "interrupted" in replies[0]
+    j.db.close()
+
+
+def test_promise_without_action_gets_one_nudge(home, tmp_path):
+    from conftest import ScriptedLLM
+    from jarvis.llm.base import LLMRouter
+
+    llm = ScriptedLLM([("I can create a file named html.html directly. Let me do that now.", []),
+                       ("", [("write_file", {"path": str(home / "html.html"), "content": "<html></html>"})]),
+                       ("Creating html.html awaits your approval.", [])])
+    llm.name = "openai_compat"
+    j = make(home, tmp_path)
+    j.llm = LLMRouter([llm, j.offline], backoff=0.01)
+    j.db.set_setting("fast_path", False)
+    j.settings.translate_via_english = False
+    r = run(j.chat("I want you to create a file named html.html", "c1"))
+    assert [t["tool"] for t in r["tools"]] == ["write_file"] and r["pending_approvals"]
+    assert "called no tool" in llm.seen[1]["messages"][-1]["content"]
+    j.db.close()
+
+
+def test_the_model_knows_where_the_desktop_is(jarvis):
+    from jarvis.agents import desktop_folder, flat_system
+
+    assert f"Desktop: {desktop_folder(jarvis.settings.allowed_roots[0])}" in flat_system(jarvis)
+
+
+def test_app_names_and_web_addresses():
+    import pytest as _pt
+
+    from jarvis.security import SecurityError
+    from jarvis.tools.system import clean_app_name, normalize_url
+
+    assert clean_app_name("claude which is already open !") == "claude"
+    assert clean_app_name("the notepad app") == "notepad" and clean_app_name("google chrome please") == "google chrome"
+    assert normalize_url("google.com") == "https://google.com"
+    for bad in ("javascript:alert(1)", "file:///C:/x", "data:text/html,hi", "not a url"):
+        with _pt.raises(SecurityError):
+            normalize_url(bad)
+
+
+def test_no_access_excuse_gets_sent_to_the_web(home, tmp_path):
+    """"I don't have access to specific portals like TCS DCS" - said by the local model instead of searching (2026-11-20)."""
+    from conftest import ScriptedLLM
+    from jarvis.agents import NO_ACCESS
+    from jarvis.llm.base import LLMRouter
+
+    assert NO_ACCESS.search("I don't have access to specific portals or internal websites like TCS DCS.")
+    assert NO_ACCESS.search("I don't have direct access to specific corporate portals or internal systems like TCS DCS.")
+    assert not NO_ACCESS.search("The portal gives employees access to payslips.")
+    llm = ScriptedLLM([("I don't have access to specific portals like Tata Consultancy Services DCS.", []),
+                       ("", [("web_search", {"query": "Tata Consultancy Services DCS portal"})]),
+                       ("DCS is TCS's portal for ...", [])])
+    llm.name = "openai_compat"
+    j = make(home, tmp_path)
+    j.llm = LLMRouter([llm, j.offline], backoff=0.01)
+    j.db.set_setting("fast_path", False)
+    j.settings.translate_via_english = False
+    import httpx
+
+    j.http_transport = httpx.MockTransport(lambda req: httpx.Response(200, text="<html></html>"))  # no real network in tests
+    r = run(j.chat("Can you tell me the portal called Tata Consultancy Services DCS?", "c1"))
+    assert "Call web_search" in llm.seen[1]["messages"][-1]["content"]
+    assert [t["tool"] for t in r["tools"]] == ["web_search"]
     j.db.close()

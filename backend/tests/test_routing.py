@@ -15,7 +15,8 @@ TABLE = [
     ("show me the files in my downloads folder", "list_dir"), ("read /home/u/todo.txt", "read_file"), (r"read C:\Users\me\todo.txt", "read_file"),
     ("organize my downloads folder", "organize_folder_plan"), (r"organize C:\Users\me\Downloads", "organize_folder_plan"), ("delete /home/u/old.txt", "delete_path"),
     ("move /home/u/a.txt to /home/u/b.txt", "move_path"), ("create a folder /home/u/new", "create_directory"), ("undo that", "restore_from_trash"), ("what's in the trash", "list_trash"),
-    ("open notepad", "open_application"), ("open youtube.com", "browser_open"), ("open https://example.org/a in the browser", "browser_open"),
+    ("open notepad", "open_application"), ("open youtube.com", "open_url"), ("open https://example.org/a in the browser", "open_url"),
+    ("open google.com in my account", "open_url"), ("open claude which is already open !", "open_application"),
     # local pages (the self-test's step 2 once went to open_application with the whole sentence as the app's name)
     ("Open file:///C:/Users/me/JARVIS-selftest-1/hello.html in your browser and tell me exactly what the page shows.", "browser_open"),
     (r"open C:\Users\me\site\index.html", "browser_open"),

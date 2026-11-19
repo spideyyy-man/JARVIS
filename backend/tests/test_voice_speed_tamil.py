@@ -32,7 +32,7 @@ TAMIL = [
     ("நோட்பேட் ஓபன் பண்ணு", "open_application", {"name": "notepad"}),
     ("கால்குலேட்டரை திறக்கவும்", "open_application", {"name": "calculator"}),
     ("chrome ஓப்பன் பண்ணு", "open_application", {"name": "chrome"}),
-    ("யூடியூப் திற", "browser_open", {"url": "youtube.com"}),
+    ("யூடியூப் திற", "open_url", {"url": "youtube.com"}),
     ("என் கம்ப்யூட்டர் எப்படி இருக்கு", "system_stats", {}),
     ("ரேம் எவ்வளவு", "system_stats", {}),
     ("திரையில் என்ன இருக்கு", "screen_read", {}),

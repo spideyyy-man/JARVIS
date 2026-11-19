@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 import shlex
 import shutil
 import subprocess
@@ -211,7 +212,43 @@ def dev_environment(ctx: ToolContext, projects_root: str = "") -> dict:
             "shell": os.environ.get("SHELL", ""), "projects_root": str(root), "projects": projects}
 
 
+_TRAILING = re.compile(r"\s+(?:which|that|who|it'?s|it is|that'?s|for me|please|now|again|already|app|application|window|program)\b.*$", re.I)
+
+
+def clean_app_name(raw: str) -> str:
+    """'claude which is already open !' -> 'claude' (said to JARVIS 2026-11-20; the whole sentence was taken as the name)."""
+    name = re.sub(r"^(?:the|my)\s+", "", raw.strip(), flags=re.I)
+    name = _TRAILING.sub("", name)
+    return name.strip(" \t!.?,;:'\"").strip()
+
+
+_START_APPS: dict = {"at": 0.0, "apps": []}
+
+
+def _start_apps() -> list[dict]:
+    """Windows: every app in the Start menu, including Store apps that have no .exe on PATH or Start-menu shortcut
+    (Claude, Notepad, WhatsApp...), as [{"name", "appid"}]. Cached for 10 minutes (the lookup takes ~1.6 s)."""
+    if platform.system() != "Windows":
+        return []
+    if time.time() - _START_APPS["at"] < 600:
+        return _START_APPS["apps"]
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-Command", "Get-StartApps | ConvertTo-Json -Compress"],
+                             capture_output=True, text=True, timeout=20, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+        import json
+
+        data = json.loads(out or "[]")
+        apps = [{"name": a["Name"], "appid": a["AppID"]} for a in (data if isinstance(data, list) else [data]) if a.get("Name") and a.get("AppID")]
+    except Exception:  # noqa: BLE001 - fall back to the other lookups
+        apps = []
+    _START_APPS.update(at=time.time(), apps=apps)
+    return apps
+
+
 def _resolve_app(name: str) -> list[str]:
+    name = clean_app_name(name)
+    if not name:
+        raise SecurityError("No application name given")
     for app in _desktop_apps():
         if app["name"].lower() == name.lower() or name.lower() in app["name"].lower():
             if platform.system() == "Darwin":
@@ -220,18 +257,82 @@ def _resolve_app(name: str) -> list[str]:
                 return ["cmd", "/c", "start", "", app["exec"]]
             # strip desktop-entry field codes (%U, %f...)
             return [tok for tok in shlex.split(app["exec"]) if not tok.startswith("%")]
+    apps = _start_apps()
+    for test in (lambda n: n == name.lower(), lambda n: n.startswith(name.lower()), lambda n: name.lower() in n):
+        hit = next((a for a in apps if test(a["name"].lower())), None)
+        if hit:
+            return ["explorer.exe", f"shell:AppsFolder\\{hit['appid']}"]
     exe = shutil.which(name)
     if exe:
         return [exe]
     raise SecurityError(f"No installed application matches '{name}'")
 
 
+def _open_window_of(name: str) -> dict | None:
+    """An already-open window that belongs to app `name`: its title is the name, starts with it, or ends with
+    '- Name' (e.g. 'notes.txt - Notepad'). A browser tab merely mentioning the name does not count."""
+    if platform.system() != "Windows":
+        return None
+    try:
+        from .desktop import _windows
+    except Exception:  # noqa: BLE001
+        return None
+    q = clean_app_name(name).lower()
+    if not q:
+        return None
+    for w in sorted(_windows(), key=lambda w: len(w["title"])):
+        t = w["title"].lower().strip()
+        if t == q or t.startswith(q + " ") or t.endswith(("- " + q, "— " + q)) or (q == "chrome" and t.endswith("- google chrome")):
+            return w
+    return None
+
+
 def open_application(ctx: ToolContext, name: str, target: str = "") -> dict:
+    if not target:  # already open: bring it to the front instead of starting a second copy
+        win = _open_window_of(name)
+        if win:
+            from .desktop import focus_window
+
+            return {"opened": clean_app_name(name), "already_open": True, **focus_window(ctx, win["title"])}
     cmd = _resolve_app(name)
     if target:
         cmd.append(str(ctx.app.guard.resolve(target)))
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-    return {"opened": name, "launched": cmd, "pid": proc.pid}
+    return {"opened": clean_app_name(name), "launched": cmd, "pid": proc.pid}
+
+
+def normalize_url(url: str) -> str:
+    url = url.strip().strip("'\"")
+    if re.match(r"^(javascript|data|vbscript|file|about|chrome|edge|ms-[\w-]+):", url, re.I):
+        raise SecurityError("Only web addresses (http/https) can be opened in the browser")
+    if not re.match(r"^[a-z][a-z0-9+.-]*://", url, re.I):
+        url = "https://" + url
+    from urllib.parse import urlparse
+
+    u = urlparse(url)
+    try:
+        u.port  # noqa: B018 - raises ValueError for a malformed port
+    except ValueError as e:
+        raise SecurityError("Not a valid web address") from e
+    if u.scheme not in ("http", "https") or not u.hostname or " " in u.netloc or "." not in u.hostname and u.hostname != "localhost":
+        raise SecurityError("Only web addresses (http/https) can be opened in the browser")
+    return u.geturl()
+
+
+def open_url(ctx: ToolContext, url: str) -> dict:
+    """In the user's own default browser, where they are signed in (JARVIS's automated browser is a separate,
+    signed-out profile - "open google.com in my account" went there on 2026-11-20)."""
+    target = normalize_url(url)
+    host = (re.match(r"https?://([^/:]+)", target) or [None, ""])[1]
+    if host in ("127.0.0.1", "localhost", "::1") and f":{ctx.app.settings.port}" in target:
+        raise SecurityError("JARVIS will not open its own control interface")
+    if platform.system() == "Windows":
+        os.startfile(target)  # noqa: S606 - the default browser
+    else:
+        import webbrowser
+
+        webbrowser.open(target)
+    return {"opened": target}
 
 
 def register(reg: ToolRegistry) -> None:
@@ -244,5 +345,15 @@ def register(reg: ToolRegistry) -> None:
     reg.register(Tool("dev_environment", "Detect installed toolchains/editors and find software projects under a folder.", {"projects_root": {"type": "string"}}, dev_environment))
     reg.register(Tool("open_application", "Launch an installed application, optionally with a file/folder to open.", {
         "name": {"type": "string"}, "target": {"type": "string", "description": "File or folder to open with it"}}, open_application, required=["name"],
-        level=Level.CONFIRM, trust_eligible=True,
-        preview=lambda a: f"Launch application: {' '.join(_resolve_app(a['name']))} {a.get('target', '')}".strip()))
+        level=Level.CONFIRM, trust_eligible=True, preview=_open_preview))
+    reg.register(Tool("open_url", "Open a website in the user's own web browser, where they are signed in (e.g. google.com, youtube.com).",
+                      {"url": {"type": "string"}}, open_url, required=["url"], level=Level.CONFIRM, trust_eligible=True,
+                      preview=lambda a: f"Open {normalize_url(a['url'])} in your browser"))
+
+
+def _open_preview(a: dict) -> str:
+    if not a.get("target"):
+        win = _open_window_of(a["name"])
+        if win:
+            return f"Switch to {win['title']} (already open)"
+    return f"Open {clean_app_name(a['name'])}: {' '.join(_resolve_app(a['name']))} {a.get('target', '')}".strip()

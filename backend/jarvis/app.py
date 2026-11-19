@@ -210,6 +210,13 @@ class Jarvis:
         if conversation_id is None or not self.db.one("SELECT id FROM conversations WHERE id=?", (conversation_id,)):
             conversation_id = conversation_id or new_id("c_")
             self.db.insert("conversations", {"id": conversation_id, "title": text[:70], "summary": "", "created": now, "updated": now})
+        # One answer at a time per conversation: a new message from the user replaces the answer still being worked out
+        # (the new turn sees the earlier message in its history). "Create a tab opening google.com" then "in my account"
+        # once ran side by side and gave two contradicting answers (2026-11-20).
+        running = self._chat_tasks.get(conversation_id)
+        if actor == "chat" and running and not running.done() and running is not asyncio.current_task():
+            running.cancel()
+            await asyncio.wait([running], timeout=10)
         if actor == "continuation":  # an internal nudge, not something the user said: keep it out of the transcript
             user_msg = {"id": "", "conversation_id": conversation_id, "role": "event", "content": "", "meta": {}, "created": now}
             self.bus.emit("chat.resume", conversation_id=conversation_id)
