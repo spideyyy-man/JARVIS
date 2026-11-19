@@ -11,7 +11,8 @@ export interface LlmInfo {
 }
 export interface RunningAgent { task_id: string; agent: string; title: string; started: number; parent_id?: string | null }
 export interface ActiveTask { conversation_id: string; title: string; started: number }
-export interface VoiceSettings { wake_word: string; continuous: boolean; voice_name: string; rate: number; speak_replies: boolean; pitch?: number; wake_on_start?: boolean; language?: string }
+export interface VoiceSettings { wake_word: string; continuous: boolean; voice_name: string; rate: number; speak_replies: boolean; pitch?: number; wake_on_start?: boolean; language?: string; engine?: "local" | "browser" }
+export interface LocalVoice { enabled: boolean; running: boolean; unavailable: string; state?: string; error?: string; speech_model_ready?: boolean; wake_phrase?: string }
 export interface Status {
   state: AssistantState;
   active_task: ActiveTask | null;
@@ -73,7 +74,7 @@ export interface Approval {
 export interface AuditEntry { id: number; ts: number; actor: string; tool: string; level: string; decision: string; args: unknown; outcome: string; detail: string }
 export interface ToolInfo { name: string; description: string; level: Level; trust_eligible: boolean; trusted: boolean; agents: string[] }
 export interface Settings {
-  trusted_tools: string[]; default_project: string; voice: VoiceSettings; allowed_roots: string[]; data_dir: string; llm: LlmInfo;
+  trusted_tools: string[]; default_project: string; voice: VoiceSettings; voice_local?: LocalVoice; allowed_roots: string[]; data_dir: string; llm: LlmInfo;
   embedder: string; search_provider: string; speech: { stt: string; tts: string }; image_provider: string;
   levels: { read: number; confirm: number; trust_eligible: string[] };
   capabilities: Record<string, { enabled: boolean; description: string }>;
@@ -198,6 +199,7 @@ export const api = {
   chat: (text: string, conversation_id: string, source: "text" | "voice" = "text") =>
     req<{ conversation_id: string; streaming: boolean }>("POST", "/api/chat", { text, conversation_id, source }),
   cancelChat: (id: string) => req<{ cancelled: boolean }>("POST", `/api/chat/${enc(id)}/cancel`),
+  voiceListen: () => req<{ ok: boolean; reason?: string }>("POST", "/api/voice/listen"),
   conversations: () => req<ConversationSummary[]>("GET", "/api/conversations"),
   searchConversations: (query: string) => req<SearchHit[]>("GET", `/api/conversations/search${q({ q: query })}`),
   conversation: (id: string) => req<Conversation>("GET", `/api/conversations/${enc(id)}`),

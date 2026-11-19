@@ -53,6 +53,25 @@ wake word (`POST /api/ui/listen` -> `ui.listen` event). There is only ever one w
 own recogniser, so two would both answer. The UI is one Assistant screen + Settings; "Show all pages" in
 Settings (local storage) restores the full workspace (Command Center, Agents, Coding, ...).
 
+Since 2026-11-19 (Edge's online recogniser failed on the laptop with "Speech recognition error: network"):
+- **Offline listener** (`listen.py`, started by the desktop app only - `settings.listen_on_start`): microphone
+  (sounddevice) -> openWakeWord "hey_jarvis" (the phrase is now **"Hey Jarvis"**) -> energy endpointing ->
+  Whisper `small` int8 (faster-whisper, `JARVIS_STT_LOCAL_MODEL`, models in `~/.jarvis/models/whisper`) with the
+  language picked between English and Tamil automatically. `VoiceService.handle` emits `voice.heard` and runs the
+  chat turn; the page adopts that conversation and speaks the reply (it still does all speaking). The page's
+  own recogniser stays off while the listener runs. Voice setting `engine`: `local` (default) | `browser`.
+  The hotkey/tray call `voice.listen_now()` directly - no window pops up.
+- **Floating icon** (`overlay.py`, tkinter, its own `pythonw` process started by the desktop app with
+  `--parent PID`): a 46 px always-on-top circle, coloured by state; hover (or click to pin) shows a panel from
+  `GET /api/overlay` - now/heard/last exchange, approvals with Approve/Deny, activity (`EventBus.activity`,
+  `events.describe`), a command box, Talk, Window, Self-test. Drag to move (`~/.jarvis/overlay.json`).
+- **Self-test** (`selftest.py`, `POST /api/selftest`): real chat turns in a throw-away
+  `~/JARVIS-selftest-<time>` folder - create an HTML page with a script, open it in JARVIS's browser
+  (`browser_open` now accepts local files inside the allowed roots) and check it shows 42, delete the folder.
+  It approves only the step's expected tools on paths inside its folder (audit actor `selftest`) and fails a
+  step when JARVIS tries anything else. The browser step needs the `browser_control` capability (the panel has
+  a button for the user; nothing turns it on by itself). Results: `~/.jarvis/selftest/last.json`.
+
 ## Windows results (2026-11-17)
 
 Fixed in commits `5abb543` and `80f0eb7` (each fix has a test):
@@ -113,6 +132,8 @@ backend/jarvis/
   app.py            Jarvis object: conversation loop, fast path, continuation, auto-memory, agent mode
   agents.py         7 specialist agents + flat "assistant"; the agent loop; delegate/plan tools
   robust.py         small-model survival: tool-call repair, loop guard, stream filter, tool shortlist
+  listen.py         offline listener (wake word + Whisper) and VoiceService;  overlay.py  floating icon (tkinter)
+  selftest.py       end-to-end self-test (create file -> run in browser -> delete) started from the icon
   tools/registry.py ToolExecutor - THE permission choke point (validate -> decide -> run -> redact -> audit)
   tools/            system, files, coding, research, desktop, browser, personal (calendar/email), images
   llm/              base (router, failover), providers (Anthropic, OpenAI-compatible), offline (rule engine)
@@ -218,6 +239,17 @@ Windows laptop (2026-11-17, Python 3.13):
 - Qwen3 4B + Tamil through English + auto speech language (2026-11-19): 236 passed, 3 skipped (then the Tamil
   midnight time-of-day fix; its file passes 64/64); `node frontend/e2e/lang.test.mjs` 6/6, wake 6/6; Auto switching
   checked in a 460x704 view against a throwaway instance (typed "Jarvis, Tamil" -> Tamil, English text -> back).
+- Offline listener, floating icon, self-test (2026-11-20): 254 passed, 3 skipped, 4 failed in a 22-min run while the
+  CPU was at 100% (all four were `system_stats` 60 s timeouts; they pass when re-run: 78/78 with the routing table).
+  Measured: wake word 1.00 on "Hey Jarvis", 0.00 on other speech; Whisper small picked the language on 6/6 Tamil and
+  3/3 English clips (Tamil character error ~10%, base: ~33%); 4-16 s per request on this loaded CPU. The full
+  pipeline (fake microphone playing "Hey Jarvis. What time is it?") produced "What time is it?". The real self-test
+  on a throwaway instance with the real model passed 3/3 (create 244 s, browser "Result: 42" 37 s, delete 2 s) after
+  fixing what it found: the flat agent was never offered write_file/delete_path (`agents.file_action_tools`), the
+  continuation after an approval lost the file tools (shortlist from the original request), two decisions made
+  together continued the task twice (`_decisions`/`_continued`), and "open file:///... in your browser" went to
+  open_application. On the real JARVIS: listener running, real microphone delivering audio, icon window visible.
+  Not checked: real speech into the microphone, the icon's look and hover (no screen access), Tamil speech.
 - Earlier, a full run under heavy memory pressure (0.4 GB free, 72 min) had timing-based failures in the
   failover tests: they pass on an unloaded machine. Expect timeouts when RAM is nearly exhausted.
 - Frontend browser checks (`frontend/e2e/*.mjs`) and `scripts/acceptance.py` were not run on Windows.
@@ -225,7 +257,11 @@ Windows laptop (2026-11-17, Python 3.13):
 ## Known open items
 
 1. Windows: finish the checks under "Still untested" above (tray menu, hotkey press, voice, media keys,
-   window switching, autostart, a double-click install).
+   window switching, autostart, a double-click install). Voice is now the offline listener: real "Hey Jarvis" and
+   Tamil speech through the laptop microphone are untested, and so is the floating icon's appearance.
+   Speech is slow while other apps hold the CPU (Whisper small 4-16 s); `JARVIS_STT_LOCAL_MODEL=base` is smaller but was
+   no faster under that load, and its Tamil was poor (3/6 languages right). Replies are still spoken by the page (Edge voices; no Tamil voice
+   is installed in Windows here - Settings > Time & language > Speech can add one).
 2. Real model: with prompt caching a short answer is 1-3 s on a quiet machine, 7-20 s when other apps load
    the CPU (Qwen3 4B is ~30-50% slower than qwen2.5:3b and uses ~3.7 GB instead of 2.3 GB). Tamil open questions
    now answer correctly through English (2026-11-19, real JARVIS: capital of India, Thiruvalluvar, sun rises in the

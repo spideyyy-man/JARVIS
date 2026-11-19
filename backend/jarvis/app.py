@@ -13,6 +13,7 @@ from .automation import AutomationEngine, Monitor, Proactive
 from .config import Settings, get_secret, load_settings
 from .db import Database, new_id
 from .events import EventBus
+from .listen import VoiceService
 from .knowledge import KnowledgeBase, Memory, make_embedder
 from .llm.base import FORCE_PROVIDER, LLMProvider, LLMRouter
 from .llm.offline import Env, OfflineProvider, fast_talk, match_rules, with_context
@@ -68,9 +69,14 @@ class Jarvis:
                                            workflows=self.automation.list))
         self.llm = LLMRouter(providers if providers is not None else self._build_providers(), on_event=self._llm_event, timeout=self.settings.llm_timeout)
         self.stt, self.tts = build_voice(self.settings)
+        self.voice = VoiceService(self)  # offline wake word + speech recognition; started by the desktop app
+        self.selftest = None  # the running/last self-test (selftest.py)
         self._chat_tasks: dict[str, asyncio.Task] = {}
         self._background: set[asyncio.Task] = set()
         self._continuations: dict[str, int] = {}
+        self._continuing: set[str] = set()  # conversations with an automatic continuation running
+        self._decisions: dict[str, int] = {}  # per conversation: approval decisions so far (numbered)
+        self._continued: dict[str, int] = {}  # per conversation: the decisions the latest continuation already covers
         for name in ("delete_path", "run_command", "git_commit"):  # always ask, every time
             self.tools.get(name).grantable = False
         for name in ("fetch_url", "web_search", "github_repo_info", "browser_open", "browser_read", "browser_click", "browser_fill", "screen_read", "clipboard_read"):
@@ -116,6 +122,8 @@ class Jarvis:
         self.proactive.start()
         self.automation.start()
         self._warm_task = asyncio.create_task(self._keep_model_warm(), name="jarvis-model-warm")
+        if self.settings.listen_on_start:
+            self.voice.start(asyncio.get_running_loop())
 
     WARM_EVERY = 45 * 60  # seconds; shorter than the 2 h keep-alive, so the model stays loaded while JARVIS runs
 
@@ -149,6 +157,7 @@ class Jarvis:
         task = getattr(self, "_warm_task", None)
         if task:
             task.cancel()
+        await asyncio.to_thread(self.voice.stop)
         primary = self.llm.primary
         if getattr(primary, "keep_alive", "") and hasattr(primary, "unload"):
             await primary.unload()  # give the model's memory back when JARVIS quits
@@ -408,11 +417,12 @@ class Jarvis:
         await self.automation.on_approval(approval, result)
         conv = approval.get("conversation_id")
         if conv and self.db.get_setting("auto_continue", True):
-            task = asyncio.create_task(self._continue_after_approval(conv))
+            seq = self._decisions[conv] = self._decisions.get(conv, 0) + 1
+            task = asyncio.create_task(self._continue_after_approval(conv, seq))
             self._background.add(task)
             task.add_done_callback(self._background.discard)
 
-    async def _continue_after_approval(self, conversation_id: str) -> None:
+    async def _continue_after_approval(self, conversation_id: str, seq: int = 0) -> None:
         """Pick the task back up once its approvals are decided, so a multi-step job does not die at the
         first confirmation. Only for real models - the rule engine's requests are single-step."""
         await asyncio.sleep(0.05)
@@ -421,6 +431,19 @@ class Jarvis:
             await asyncio.wait([running])
         if self.db.one("SELECT id FROM approvals WHERE status='pending' AND conversation_id=?", (conversation_id,)):
             return  # wait until every outstanding request is decided, then continue once
+        # Several decisions made together (two clicks, "approve all") each schedule this; only one may continue, or the
+        # model runs twice and repeats actions (found by the self-test, 2026-11-19): skip when a continuation is running,
+        # or one started after this decision was made. No await between these checks and the bookkeeping below.
+        if conversation_id in self._continuing or self._continued.get(conversation_id, 0) >= seq > 0:
+            return
+        self._continuing.add(conversation_id)
+        self._continued[conversation_id] = self._decisions.get(conversation_id, 0)
+        try:
+            await self._continue_once(conversation_id)
+        finally:
+            self._continuing.discard(conversation_id)
+
+    async def _continue_once(self, conversation_id: str) -> None:
         last = self.db.one("SELECT meta FROM messages WHERE conversation_id=? AND role='assistant' AND json_extract(meta,'$.task_id') IS NOT NULL ORDER BY created DESC LIMIT 1", (conversation_id,))
         if not last or last["meta"].get("provider") in (None, "offline", "policy"):
             return

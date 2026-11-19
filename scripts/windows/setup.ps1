@@ -58,6 +58,11 @@ else {
   if ($LASTEXITCODE -ne 0) { Write-Host "   download incomplete - re-run this script later. Tamil still works, with weaker replies." -ForegroundColor Yellow }
 }
 
+Write-Host "== Offline speech (wake word 'Hey Jarvis' + Whisper small, English and Tamil)" -ForegroundColor Cyan
+Write-Host "   downloading the speech models (~490 MB, once)..."
+& backend\.venv\Scripts\python.exe -c "from jarvis.config import load_settings; from faster_whisper.utils import download_model; import openwakeword; s = load_settings(); openwakeword.utils.download_models(['hey_jarvis']); download_model(s.stt_local_model, cache_dir=str(s.data_dir / 'models' / 'whisper')); print('   ok')"
+if ($LASTEXITCODE -ne 0) { Write-Host "   download incomplete - JARVIS fetches the models itself on first start." -ForegroundColor Yellow }
+
 Write-Host "== 4/4  Done" -ForegroundColor Cyan
 Write-Host "Start JARVIS:            scripts\windows\start.bat"
 Write-Host "Start with Windows:      backend\.venv\Scripts\python.exe -m jarvis.desktop_app --install-autostart"

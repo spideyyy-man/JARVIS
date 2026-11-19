@@ -3,9 +3,11 @@
     python -m jarvis.desktop_app                    start server + app window + tray icon + global hotkey
     python -m jarvis.desktop_app --install-autostart   start with Windows (remove with --remove-autostart)
 
-JARVIS runs in the background: one compact window (Edge/Chrome "app" mode, its own profile so microphone
-permission is remembered) docked bottom-right and minimised to the taskbar at start, listening for the wake
-word. Ctrl+Alt+J or the tray brings that same window back and starts listening; --show keeps it open at start.
+JARVIS runs in the background. It listens with the offline listener (listen.py: "Hey Jarvis", speech recognised on
+this computer) and shows a small floating icon on the screen edge (overlay.py; hover for what it is doing). One
+compact window (Edge/Chrome "app" mode) is opened minimised: it shows the conversation and speaks the replies.
+Ctrl+Alt+J or the tray's "Talk to JARVIS" listens for one request without the wake word; --show keeps the window
+open at start. Without the offline listener's packages the window's browser recogniser is used, as before.
 """
 from __future__ import annotations
 
@@ -214,6 +216,31 @@ def start_server(jarvis: Jarvis) -> tuple[uvicorn.Server, threading.Thread]:
     return server, thread
 
 
+def pythonw(python: str) -> str:
+    """The console-less interpreter next to `python` on Windows (no black window flashing up), else `python`."""
+    if python.lower().endswith("python.exe"):
+        candidate = python[: -len("python.exe")] + "pythonw.exe"
+        if Path(candidate).is_file():
+            return candidate
+    return python
+
+
+def start_overlay() -> subprocess.Popen | None:
+    """The floating icon, as its own process (tkinter wants its own main thread); it exits when this process ends."""
+    try:
+        return subprocess.Popen([pythonw(sys.executable), "-m", "jarvis.overlay", "--parent", str(os.getpid())],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError as e:
+        print(f"  Floating icon unavailable ({e}).")
+        return None
+
+
+def talk(jarvis: Jarvis) -> None:
+    """Hotkey / tray: listen now. The offline listener needs no window; the browser recogniser lives in the window."""
+    if not jarvis.voice.listen_now():
+        bring_up(jarvis, listen=True)
+
+
 def autostart_path() -> Path:
     if platform.system() != "Windows":
         raise RuntimeError("Autostart is only implemented for Windows")
@@ -253,7 +280,7 @@ def tray_icon(jarvis: Jarvis, on_quit):
     d.ellipse((6, 6, 58, 58), outline=(34, 211, 238, 255), width=4)
     d.ellipse((22, 22, 42, 42), fill=(34, 211, 238, 255))
     menu = pystray.Menu(pystray.MenuItem("Open JARVIS", lambda: bring_up(jarvis), default=True),
-                        pystray.MenuItem(f"Talk to JARVIS ({HOTKEY_LABEL})", lambda: bring_up(jarvis, listen=True)),
+                        pystray.MenuItem(f"Talk to JARVIS ({HOTKEY_LABEL})", lambda: talk(jarvis)),
                         pystray.MenuItem("Quit", lambda icon: (icon.stop(), on_quit())))
     return pystray.Icon("jarvis", img, "JARVIS", menu)
 
@@ -263,6 +290,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-window", action="store_true")
     ap.add_argument("--show", action="store_true", help="keep the window open at start instead of minimising it to the taskbar")
     ap.add_argument("--no-tray", action="store_true")
+    ap.add_argument("--no-overlay", action="store_true", help="no floating icon")
     ap.add_argument("--install-autostart", action="store_true")
     ap.add_argument("--remove-autostart", action="store_true")
     args = ap.parse_args(argv)
@@ -283,8 +311,10 @@ def main(argv: list[str] | None = None) -> int:
             bring_up(jarvis)
         print("  JARVIS is already running - brought its window to the front.")
         return 0
+    jarvis.settings.listen_on_start = True  # the offline listener, if its packages are installed and the user has not turned it off
     server, thread = start_server(jarvis)
-    print(f"\n  JARVIS is running in the background. Say \"{jarvis.settings.wake_word}\", press {HOTKEY_LABEL}, or use the tray icon.\n"
+    wake = "Hey Jarvis" if jarvis.voice.status()["running"] else jarvis.settings.wake_word
+    print(f"\n  JARVIS is running in the background. Say \"{wake}\", press {HOTKEY_LABEL}, or use the floating icon or the tray.\n"
           f"  Model chain: {' -> '.join(p['name'] for p in jarvis.provider_info()['chain'])}\n")
     profile = jarvis.settings.data_dir / "ui-profile"
     if not args.no_window:
@@ -297,9 +327,12 @@ def main(argv: list[str] | None = None) -> int:
                     minimize_window(hwnd)
             threading.Thread(target=to_background, daemon=True, name="jarvis-minimise").start()
     if platform.system() == "Windows":
-        threading.Thread(target=hotkey_loop, args=(lambda: bring_up(jarvis, listen=True),), daemon=True, name="jarvis-hotkey").start()
+        threading.Thread(target=hotkey_loop, args=(lambda: talk(jarvis),), daemon=True, name="jarvis-hotkey").start()
+    overlay = None if args.no_overlay else start_overlay()
 
     def quit_() -> None:
+        if overlay and overlay.poll() is None:
+            overlay.terminate()
         hwnd = find_window(profile)
         if hwnd:
             close_window(hwnd)  # its server is going away; leave no orphaned window listening

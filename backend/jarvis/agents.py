@@ -6,6 +6,7 @@ persisted in `agent_messages`, and share state through the `tasks` table."""
 from __future__ import annotations
 
 import asyncio
+import re
 import json
 import threading
 import time
@@ -119,14 +120,34 @@ def flat_core(tools: list) -> list:
     return [by_name[n] for n in FLAT_CORE if n in by_name]
 
 
+# A file action needs both a verb and a file/folder to act on: "create the file C:\x\hello.html" offers write_file,
+# "write me a poem" offers nothing. (Shared words alone were not enough: the poem once went to write_file; but
+# without this rule the self-test found "create the file ..." answered with "I cannot create files", 2026-11-19.)
+_FILE_OBJECT = re.compile(r"([A-Za-z]:[\\/]|~[\\/]|(?<![\w.])/[\w.\-]+/|\b[\w\-]+\.(?:txt|md|html?|css|js|ts|py|json|csv|xml|ya?ml|ini|log|bat|ps1|sh|docx?|xlsx?|pptx?|pdf|png|jpe?g|gif|svg)\b"
+                          r"|\b(?:file|files|folder|folders|directory|directories)\b)", re.I)
+_FILE_VERBS = [(re.compile(r"\b(create|make|write|save|put|generate|new)\b", re.I), ("write_file", "create_directory")),
+               (re.compile(r"\b(edit|change|modify|replace|update|fix)\b", re.I), ("replace_in_file",)),
+               (re.compile(r"\b(delete|remove|erase|trash)\b", re.I), ("delete_path",)),
+               (re.compile(r"\b(move|rename)\b", re.I), ("move_path",)),
+               (re.compile(r"\b(copy|duplicate)\b", re.I), ("copy_path",)),
+               (re.compile(r"\b(restore|undo|undelete)\b", re.I), ("restore_from_trash",))]
+
+
+def file_action_tools(task: str) -> set[str]:
+    """Tools that change files, offered only when the request asks to change a named file or folder."""
+    if not _FILE_OBJECT.search(task):
+        return set()
+    return {name for verb, names in _FILE_VERBS if verb.search(task) for name in names}
+
+
 def flat_extras(task: str, tools: list, core: list, embedder, hinted: set[str], limit: int) -> list:
-    """Request-specific tools added after the core: the rule engine's pick, then read-only tools the request shares
-    words with. A plain question shares words with none, so its prompt is exactly the cached one. Tools that change
-    something are never added on shared words alone: "write a two line poem" made the small model call write_file
-    (measured on the owner's laptop). It can still find them through list_tools."""
+    """Request-specific tools added after the core: the rule engine's pick, file actions the request clearly asks for
+    (file_action_tools), then read-only tools the request shares words with. A plain question matches none of these,
+    so its prompt is exactly the cached one. Tools that change something are never added on shared words alone:
+    "write a two line poem" made the small model call write_file (measured on the owner's laptop)."""
     core_names = {t.name for t in core}
     rest = [t for t in tools if t.name not in core_names]
-    picked = {t.name for t in rest if t.name in hinted}
+    picked = {t.name for t in rest if t.name in hinted | file_action_tools(task)}
     for t, overlap in rank_tools(task, [t for t in rest if t.level == Level.READ], embedder):
         if len(picked) >= limit:
             break
@@ -212,7 +233,12 @@ class AgentRuntime:
         if stable:
             system = flat_system(app)
             core = flat_core(tools)
-            extras = flat_extras(task, tools, core, app.embedder, hinted, max(2, app.settings.max_tools - len(core)))
+            # After an approval JARVIS continues with an internal nudge ("Continue the original task ...") that names no
+            # file, so pick tools from the user's own request too - else the next step (write_file after create_directory)
+            # is not offered and the task stalls (found by the self-test, 2026-11-19).
+            asks = [m["content"] for m in (history or []) if m["role"] == "user"] if actor == "continuation" else []
+            focus = (asks[-1][:2000] + "\n" + task) if asks else task
+            extras = flat_extras(focus, tools, core, app.embedder, hinted, max(2, app.settings.max_tools - len(core)))
             content = with_context(task, context_note)
         else:
             system = f"{spec.prompt}\n{COMMON_RULES}\n\nCurrent time: {time.strftime('%A %Y-%m-%d %H:%M')}. Home: {app.settings.allowed_roots[0]}." + (f"\n\n{context_note}" if context_note else "")

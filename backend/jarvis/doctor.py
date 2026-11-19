@@ -162,7 +162,8 @@ async def diagnose(app, online: bool = True) -> list[dict]:
         except Exception as e:
             out.append(_r("Local speech server", FAIL, f"{s.voice_base_url}: {type(e).__name__}", "Start your speech server or set JARVIS_STT_PROVIDER/JARVIS_TTS_PROVIDER back to browser."))
     else:
-        out.append(_r("Speech", OK, "using the browser's speech recognition and voices (Edge/Chrome)"))
+        out.append(_r("Speech", OK, "replies are spoken with the browser's voices (Edge/Chrome)"))
+    out.append(_listener_check(app))
     if s.image_provider != "none":
         try:
             import httpx
@@ -203,6 +204,28 @@ async def diagnose(app, online: bool = True) -> list[dict]:
         except Exception as e:
             out.append(_r("Web search", WARN, f"unreachable: {str(e)[:140]}", "Web research needs internet access to DuckDuckGo or Wikipedia."))
     return out
+
+
+def _listener_check(app) -> dict:
+    """Offline listener (listen.py): packages, a microphone, and the downloaded models. Does not record anything."""
+    if not app.voice.enabled():
+        return _r("Offline listener", WARN, "switched off - the browser's speech recognition is used (it needs the internet)", "Turn it on in the Assistant screen.")
+    missing = app.voice.available()
+    if missing:
+        return _r("Offline listener", WARN, missing + " - the browser's speech recognition is used instead (it needs the internet)",
+                  'pip install -e "backend[desktop]"')
+    try:
+        import sounddevice as sd
+
+        mic = sd.query_devices(kind="input")["name"]
+    except Exception as e:  # noqa: BLE001
+        return _r("Offline listener", FAIL, f"no microphone: {type(e).__name__}: {str(e)[:120]}",
+                  "Connect a microphone, and allow desktop apps to use it in Windows Settings > Privacy > Microphone.")
+    models = app.settings.data_dir / "models" / "whisper"
+    size = app.settings.stt_local_model
+    have = any(models.glob(f"models--Systran--faster-whisper-{size}/snapshots/*/model.bin"))
+    return _r("Offline listener", OK if have else WARN, f"say “Hey Jarvis”; microphone: {mic}; speech model whisper-{size} " + ("downloaded" if have else "not downloaded yet"),
+              "" if have else f"It downloads by itself on first start (~{'480' if size == 'small' else '150'} MB).")
 
 
 def render(results: list[dict]) -> str:

@@ -347,6 +347,9 @@ RULES: list[Rule] = [
     R("computer", r"\bprevious (song|track)\b", lambda t, m, e: ("system_control", {"action": "media_previous"})),
     R("computer", r"^\s*(?:jarvis[,\s]+)?(?:please\s+)?(?:open|go to|browse to|navigate to|visit)\s+((?:https?://|www\.)\S+|[\w\-]+(?:\.[\w\-]+)*\.(?:com|org|net|io|dev|ai|app|co|edu|gov|in|uk)(?:/\S*)?)(?:\s+in\s+(?:the|my)\s+browser)?\s*[.!]?$",
       lambda t, m, e: ("browser_open", {"url": m.group(1)}), whole=True),
+    # a page on this computer (e.g. one JARVIS just wrote): "open file:///C:/x/hello.html in your browser and tell me what it shows"
+    R("computer", r"^\s*(?:jarvis[,\s]+)?(?:please\s+)?(?:open|show|view|run|load)\s+(file:///\S+?|[A-Za-z]:[\\/]\S+?\.html?)(?:\s+in\s+(?:the|your|my)\s+browser)?(?:\s+and\s+.*)?\s*[.!?]?$",
+      lambda t, m, e: ("browser_open", {"url": m.group(1)}), whole=True),
     R("computer", r"\b(read|what'?s on|summari[sz]e) (the |this )?(current )?(web ?page|page in the browser|browser page)\b", lambda t, m, e: ("browser_read", {})),
     R("computer", r"\bclose (the )?browser\b", lambda t, m, e: ("browser_close", {})),
     # orchestrator-level
@@ -402,7 +405,7 @@ RULES: list[Rule] = [
     R("computer", r"\b(find|locate|search for|look for|where (is|are))\b", _search_files),
     R("computer", r"\b(list|show|what'?s in)\b.*\b(folder|directory|files)\b|\b(list|show)\b.*(~|/|[A-Za-z]:[\\/])", _p("list_dir")),
     R("computer", r"\b(read|show|print|cat)\b.*?((?:~|/|[A-Za-z]:[\\/])\S+\.\w+)", lambda t, m, e: ("read_file", {"path": m.group(2)})),
-    R("computer", r"^\s*(?:hey\s+)?(?:jarvis[,\s]+)?(?:please\s+)?(?:open|launch|start)\s+(?:the\s+|my\s+)?(.+?)\s*(?:app|application)?[.!]?$", lambda t, m, e: ("open_application", {"name": m.group(1)})),
+    R("computer", r"^\s*(?:hey\s+)?(?:jarvis[,\s]+)?(?:please\s+)?(?:open|launch|start)\s+(?:the\s+|my\s+)?(?!\S*://|[A-Za-z]:[\\/])(.+?)\s*(?:app|application)?[.!]?$", lambda t, m, e: ("open_application", {"name": m.group(1)})),
 ]
 
 SMALL_TALK = [

@@ -175,7 +175,8 @@ class ToolExecutor:
         self.app.db.notify("action", f"Approval needed: {name}", preview)
         return ToolResult(True, approval_id=approval["id"], preview=preview)
 
-    async def decide(self, approval_id: str, approve: bool, scope: str = "once") -> dict:
+    async def decide(self, approval_id: str, approve: bool, scope: str = "once", by: str = "user") -> dict:
+        """`by` is who decided, for the audit log: "user" (screen, chat) or "selftest" (the self-test the user started)."""
         ap = self.app.db.one("SELECT * FROM approvals WHERE id=?", (approval_id,))
         if ap is None:
             raise KeyError(approval_id)
@@ -192,14 +193,14 @@ class ToolExecutor:
                 self.app.db.update("approvals", approval_id, status="pending", decided=None)
                 raise SecurityError(f"'{ap['tool']}' must be approved every time; it cannot be approved for a whole task")
             self.app.db.insert("grants", {"id": new_id("g_"), "conversation_id": ap["conversation_id"], "tool": ap["tool"], "expires": time.time() + self.GRANT_SECONDS, "created": time.time()})
-            self.app.audit.record(actor="user", tool=ap["tool"], level="confirm", decision="task-grant-created", args={"conversation": ap["conversation_id"], "minutes": self.GRANT_SECONDS // 60}, outcome="ok")
+            self.app.audit.record(actor=by, tool=ap["tool"], level="confirm", decision="task-grant-created", args={"conversation": ap["conversation_id"], "minutes": self.GRANT_SECONDS // 60}, outcome="ok")
         ctx = ToolContext(self.app, agent=ap["agent"], actor="approved-by-user", task_id=ap["task_id"],
                           conversation_id=ap["conversation_id"], origin=ap["origin"] or {})
         if not approve or tool is None:
-            self.app.audit.record(actor="user", tool=ap["tool"], level="confirm", decision="denied", args=ap["args"], outcome="not-executed")
+            self.app.audit.record(actor=by, tool=ap["tool"], level="confirm", decision="denied", args=ap["args"], outcome="not-executed")
             result = ToolResult(False, error="Denied by user")
         else:
-            result = await self._run(tool, ap["args"], ctx, "user", decision="approved")
+            result = await self._run(tool, ap["args"], ctx, by, decision="approved")
         self.app.db.update("approvals", approval_id, status=("executed" if result.ok else "failed") if approve else "denied",
                            result=result.to_model(4000))
         ap = self.app.db.one("SELECT * FROM approvals WHERE id=?", (approval_id,))

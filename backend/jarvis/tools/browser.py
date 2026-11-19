@@ -79,6 +79,15 @@ class BrowserSession:
 
     def check_url(self, url: str) -> str:
         url = url.strip()
+        if url.lower().startswith("file:") or re.match(r"^[A-Za-z]:[\\/]", url):
+            # A page on this computer (e.g. one JARVIS just wrote). Same file scope as every other tool.
+            from urllib.request import url2pathname
+
+            raw = url2pathname(urlparse(url).path) if url.lower().startswith("file:") else url
+            path = self.app.guard.resolve(raw)
+            if not path.is_file():
+                raise SecurityError(f"No such file: {path}")
+            return path.as_uri()
         if "://" not in url:
             if not re.match(r"^(localhost|[\w\-]+(\.[\w\-]+)+)(:\d+)?(/|$)", url):  # rejects javascript:, data:, bare words
                 raise SecurityError("Only http(s) pages can be opened")
@@ -153,7 +162,7 @@ def register(reg: ToolRegistry, app: "Jarvis") -> None:
         return {"closed": True}
 
     where = lambda a: f"element #{a['index']}" if a.get("index") is not None else f"\"{a.get('target') or a.get('field')}\""  # noqa: E731
-    reg.register(Tool("browser_open", "Open a web page in JARVIS's own browser window and return its text and a numbered list of clickable/fillable elements.", {"url": S}, browser_open, required=["url"], timeout=60))
+    reg.register(Tool("browser_open", "Open a web page (or a local .html file by path or file:// URL) in JARVIS's own browser window and return its text and a numbered list of clickable/fillable elements.", {"url": S}, browser_open, required=["url"], timeout=60))
     reg.register(Tool("browser_read", "Re-read the current page in JARVIS's browser: text plus numbered interactive elements.", {}, browser_read, timeout=30))
     reg.register(Tool("browser_close", "Close JARVIS's browser window.", {}, browser_close, timeout=20))
     reg.register(Tool("browser_click", "Click something on the current page, by its visible name or by element index from browser_read.", {"target": S, "index": I}, browser_click,

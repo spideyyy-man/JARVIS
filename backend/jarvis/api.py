@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import json
 import re
 import time
 from contextlib import asynccontextmanager
@@ -144,9 +145,54 @@ def create_app(jarvis: Jarvis | None = None) -> FastAPI:
 
     @app.post("/api/ui/listen")
     async def ui_listen():
-        """The hotkey or tray asks the open JARVIS window to start listening (no wake word needed)."""
+        """The hotkey or tray: listen for one request now (no wake word). The offline listener takes it when it runs,
+        otherwise the open JARVIS window's browser recogniser does."""
+        if j.voice.listen_now():
+            return {"ok": True, "local": True}
         j.bus.emit("ui.listen")
         return {"ok": True, "windows": len(j.bus._subscribers)}
+
+    @app.post("/api/voice/listen")
+    async def voice_listen():
+        ok = j.voice.listen_now()
+        return {"ok": ok, **({} if ok else {"reason": j.voice.available() or "the offline listener is not running"})}
+
+    @app.get("/api/overlay")
+    async def overlay():
+        """Everything the floating icon shows on hover, in one cheap call (it polls about twice a second)."""
+        pending = j.db.query("SELECT id, tool, preview, conversation_id, created FROM approvals WHERE status='pending' ORDER BY created LIMIT 5")
+        last = None
+        if j.selftest is None:
+            path = j.settings.data_dir / "selftest" / "last.json"
+            if path.is_file():
+                try:
+                    last = json.loads(path.read_text(encoding="utf-8"))
+                except ValueError:
+                    last = None
+        reply = j.db.one("SELECT content, conversation_id, created FROM messages WHERE role='assistant' ORDER BY created DESC LIMIT 1")
+        request = j.db.one("SELECT content, created FROM messages WHERE role='user' ORDER BY created DESC LIMIT 1")
+        return {"state": j.bus.assistant_state, "detail": j.bus.state_detail, "task": j.bus.active_task, "voice": j.voice.status(),
+                "last": {"request": (request or {}).get("content", "")[:300], "reply": (reply or {}).get("content", "")[:700],
+                         "reply_at": (reply or {}).get("created"), "conversation_id": (reply or {}).get("conversation_id")},
+                "approvals": [{**a, "preview": (a["preview"] or "").strip()[:300]} for a in pending],
+                "activity": list(j.bus.activity)[-14:], "selftest": j.selftest.summary() if j.selftest else last,
+                "capabilities": j.capabilities(), "model": j.llm.current().name, "windows": len(j.bus._subscribers)}
+
+    @app.post("/api/selftest")
+    async def selftest_start():
+        from .selftest import SelfTest
+
+        if j.selftest and j.selftest.state["running"]:
+            raise HTTPException(409, "A self-test is already running")
+        j.selftest = SelfTest(j)
+        task = asyncio.create_task(j.selftest.run())
+        background.add(task)
+        task.add_done_callback(lambda t: (background.discard(t), t.cancelled() or t.exception()))
+        return j.selftest.summary()
+
+    @app.get("/api/selftest")
+    async def selftest_status():
+        return j.selftest.summary() if j.selftest else {"running": False, "steps": []}
 
     # -- chat ------------------------------------------------------------------------
     @app.post("/api/chat")
@@ -308,7 +354,8 @@ def create_app(jarvis: Jarvis | None = None) -> FastAPI:
 
     def settings_payload() -> dict:
         return {"trusted_tools": j.executor.trusted_tools(), "default_project": j.db.get_setting("default_project", ""),
-                "voice": {"wake_word": j.settings.wake_word, "continuous": False, "voice_name": "", "rate": 1.0, "speak_replies": True, "wake_on_start": True, "language": "auto", **j.db.get_setting("voice", {})},
+                "voice": {"wake_word": j.settings.wake_word, "continuous": False, "voice_name": "", "rate": 1.0, "speak_replies": True, "wake_on_start": True, "language": "auto", "engine": "local", **j.db.get_setting("voice", {})},
+                "voice_local": j.voice.status(),
                 "capabilities": {name: {"enabled": on, "description": j.CAPABILITIES[name]} for name, on in j.capabilities().items()},
                 "proactive": {"briefing_time": "", **j.db.get_setting("proactive", {})},
                 "behavior": {k: bool(j.db.get_setting(k, True)) for k in BEHAVIOR},
@@ -350,11 +397,19 @@ def create_app(jarvis: Jarvis | None = None) -> FastAPI:
                 raise ValueError("briefing_time must be HH:MM (24-hour) or empty")
             j.db.set_setting("proactive", {"briefing_time": at})
         if body.voice is not None:
-            allowed = {"wake_word", "continuous", "voice_name", "rate", "speak_replies", "pitch", "wake_on_start", "language"}
+            allowed = {"wake_word", "continuous", "voice_name", "rate", "speak_replies", "pitch", "wake_on_start", "language", "engine"}
+            if body.voice.get("engine") not in (None, "local", "browser"):
+                raise ValueError("engine must be 'local' (offline listener on this computer) or 'browser' (the browser's speech service)")
             lang = body.voice.get("language")
             if lang is not None and not (lang in ("", "auto") or (isinstance(lang, str) and re.fullmatch(r"[a-z]{2,3}(-[A-Z]{2})?", lang))):
                 raise ValueError("language must be 'auto' (English + Tamil, follows the user), a speech language code like 'ta-IN', or empty for the browser default")
             j.db.set_setting("voice", {**j.db.get_setting("voice", {}), **{k: v for k, v in body.voice.items() if k in allowed}})
+            if "engine" in body.voice and j.settings.listen_on_start:  # switch listening over now, not at the next start
+                if j.voice.enabled():
+                    j.voice.start(asyncio.get_running_loop())
+                else:
+                    await asyncio.to_thread(j.voice.stop)
+                j.bus.emit("voice.engine", engine=body.voice["engine"], status=j.voice.status())
         return settings_payload()
 
     # -- knowledge / memory ----------------------------------------------------------------
@@ -533,6 +588,7 @@ def create_app(jarvis: Jarvis | None = None) -> FastAPI:
     @app.get("/api/voice/config")
     async def voice_config():
         return {"stt": {"provider": j.settings.stt_provider, "server_side": j.stt is not None}, "tts": {"provider": j.settings.tts_provider, "server_side": j.tts is not None},
+                "local": j.voice.status(),
                 "wake_word": j.db.get_setting("voice", {}).get("wake_word", j.settings.wake_word), "settings": j.db.get_setting("voice", {})}
 
     @app.post("/api/voice/transcribe")

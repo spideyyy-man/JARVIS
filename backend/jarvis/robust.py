@@ -249,7 +249,7 @@ TOOL_HINTS = {
     "type_text": "type typing enter input keyboard fill",
     "system_control": "volume louder quieter mute sound brightness dim lock music pause play next song",
     "clipboard_read": "copied paste clipboard",
-    "browser_open": "website web page site url visit go to online",
+    "browser_open": "website web page site url visit go to online browser html",
     "web_search": "search internet google look up online latest news research",
     "calendar_events": "meetings appointments schedule agenda today tomorrow busy free week",
     "calendar_add": "book schedule meeting appointment event remind",

@@ -35,6 +35,8 @@ export interface VoiceState {
   conversationId: string | null;
   turns: VoiceTurn[];
   listenLang: string; // the language speech is being recognised in right now (in auto mode it follows the user)
+  local: boolean; // the offline listener on the JARVIS server hears the user (wake word + recognition); the page only speaks
+  localState: string; // its state: waiting | recording | transcribing | loading | error
 }
 export interface VoiceDeps {
   sendChat: (text: string, conversationId: string) => Promise<unknown>;
@@ -42,6 +44,7 @@ export interface VoiceDeps {
   newConversationId: () => string;
   on: (type: string, fn: (e: Record<string, unknown>) => void) => () => void;
   report: (state: "listening" | "speaking" | "idle") => void;
+  listenLocal?: () => Promise<boolean>; // ask the offline listener to take the next utterance (no wake word)
 }
 
 interface RecAlternative { transcript: string }
@@ -105,11 +108,55 @@ export class VoiceEngine {
     this.s = {
       sttSupported: !!recCtor(), ttsSupported: !!synth() && !!win().SpeechSynthesisUtterance, wakeMode: false, capturing: false, phase: "idle",
       interim: "", heard: "", heardStatus: "", wakeHeardAt: 0, reply: "", replyStreaming: false, micLive: false, error: "", conversationId: null, turns: [],
-      listenLang: "",
+      listenLang: "", local: false, localState: "",
     };
     this.s.listenLang = this.lang;
     deps.on("chat.delta", (e) => this.onDelta(e));
     deps.on("chat.done", (e) => this.onDone(e));
+    deps.on("voice.wake", () => this.onLocalWake());
+    deps.on("voice.state", (e) => this.onLocalState(e));
+    deps.on("voice.heard", (e) => this.onLocalHeard(e));
+  }
+
+  // -- offline listener (server side) --------------------------------------------------
+  /** The server's offline listener is running: it does the hearing, so the browser recogniser stays off. */
+  setLocal(on: boolean, state = "") {
+    if (on === this.s.local && state === this.s.localState) return;
+    this.set({ local: on, localState: state || this.s.localState, ...(on ? { sttSupported: true, error: "" } : { sttSupported: !!recCtor() }) });
+    this.syncRecognition();
+  }
+  private onLocalWake() {
+    if (!this.s.local) return;
+    if (this.busy) this.interrupt(); // "Hey Jarvis" over a reply: stop talking and listen
+    this.set({ phase: "listening", wakeHeardAt: Date.now(), interim: "Listening…", capturing: true });
+    this.deps.report("listening");
+  }
+  private onLocalState(e: Record<string, unknown>) {
+    const st = String(e.state ?? "");
+    if (!st) return;
+    if (st === "off") return this.setLocal(false, st);
+    if (!this.s.local && st !== "error") this.setLocal(true, st);
+    const patch: Partial<VoiceState> = { localState: st };
+    if (st === "transcribing") patch.interim = "…";
+    if (st === "waiting" && this.s.phase === "listening") {
+      Object.assign(patch, { phase: "idle", interim: "", capturing: false, ...(e.note ? { heard: String(e.note), heardStatus: "ignored" } : {}) });
+      this.deps.report("idle");
+    }
+    if (st === "error") patch.error = `Offline listener: ${String(e.error ?? "error")}`;
+    this.set(patch);
+  }
+  /** The offline listener heard a request and the server is answering it: show it and speak the reply. */
+  private onLocalHeard(e: Record<string, unknown>) {
+    const text = String(e.text ?? "").trim();
+    const cid = String(e.conversation_id ?? "");
+    if (!text || !cid) return;
+    if (this.busy) this.interrupt();
+    this.capture = "none";
+    this.activeTurn = true;
+    this.ttsBuf = "";
+    this.spoken = "";
+    this.set({ local: true, conversationId: cid, phase: "thinking", reply: "", replyStreaming: true, error: "", interim: "", capturing: false,
+      heard: text, heardStatus: "sent", turns: [...this.s.turns, { role: "user", text }] });
   }
 
   // -- state plumbing ----------------------------------------------------------
@@ -186,6 +233,7 @@ export class VoiceEngine {
   }
   /** Mic button: interrupts JARVIS if it is talking/thinking, otherwise toggles push-to-talk capture. */
   toggleMic() {
+    if (this.s.local) return this.startLocal();
     if (this.busy) {
       this.interrupt();
       this.startCapture("ptt");
@@ -194,7 +242,16 @@ export class VoiceEngine {
   }
   /** Hotkey / tray: listen for one request now, without the wake word (interrupting a reply in progress). */
   listenNow() {
+    if (this.s.local) return this.startLocal();
     if (this.capture === "none" || this.busy) this.toggleMic();
+  }
+  private startLocal() {
+    if (this.busy) this.interrupt();
+    this.set({ phase: "listening", interim: "Listening…", capturing: true, error: "" });
+    this.deps.report("listening");
+    void this.deps.listenLocal?.().then((ok) => {
+      if (!ok) this.set({ phase: "idle", interim: "", capturing: false, error: "The offline listener is not running." });
+    });
   }
   /** Barge-in / stop: silence speech output and cancel the running turn on the backend. */
   interrupt() {
@@ -264,7 +321,7 @@ export class VoiceEngine {
     this.syncRecognition();
   }
   private shouldListen() {
-    return this.s.wakeMode || this.capture !== "none";
+    return !this.s.local && (this.s.wakeMode || this.capture !== "none");
   }
   private syncRecognition() {
     window.clearTimeout(this.restartTimer);

@@ -103,6 +103,7 @@ export async function bootstrap() {
     const map: Record<string, Approval> = {};
     approvals.forEach((a) => (map[a.id] = a));
     voice.configure(settings.voice);
+    voice.setLocal(!!settings.voice_local?.running, settings.voice_local?.state ?? "");
     // Local speech models, if the backend has them configured, replace the browser's speech service.
     await installServerSpeech().then(() => voice.detect(), () => undefined);
     if (settings.voice.wake_on_start) voice.setWakeMode(true);
@@ -179,6 +180,10 @@ export function initStore() {
   });
   bus.on("assistant.announce", (e) => voice.announce(String(e.text ?? "")));
   bus.on("ui.listen", () => voice.listenNow()); // Ctrl+Alt+J or the tray's "Talk to JARVIS"
+  bus.on("voice.engine", (e) => {
+    const st = (e.status ?? {}) as { running?: boolean; state?: string };
+    voice.setLocal(!!st.running, st.state ?? "");
+  });
   bus.on("llm.failover", (e) => pushToast("warning", `Language model '${String(e.provider)}' failed`, `${String(e.error ?? "")}${e.next ? ` — switching to '${String(e.next)}'` : ""}`));
   void bootstrap();
 }
@@ -224,6 +229,7 @@ export const voice = new VoiceEngine({
   newConversationId,
   on: (type, fn) => bus.on(type, fn),
   report: (s) => bus.send({ type: "state", state: s }),
+  listenLocal: () => api.voiceListen().then((r) => r.ok, () => false),
 });
 export function useVoice(): VoiceState {
   return useSyncExternalStore(voice.subscribe, voice.getState);

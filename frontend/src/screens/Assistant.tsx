@@ -24,7 +24,7 @@ export function Assistant({ listen = false }: { listen?: boolean }) {
   const [saveError, setSaveError] = useState("");
   const scroller = useRef<HTMLDivElement>(null);
   const vs = settings?.voice;
-  const wake = (vs?.wake_word || "jarvis").split(",")[0].trim();
+  const wake = v.local ? "Hey Jarvis" : (vs?.wake_word || "jarvis").split(",")[0].trim();
   const speakReplies = vs?.speak_replies !== false;
   const lang = vs?.language === "auto" ? "auto" : vs?.language?.startsWith("ta") ? "ta-IN" : "en-IN";
 
@@ -43,7 +43,7 @@ export function Assistant({ listen = false }: { listen?: boolean }) {
     scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "smooth" });
   }, [v.turns.length, v.reply, pending.length, v.interim]);
 
-  const saveVoice = async (patch: { speak_replies?: boolean; language?: string }) => {
+  const saveVoice = async (patch: { speak_replies?: boolean; language?: string; engine?: "local" | "browser" }) => {
     setSaveError("");
     voice.configure(patch);
     try {
@@ -62,16 +62,17 @@ export function Assistant({ listen = false }: { listen?: boolean }) {
         <Orb state={state} size="md" level={getLevel} />
         <div className="asst-caption" data-testid="voice-caption">{CAPTION[state]}</div>
         <div className="asst-chips">
-          <span className={`badge ${v.wakeMode ? "cyan" : ""}`} data-testid="wake-indicator" data-wake={v.wakeMode ? "armed" : "off"}>
-            <Ear size={12} /> {v.wakeMode ? `say “${wake}”` : "wake word off"}
+          <span className={`badge ${v.wakeMode || v.local ? "cyan" : ""}`} data-testid="wake-indicator" data-wake={v.wakeMode || v.local ? "armed" : "off"}>
+            <Ear size={12} /> {v.local ? `say “${wake}” · offline` : v.wakeMode ? `say “${wake}”` : "wake word off"}
           </span>
+          {v.local ? <span className="badge" title="Whisper hears English and Tamil and tells them apart by itself">EN / தமிழ் auto</span> : (
           <div className="seg" role="group" aria-label="Language">
             {LANGS.map((l) => (
               <button key={l.code} type="button" className={lang === l.code ? "on" : ""} aria-pressed={lang === l.code} onClick={() => void saveVoice({ language: l.code })} data-testid={`lang-${l.code}`}>
                 {l.label}{l.code === "auto" && lang === "auto" ? <span className="dim"> · {v.listenLang.startsWith("ta") ? "த" : "EN"}</span> : null}
               </button>
             ))}
-          </div>
+          </div>)}
         </div>
       </section>
 
@@ -86,7 +87,8 @@ export function Assistant({ listen = false }: { listen?: boolean }) {
           <div className="asst-empty dim">
             <p>Say <b>“{wake}”</b> and your request, press <b>Ctrl+Alt+J</b>, or tap the mic.</p>
             <p>Try: “what time is it” · “turn the volume up” · “open notepad” · “நேரம் என்ன”</p>
-            {lang === "auto" && <p>Auto language: say <b>“Jarvis, Tamil”</b> or <b>“Vanakkam Jarvis”</b> to talk in Tamil, <b>“Jarvis, English”</b> to switch back. Typing in either language switches too.</p>}
+            {v.local && <p>Speak English or Tamil - the offline listener tells them apart. Nothing leaves this computer.</p>}
+            {!v.local && lang === "auto" && <p>Auto language: say <b>“Jarvis, Tamil”</b> or <b>“Vanakkam Jarvis”</b> to talk in Tamil, <b>“Jarvis, English”</b> to switch back. Typing in either language switches too.</p>}
           </div>
         )}
         {v.turns.map((t, i) => (
@@ -115,10 +117,18 @@ export function Assistant({ listen = false }: { listen?: boolean }) {
       </form>
 
       <div className="asst-toggles">
-        <label className="toggle-row">
-          <Switch checked={v.wakeMode} onChange={(on) => voice.setWakeMode(on)} label="Wake word listening" disabled={!v.sttSupported} />
-          <span>Listen for “{wake}”</span>
-        </label>
+        {settings?.voice_local && !settings.voice_local.unavailable ? (
+          <label className="toggle-row">
+            <Switch checked={(vs?.engine ?? "local") === "local"} onChange={(on) => void saveVoice({ engine: on ? "local" : "browser" })} label="Offline listener" />
+            <span>Offline listener (“Hey Jarvis”)</span>
+          </label>
+        ) : null}
+        {!v.local && (
+          <label className="toggle-row">
+            <Switch checked={v.wakeMode} onChange={(on) => voice.setWakeMode(on)} label="Wake word listening" disabled={!v.sttSupported} />
+            <span>Listen for “{wake}”</span>
+          </label>
+        )}
         <label className="toggle-row">
           <Switch checked={speakReplies} onChange={(on) => void saveVoice({ speak_replies: on })} label="Speak replies" disabled={!v.ttsSupported} />
           <span>{speakReplies ? <Volume2 size={13} /> : <VolumeX size={13} />} Speak replies</span>
