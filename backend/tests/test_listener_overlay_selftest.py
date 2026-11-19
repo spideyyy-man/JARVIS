@@ -23,7 +23,7 @@ def test_endpointer_waits_for_speech_then_ends_after_a_pause():
     verdicts = [ep.feed(r) for r in frames(1.0, 80) + frames(1.5, 2000) + frames(1.2, 90)]
     assert verdicts[0] == "wait" and "speech" in verdicts and verdicts[-1] == "done"
     done_at = verdicts.index("done") * FRAME_S
-    assert 3.2 <= done_at <= 3.5  # 1 s quiet + 1.5 s talking + ~0.9 s pause
+    assert 3.0 <= done_at <= 3.4  # 1 s quiet + 1.5 s talking + ~0.7 s pause
 
 
 def test_endpointer_gives_up_when_nothing_is_said_and_caps_long_speech():

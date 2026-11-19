@@ -103,6 +103,7 @@ export class VoiceEngine {
   private audio: { ctx: AudioContext; analyser: AnalyserNode; stream: MediaStream; buf: Uint8Array<ArrayBuffer> } | null = null;
   private micRequested = false;
   private autoLang = loadAutoLang();
+  private serverSpeaks = false; // the JARVIS server says this turn's reply itself (offline listener + Windows voices)
 
   constructor(private deps: VoiceDeps) {
     this.s = {
@@ -116,6 +117,7 @@ export class VoiceEngine {
     deps.on("voice.wake", () => this.onLocalWake());
     deps.on("voice.state", (e) => this.onLocalState(e));
     deps.on("voice.heard", (e) => this.onLocalHeard(e));
+    deps.on("voice.say", (e) => this.say(String(e.text ?? ""))); // text the server has no voice for (e.g. Tamil)
   }
 
   // -- offline listener (server side) --------------------------------------------------
@@ -151,6 +153,7 @@ export class VoiceEngine {
     const cid = String(e.conversation_id ?? "");
     if (!text || !cid) return;
     if (this.busy) this.interrupt();
+    this.serverSpeaks = !!e.server_speaks;
     this.capture = "none";
     this.activeTurn = true;
     this.ttsBuf = "";
@@ -457,6 +460,7 @@ export class VoiceEngine {
   // -- conversation turn ---------------------------------------------------------
   private submit(text: string) {
     if (this.busy) this.interrupt();
+    this.serverSpeaks = false;
     const cid = this.s.conversationId ?? this.deps.newConversationId();
     this.activeTurn = true;
     this.ttsBuf = "";
@@ -513,7 +517,17 @@ export class VoiceEngine {
     const text = speakable(chunk);
     if (text) this.speak(text);
   }
+  /** Say text the server could not (no Windows voice for its language). */
+  private say(text: string) {
+    const t = speakable(text);
+    if (!t) return;
+    const was = this.serverSpeaks;
+    this.serverSpeaks = false;
+    this.speak(t);
+    this.serverSpeaks = was;
+  }
   private speak(text: string) {
+    if (this.serverSpeaks) return; // the server is saying it: two voices at once would be worse than one
     const engine = synth();
     const Utter = win().SpeechSynthesisUtterance;
     if (!this.cfg.speak_replies || !engine || !Utter) return;

@@ -61,6 +61,16 @@ Since 2026-11-19 (Edge's online recogniser failed on the laptop with "Speech rec
   chat turn; the page adopts that conversation and speaks the reply (it still does all speaking). The page's
   own recogniser stays off while the listener runs. Voice setting `engine`: `local` (default) | `browser`.
   The hotkey/tray call `voice.listen_now()` directly - no window pops up.
+- **Faster hearing, spoken by the server** (2026-11-20; the owner asked 3-4 questions and heard nothing - JARVIS had
+  answered in text, but the minimised window's page had lost its connection, and only the page spoke):
+  Whisper `base` (`JARVIS_STT_FAST_MODEL`) detects the language and writes English (~1.8-2.5 s); `small`
+  (`JARVIS_STT_LOCAL_MODEL`) is loaded only for Tamil text and dropped after 15 idle min. `speak.py` says replies
+  to spoken requests sentence by sentence as they stream, with Windows' offline voices (WinRT
+  `Windows.Media.SpeechSynthesis` -> WAV -> winsound; first audio ~0.2 s after the text). No Tamil voice is
+  installed in Windows here, so Tamil replies go to the window (`voice.say` / `voice.heard.server_speaks`).
+  "Hey Jarvis" or the hotkey stops it talking. `desktop_app.window_watchdog` reopens the window when it is open
+  but its page has been disconnected for a minute. The speaker is created only by `VoiceService.start` (desktop
+  app), so tests never play sound.
 - **Floating icon** (`overlay.py`, tkinter, its own `pythonw` process started by the desktop app with
   `--parent PID`): a 46 px always-on-top circle, coloured by state; hover (or click to pin) shows a panel from
   `GET /api/overlay` - now/heard/last exchange, approvals with Approve/Deny, activity (`EventBus.activity`,

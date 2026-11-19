@@ -48,7 +48,7 @@ MARGIN = 12
 # Keep the page fully alive while minimised or covered: the wake word is heard by the page itself, and replies are
 # spoken by it, possibly before the user has clicked anything in that window.
 BACKGROUND_FLAGS = ["--disable-background-timer-throttling", "--disable-renderer-backgrounding", "--disable-backgrounding-occluded-windows",
-                    "--autoplay-policy=no-user-gesture-required"]
+                    "--autoplay-policy=no-user-gesture-required", "--disable-features=CalculateNativeWinOcclusion"]
 
 
 def work_area() -> tuple[int, int, int, int] | None:
@@ -194,6 +194,35 @@ def bring_up(jarvis: Jarvis, listen: bool = False) -> None:
     open_window(jarvis, "assistant/listen" if listen else "assistant")  # a new window starts listening once it has loaded
 
 
+def window_watchdog(jarvis: Jarvis, profile: Path, every: float = 30, misses_allowed: int = 2) -> None:
+    """Reopen the JARVIS window when it is open but its page has stopped talking to the server. Seen on the owner's
+    laptop (2026-11-20): the minimised window stayed on the taskbar while its page was disconnected, so it showed and
+    said nothing. A window the user closed is left closed (the server speaks replies itself)."""
+    import ctypes
+
+    misses = 0
+    while True:
+        time.sleep(every)
+        hwnd = find_window(profile)
+        if not hwnd or jarvis.bus._subscribers:
+            misses = 0
+            continue
+        misses += 1
+        if misses < misses_allowed:
+            continue
+        misses = 0
+        minimised = bool(ctypes.windll.user32.IsIconic(hwnd))
+        close_window(hwnd)
+        time.sleep(3)
+        open_window(jarvis, "assistant")
+        if minimised:
+            new = wait_for_window(profile)
+            if new:
+                time.sleep(2)
+                minimize_window(new)
+        jarvis.bus.activity.append({"ts": time.time(), "text": "Window reopened (its page had lost the connection)"})
+
+
 def already_running(jarvis: Jarvis) -> bool:
     import urllib.request
 
@@ -326,6 +355,8 @@ def main(argv: list[str] | None = None) -> int:
                     time.sleep(2)  # let the page load and start its recogniser first
                     minimize_window(hwnd)
             threading.Thread(target=to_background, daemon=True, name="jarvis-minimise").start()
+        if platform.system() == "Windows":
+            threading.Thread(target=window_watchdog, args=(jarvis, profile), daemon=True, name="jarvis-window-watchdog").start()
     if platform.system() == "Windows":
         threading.Thread(target=hotkey_loop, args=(lambda: talk(jarvis),), daemon=True, name="jarvis-hotkey").start()
     overlay = None if args.no_overlay else start_overlay()

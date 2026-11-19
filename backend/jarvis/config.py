@@ -80,7 +80,8 @@ class Settings:
     wake_word: str = "jarvis"
     stt_model: str = "whisper-1"
     listen_on_start: bool = False  # set by the desktop app: run the offline listener (tests and the bare server do not)
-    stt_local_model: str = "small"  # offline listener (listen.py): tiny | base | small | medium
+    stt_local_model: str = "small"  # offline listener (listen.py): the model for Tamil text: tiny | base | small | medium
+    stt_fast_model: str = "base"  # offline listener: hears the language and writes English (fast); same as local = one model
     tts_model: str = "tts-1"
     tts_voice: str = "alloy"
     # Image generation (optional, local): automatic1111 | openai_compat | none
@@ -161,6 +162,7 @@ def load_settings(env_file: Path | None = None) -> Settings:
         embedder=env("JARVIS_EMBEDDER", "hashing"),
         stt_model=env("JARVIS_STT_MODEL", "whisper-1"),
         stt_local_model=env("JARVIS_STT_LOCAL_MODEL", "small"),
+        stt_fast_model=env("JARVIS_STT_FAST_MODEL", "base"),
         tts_model=env("JARVIS_TTS_MODEL", "tts-1"),
         tts_voice=env("JARVIS_TTS_VOICE", "alloy"),
         image_provider=env("JARVIS_IMAGE_PROVIDER", "none"),
