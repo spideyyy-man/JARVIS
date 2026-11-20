@@ -17,6 +17,8 @@ import queue
 import re
 import tempfile
 import threading
+import wave
+from pathlib import Path
 from typing import Callable
 
 TAMIL = re.compile(r"[஀-௿]")
@@ -64,29 +66,95 @@ class SentenceSplitter:
         return out
 
 
-class Speaker:
-    """One worker thread speaks queued text in order; `stop()` silences it at once (barge-in)."""
+def _wav_bytes(samples, sr: int) -> bytes:
+    import io
 
-    def __init__(self, on_state: Callable[[bool], None] | None = None):
-        self.on_state = on_state or (lambda speaking: None)
-        self.rate = 1.0
-        self.speaking = False
-        self._queue: queue.Queue = queue.Queue()
-        self._gen = 0
-        self._voices: dict[str, object] | None = None
-        self._thread: threading.Thread | None = None
-        self._error = ""
+    import numpy as np
 
-    # -- voices ----------------------------------------------------------------------------------------------------
-    @staticmethod
-    def supported() -> bool:
+    pcm = (np.clip(samples, -1, 1) * 32767).astype(np.int16)
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sr)
+        w.writeframes(pcm.tobytes())
+    return buf.getvalue()
+
+
+class PiperEngine:
+    """Neural voice, offline (Piper, ONNX): natural, ~10x faster than real time on the owner's laptop (0.2 s for a
+    short sentence). English only here. The Windows voices sounded robotic (owner, 2026-11-20)."""
+    name = "piper"
+    langs = ("en",)
+
+    def __init__(self, model: Path):
+        self.model, self._voice = Path(model), None
+
+    def available(self) -> bool:
+        import importlib.util
+
+        return self.model.is_file() and importlib.util.find_spec("piper") is not None
+
+    def display(self) -> str:
+        return "Piper " + self.model.stem.split("-")[1] if "-" in self.model.stem else "Piper"
+
+    def wav(self, text: str, lang: str, rate: float) -> bytes:
+        import io
+
+        from piper import PiperVoice, SynthesisConfig
+
+        if self._voice is None:
+            self._voice = PiperVoice.load(str(self.model))
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            self._voice.synthesize_wav(text, w, syn_config=SynthesisConfig(length_scale=1 / max(0.5, min(2.0, rate or 1))))
+        return buf.getvalue()
+
+
+class KokoroEngine:
+    """The most natural offline voice (Kokoro 82M int8), but only about as fast as real time on the owner's laptop
+    (~2 s before a short sentence) and it competes with the language model for the CPU. English only."""
+    name = "kokoro"
+    langs = ("en",)
+
+    def __init__(self, model: Path, voices: Path, voice: str = "af_heart"):
+        self.model, self.voices_file, self.voice, self._k = Path(model), Path(voices), voice, None
+
+    def available(self) -> bool:
+        import importlib.util
+
+        return self.model.is_file() and self.voices_file.is_file() and importlib.util.find_spec("kokoro_onnx") is not None
+
+    def display(self) -> str:
+        return f"Kokoro {self.voice}"
+
+    def wav(self, text: str, lang: str, rate: float) -> bytes:
+        from kokoro_onnx import Kokoro
+
+        if self._k is None:
+            self._k = Kokoro(str(self.model), str(self.voices_file))
+        samples, sr = self._k.create(text, voice=self.voice, speed=max(0.5, min(2.0, rate or 1)),
+                                     lang="en-gb" if self.voice.startswith("b") else "en-us")
+        return _wav_bytes(samples, sr)
+
+
+class WindowsEngine:
+    """Windows' own voices (WinRT SpeechSynthesis): instant, but robotic. Used for languages the neural voice does
+    not speak (a Tamil voice installed in Windows would be picked up here)."""
+    name = "windows"
+
+    def __init__(self):
+        self._voices: dict | None = None
+        self._loop = self._synth = None
+
+    def available(self) -> bool:
         if os.name != "nt":
             return False
         import importlib.util
 
         return importlib.util.find_spec("winrt.windows.media.speechsynthesis") is not None
 
-    def _load_voices(self) -> dict[str, object]:
+    def voices(self) -> dict:
         if self._voices is None:
             from winrt.windows.media.speechsynthesis import SpeechSynthesizer
 
@@ -105,15 +173,83 @@ class Speaker:
             self._voices = {lang: v for lang, v in (("en", pick("en", ("en-in", "en-gb", "en-us"))), ("ta", pick("ta", ("ta-in",)))) if v}
         return self._voices
 
-    def voices(self) -> dict[str, str]:
+    @property
+    def langs(self) -> tuple[str, ...]:
         try:
-            return {lang: v.display_name for lang, v in self._load_voices().items()}
-        except Exception as e:  # noqa: BLE001
-            self._error = str(e)
-            return {}
+            return tuple(self.voices()) if self.available() else ()
+        except Exception:  # noqa: BLE001
+            return ()
+
+    def display(self) -> str:
+        return ", ".join(v.display_name for v in self.voices().values())
+
+    def wav(self, text: str, lang: str, rate: float) -> bytes:
+        from winrt.windows.media.speechsynthesis import SpeechSynthesizer
+        from winrt.windows.storage.streams import DataReader
+
+        if self._synth is None:  # created in the speaking thread that uses it
+            self._loop, self._synth = asyncio.new_event_loop(), SpeechSynthesizer()
+
+        async def run() -> bytes:
+            self._synth.voice = self.voices()[lang]
+            self._synth.options.speaking_rate = max(0.5, min(3.0, float(rate or 1)))
+            stream = await self._synth.synthesize_text_to_stream_async(text)
+            reader = DataReader(stream.get_input_stream_at(0))
+            await reader.load_async(stream.size)
+            buf = bytearray(stream.size)
+            reader.read_bytes(buf)
+            return bytes(buf)
+        return self._loop.run_until_complete(run())
+
+
+def make_engines(choice: str, models_dir: Path, piper_voice: str = "en_US-lessac-medium", kokoro_voice: str = "af_heart") -> list:
+    """The chosen engine first, then Windows' voices for whatever it cannot speak. Missing models are skipped."""
+    tts = Path(models_dir) / "tts"
+    engines = {"piper": PiperEngine(tts / f"{piper_voice}.onnx"),
+               "kokoro": KokoroEngine(tts / "kokoro-v1.0.int8.onnx", tts / "voices-v1.0.bin", kokoro_voice),
+               "windows": WindowsEngine()}
+    order = [choice, "windows"] if choice in engines and choice != "windows" else ["windows"]
+    return [engines[n] for n in order if engines[n].available()]
+
+
+class Speaker:
+    """One worker thread speaks queued text in order; `stop()` silences it at once (barge-in)."""
+
+    def __init__(self, on_state: Callable[[bool], None] | None = None, engines: list | None = None):
+        self.on_state = on_state or (lambda speaking: None)
+        self.rate = 1.0
+        self.speaking = False
+        self._queue: queue.Queue = queue.Queue()
+        self._gen = 0
+        self.engines = engines if engines is not None else [WindowsEngine()]
+        self._thread: threading.Thread | None = None
+        self._error = ""
+
+    def engine_for(self, lang: str):
+        return next((e for e in self.engines if lang in e.langs), None)
+
+    # -- voices ----------------------------------------------------------------------------------------------------
+    @staticmethod
+    def supported() -> bool:
+        """Playback uses winsound (Windows). Which voices exist is decided by make_engines."""
+        return os.name == "nt"
+
+    def voices(self) -> dict[str, str]:
+        out = {}
+        for lang in ("en", "ta"):
+            try:
+                e = self.engine_for(lang)
+                if e:
+                    out[lang] = e.display() if e.name != "windows" else e.voices()[lang].display_name
+            except Exception as ex:  # noqa: BLE001
+                self._error = str(ex)
+        return out
 
     def can_speak(self, lang: str) -> bool:
-        return self.supported() and lang in self.voices()
+        try:
+            return self.engine_for(lang) is not None
+        except Exception:  # noqa: BLE001
+            return False
 
     # -- speaking ---------------------------------------------------------------------------------------------------------
     def say(self, text: str, lang: str | None = None) -> bool:
@@ -180,28 +316,12 @@ class Speaker:
     def _synthesise(self) -> None:
         """Turns queued sentences into WAV files ahead of playback, so the next sentence is ready the moment the
         current one ends (synthesising after each sentence left a ~0.3 s gap between sentences)."""
-        from winrt.windows.media.speechsynthesis import SpeechSynthesizer
-        from winrt.windows.storage.streams import DataReader
-
-        loop = asyncio.new_event_loop()
-        synth = SpeechSynthesizer()
-
-        async def to_wav(text: str, lang: str) -> bytes:
-            synth.voice = self._load_voices()[lang]
-            synth.options.speaking_rate = max(0.5, min(3.0, float(self.rate or 1)))
-            stream = await synth.synthesize_text_to_stream_async(text)
-            reader = DataReader(stream.get_input_stream_at(0))
-            await reader.load_async(stream.size)
-            buf = bytearray(stream.size)
-            reader.read_bytes(buf)
-            return bytes(buf)
-
         while True:
             gen, lang, text = self._queue.get()
             if gen != self._gen:
                 continue
             try:
-                audio = loop.run_until_complete(to_wav(text, lang))
+                audio = self._synth_one(text, lang)
             except Exception as e:  # noqa: BLE001 - one bad sentence must not silence the rest
                 self._error = f"{type(e).__name__}: {e}"
                 continue
@@ -211,6 +331,16 @@ class Speaker:
             with os.fdopen(fd, "wb") as f:
                 f.write(audio)
             self._ready.put((gen, path))
+
+    def _synth_one(self, text: str, lang: str) -> bytes:
+        """With the first engine that speaks `lang`; if a neural engine fails, Windows' voice says it instead."""
+        errors = []
+        for e in [x for x in self.engines if lang in x.langs]:
+            try:
+                return e.wav(text, lang, self.rate)
+            except Exception as ex:  # noqa: BLE001
+                errors.append(f"{e.name}: {type(ex).__name__}: {ex}")
+        raise RuntimeError("; ".join(errors) or f"no voice for {lang}")
 
     def _play(self) -> None:
         import winsound
@@ -256,3 +386,44 @@ def _write_chime() -> str:
         w.setframerate(rate)
         w.writeframes(bytes(out))
     return path
+
+
+PIPER_URL = "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/"
+KOKORO_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/"
+
+
+def download_voices(dest: Path, kokoro: bool = False, log=print) -> bool:
+    """Fetch the Piper voice (~63 MB) - and Kokoro (~115 MB) when asked - into `dest`; resumes, skips what is there."""
+    import httpx
+
+    files = [(PIPER_URL + "en_US-lessac-medium.onnx", "en_US-lessac-medium.onnx"), (PIPER_URL + "en_US-lessac-medium.onnx.json", "en_US-lessac-medium.onnx.json")]
+    if kokoro:
+        files += [(KOKORO_URL + "kokoro-v1.0.int8.onnx", "kokoro-v1.0.int8.onnx"), (KOKORO_URL + "voices-v1.0.bin", "voices-v1.0.bin")]
+    dest.mkdir(parents=True, exist_ok=True)
+    ok = True
+    for url, name in files:
+        path = dest / name
+        if path.is_file() and path.stat().st_size > 0:
+            continue
+        try:
+            with httpx.stream("GET", url, follow_redirects=True, timeout=httpx.Timeout(120, connect=20)) as r:
+                r.raise_for_status()
+                tmp = path.with_suffix(path.suffix + ".part")
+                with open(tmp, "wb") as f:
+                    for chunk in r.iter_bytes(1 << 20):
+                        f.write(chunk)
+                tmp.replace(path)
+            log(f"   {name}: ok")
+        except Exception as e:  # noqa: BLE001
+            ok = False
+            log(f"   {name}: failed ({type(e).__name__})")
+    return ok
+
+
+if __name__ == "__main__":  # python -m jarvis.speak [--kokoro]  -> download the natural voices where JARVIS looks for them
+    import sys
+
+    from .config import load_settings
+
+    s = load_settings()
+    sys.exit(0 if download_voices(s.data_dir / "models" / "tts", kokoro="--kokoro" in sys.argv) else 1)

@@ -394,3 +394,51 @@ def test_a_follow_up_skips_language_detection(tmp_path):
     lst = _listener(tmp_path, detector, english, FakeWhisper("small", "ta", {}, "unused"))
     text, lang, info = lst.transcribe(np.zeros(16000, "float32"), language="en")
     assert (text, lang, info["model"]) == ("And what about Mars?", "en", "base.en")
+
+
+# -- natural voices (2026-11-20: the Windows voices sounded robotic) ----------------------------------------------------------
+class FakeEngine:
+    def __init__(self, name, langs, fail=False):
+        self.name, self.langs, self.fail, self.calls = name, langs, fail, []
+
+    def available(self):
+        return True
+
+    def display(self):
+        return self.name
+
+    def wav(self, text, lang, rate):
+        self.calls.append(text)
+        if self.fail:
+            raise RuntimeError("model broke")
+        return b"RIFF"
+
+
+def test_neural_voice_first_windows_for_the_rest_and_on_failure():
+    from jarvis.speak import Speaker
+
+    piper, windows = FakeEngine("piper", ("en",)), FakeEngine("windows", ("en", "ta"))
+    sp = Speaker(engines=[piper, windows])
+    assert sp.can_speak("en") and sp.can_speak("ta") and not sp.can_speak("hi")
+    assert sp.engine_for("en") is piper and sp.engine_for("ta") is windows
+    assert sp._synth_one("Hello.", "en") == b"RIFF" and piper.calls == ["Hello."] and windows.calls == []
+    piper.fail = True
+    assert sp._synth_one("Again.", "en") == b"RIFF" and windows.calls == ["Again."]  # a broken model never silences JARVIS
+
+
+def test_engine_choice_skips_voices_that_are_not_installed(tmp_path):
+    from jarvis.speak import make_engines
+
+    names = [e.name for e in make_engines("kokoro", tmp_path)]  # no model files in tmp_path
+    assert "kokoro" not in names and "piper" not in names
+
+
+def test_voice_engine_setting_is_validated(jarvis):
+    from fastapi.testclient import TestClient
+
+    from jarvis.api import create_app
+
+    with TestClient(create_app(jarvis)) as c:
+        h = {"Authorization": f"Bearer {jarvis.settings.api_token()}"}
+        assert c.put("/api/settings", json={"voice": {"local_tts": "robot"}}, headers=h).status_code >= 400
+        assert c.put("/api/settings", json={"voice": {"local_tts": "kokoro"}}, headers=h).json()["voice"]["local_tts"] == "kokoro"

@@ -81,6 +81,9 @@ class Settings:
     stt_model: str = "whisper-1"
     listen_on_start: bool = False  # set by the desktop app: run the offline listener (tests and the bare server do not)
     stt_local_model: str = "small"  # offline listener (listen.py): the model for Tamil text: tiny | base | small | medium
+    local_tts: str = "piper"  # voice for spoken replies: piper (natural, fast) | kokoro (most natural, slow here) | windows
+    piper_voice: str = "en_US-lessac-medium"
+    kokoro_voice: str = "af_heart"
     stt_english_model: str = "base.en"  # offline listener: writes English (with JARVIS's vocabulary); "" = use stt_fast_model
     stt_fast_model: str = "base"  # offline listener: hears the language and writes English (fast); same as local = one model
     tts_model: str = "tts-1"
@@ -165,6 +168,8 @@ def load_settings(env_file: Path | None = None) -> Settings:
         stt_local_model=env("JARVIS_STT_LOCAL_MODEL", "small"),
         stt_fast_model=env("JARVIS_STT_FAST_MODEL", "base"),
         stt_english_model=env("JARVIS_STT_ENGLISH_MODEL", "base.en"),
+        local_tts=env("JARVIS_LOCAL_TTS", "piper"), piper_voice=env("JARVIS_PIPER_VOICE", "en_US-lessac-medium"),
+        kokoro_voice=env("JARVIS_KOKORO_VOICE", "af_heart"),
         tts_model=env("JARVIS_TTS_MODEL", "tts-1"),
         tts_voice=env("JARVIS_TTS_VOICE", "alloy"),
         image_provider=env("JARVIS_IMAGE_PROVIDER", "none"),

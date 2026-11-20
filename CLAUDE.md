@@ -108,6 +108,14 @@ Since 2026-11-19 (Edge's online recogniser failed on the laptop with "Speech rec
   "thanks", "that's all", "stop", "bye"... end it (`CONVERSATION_ENDS`). After the wake word the listener skips
   0.4 s (its tail + chime), and a short sound followed by a pause no longer ends the recording (`Endpointer`).
   Tamil replies spoken by the window do not open the window yet.
+- **Natural voice** (2026-11-20; the owner found the Windows voices robotic): spoken replies use Piper
+  (`en_US-lessac-medium`, ONNX, `~/.jarvis/models/tts`, ~10x faster than real time here: first audio ~0.5 s) via
+  `speak.make_engines`; Windows' voices take whatever Piper cannot say (Tamil if a Windows Tamil voice is installed)
+  and any sentence Piper fails on. Kokoro (`kokoro-v1.0.int8.onnx`, most natural) is supported but only ~1x real time
+  on this laptop (~2 s before each sentence, and it competes with the model). Choose with `JARVIS_LOCAL_TTS`
+  (piper | kokoro | windows) or the voice setting `local_tts` (switches live). `python -m jarvis.speak [--kokoro]`
+  downloads the voices (setup.ps1 does Piper). The cloud "voice studio" type services were not used: they need the
+  internet and credits and add network delay to every sentence.
 - **Floating icon** (`overlay.py`, tkinter, its own `pythonw` process started by the desktop app with
   `--parent PID`): a 46 px always-on-top circle, coloured by state; hover (or click to pin) shows a panel from
   `GET /api/overlay` - now/heard/last exchange, approvals with Approve/Deny, activity (`EventBus.activity`,

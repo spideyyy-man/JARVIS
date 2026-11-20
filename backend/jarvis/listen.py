@@ -516,7 +516,10 @@ class VoiceService:
         if self.speaker is None:
             from .speak import Speaker
 
-            self.speaker = Speaker(self._speaking) if Speaker.supported() else None
+            self.speaker = Speaker(self._speaking, self.engines()) if Speaker.supported() else None
+            if self.speaker and self.speaker.engines and self.speaker.engines[0].name != "windows":
+                first = self.speaker.engines[0]  # load the neural voice now, not on the first reply (~2 s)
+                threading.Thread(target=lambda: first.wav("Ready.", "en", 1.0), daemon=True, name="jarvis-voice-warm").start()
         if self.listener is None:
             s = self.app.settings
             self.listener = LocalListener(s.data_dir / "models", self._event, self._utterance, model_size=s.stt_local_model, fast_size=s.stt_fast_model,
@@ -524,6 +527,19 @@ class VoiceService:
             self.listener.keep_samples = self.app.db.get_setting("voice", {}).get("keep_samples", True)
         self.listener.start()
         return True
+
+    def engines(self) -> list:
+        """Voices for spoken replies: the user's choice (voice setting local_tts, else JARVIS_LOCAL_TTS), then Windows'."""
+        from .speak import make_engines
+
+        s = self.app.settings
+        choice = self.app.db.get_setting("voice", {}).get("local_tts") or s.local_tts
+        return make_engines(choice, s.data_dir / "models", s.piper_voice, s.kokoro_voice)
+
+    def set_engine(self) -> None:
+        if self.speaker:
+            self.speaker.stop()
+            self.speaker.engines = self.engines()
 
     def stop(self) -> None:
         if self.speaker:
