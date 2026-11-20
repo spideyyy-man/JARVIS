@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import queue
 import threading
 import time
@@ -26,8 +27,10 @@ import urllib.error
 import urllib.request
 
 from .config import load_settings
+from .orb import COLORS as ORB_COLORS
+from .orb import SIZE, LayeredWindow, OrbState, ease_color, render
 
-ORB = 46
+ORB = SIZE  # the icon window (the orb itself is smaller; the rest is room for its glow)
 PANEL_W = 300
 BAR_W = 250
 KEY = "#010203"  # transparent colour around the circle
@@ -40,7 +43,7 @@ LABELS = {"idle": "Ready", "waiting": "Listening for “Hey Jarvis”", "recordi
 FONT = ("Segoe UI", 9)
 SMALL = ("Segoe UI", 8)
 BOLD = ("Segoe UI Semibold", 9)
-FADE_STEP, FADE_MS, PANEL_ALPHA = 0.16, 15, 0.97
+FADE_STEP, FADE_MS, PANEL_ALPHA = 0.09, 12, 0.97  # ~0.13 s fade
 
 
 def elide(text: str, n: int) -> str:
@@ -72,8 +75,9 @@ def work_area() -> tuple[int, int, int, int] | None:
 class Fader:
     """Fades a Toplevel in and out with its window alpha (Windows supports -alpha on toplevels)."""
 
-    def __init__(self, win: tk.Toplevel, top: float = PANEL_ALPHA):
+    def __init__(self, win: tk.Toplevel, top: float = PANEL_ALPHA, on_step=None):
         self.win, self.top, self.alpha, self.target, self._job = win, top, 0.0, 0.0, None
+        self.on_step = on_step  # called with 0..1 as it fades, to slide the window along with the fade
         try:
             win.attributes("-alpha", 0.0)
         except tk.TclError:
@@ -109,6 +113,8 @@ class Fader:
             self.win.attributes("-alpha", self.alpha)
         except tk.TclError:
             return
+        if self.on_step:
+            self.on_step(self.alpha / self.top)
         if self.alpha != self.target:
             self._job = self.win.after(FADE_MS, self._step)
         elif self.alpha == 0:
@@ -134,14 +140,26 @@ class Overlay:
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
         self.root.configure(bg=KEY)
-        try:
-            self.root.attributes("-transparentcolor", KEY)
-        except tk.TclError:
-            pass
         self.canvas = tk.Canvas(self.root, width=ORB, height=ORB, bg=KEY, highlightthickness=0, cursor="hand2")
         self.canvas.pack()
         x, y = self._start_position()
         self.root.geometry(f"{ORB}x{ORB}+{x}+{y}")
+        self.root.update_idletasks()
+        # The smooth orb (orb.py) on a per-pixel-alpha window; the old flat canvas drawing is the fallback.
+        self.layered = None
+        self.orb = OrbState()
+        try:
+            if os.name == "nt":
+                self.layered = LayeredWindow(int(self.root.wm_frame(), 16))
+        except Exception:  # noqa: BLE001
+            self.layered = None
+        if not self.layered:
+            try:
+                self.root.attributes("-transparentcolor", KEY)
+            except tk.TclError:
+                pass
+        self._last = time.time()
+        self._frame = 0
         self.canvas.bind("<ButtonPress-1>", self._press)
         self.canvas.bind("<B1-Motion>", self._drag)
         self.canvas.bind("<ButtonRelease-1>", self._release)
@@ -217,7 +235,7 @@ class Overlay:
         p.attributes("-topmost", True)
         p.configure(bg=BG, highlightthickness=1, highlightbackground=LINE)
         p.withdraw()
-        self.panel_fade = Fader(p)
+        self.panel_fade = Fader(p, on_step=lambda f: self._place_panel(slide=(1 - f) ** 2 * 18))  # eased slide
 
         head = tk.Frame(p, bg=BG)
         head.pack(fill="x", padx=10, pady=(8, 0))
@@ -288,15 +306,18 @@ class Overlay:
     def _hide_panel(self):
         self.panel_fade.hide()
 
-    def _place_panel(self):
+    def _place_panel(self, slide: float = 0.0):
+        """Beside the orb (left of it, or right near the screen's left edge); `slide` shifts it while it fades in."""
         if not self.panel_fade.shown:
             return
         self.panel.update_idletasks()
         h = self.panel.winfo_reqheight()
         ox, oy = self.root.winfo_x(), self.root.winfo_y()
         ax, ay, aw, ah = self._area()
-        x = ox - PANEL_W - 8 if ox - PANEL_W - 8 >= ax else ox + ORB + 8
-        y = max(ay + 4, min(oy + ORB - h, ay + ah - h - 4))
+        pad = ORB // 2 - 24  # the transparent margin around the visible orb
+        left = ox + pad - PANEL_W - 6
+        x = int(left + slide) if left >= ax else int(ox + ORB - pad + 6 - slide)
+        y = max(ay + 4, min(oy + ORB - pad - h, ay + ah - h - 4))
         self._geometry(self.panel, f"{PANEL_W}x{h}+{x}+{y}")
 
     def _pointer_in(self, w, margin: int = 10) -> bool:
@@ -316,7 +337,7 @@ class Overlay:
         b.attributes("-topmost", True)
         b.configure(bg=BG, highlightthickness=1, highlightbackground=AMBER)
         b.withdraw()
-        self.bar_fade = Fader(b, top=0.98)
+        self.bar_fade = Fader(b, top=0.98, on_step=lambda f: self._place_bar(slide=(1 - f) ** 2 * -10))
         self.bar_title = tk.Label(b, text="", font=BOLD, fg=AMBER, bg=BG, anchor="w")
         self.bar_title.pack(fill="x", padx=8, pady=(6, 0))
         self.bar_text = tk.Label(b, text="", font=SMALL, fg=FG, bg=BG, anchor="w", justify="left", wraplength=BAR_W - 16)
@@ -332,15 +353,17 @@ class Overlay:
         self.current_approval: str | None = None
         self.deciding: set[str] = set()
 
-    def _place_bar(self):
+    def _place_bar(self, slide: float = 0.0):
         if not self.bar_fade.shown:
             return
         self.bar.update_idletasks()
         h = self.bar.winfo_reqheight()
         ox, oy = self.root.winfo_x(), self.root.winfo_y()
         ax, ay, aw, ah = self._area()
+        pad = ORB // 2 - 24
         x = max(ax + 4, min(ox + ORB // 2 - BAR_W // 2, ax + aw - BAR_W - 4))
-        y = oy + ORB + 6 if oy + ORB + 6 + h <= ay + ah else oy - h - 6  # under the circle, or above it near the bottom
+        below = oy + ORB - pad + 4
+        y = int(below + slide) if below + h <= ay + ah else int(oy + pad - h - 4 - slide)  # under the orb, or above it near the bottom
         self._geometry(self.bar, f"{BAR_W}x{h}+{x}+{y}")
 
     def _render_bar(self, approvals: list[dict]):
@@ -413,7 +436,7 @@ class Overlay:
         self._draw()
         self._draw_bar_line()
         self._hover()
-        self.root.after(40, self._tick)
+        self.root.after(16 if self.layered else 40, self._tick)
 
     def _hover(self):
         """Open after a short, deliberate hover; close shortly after the pointer leaves (not while typing)."""
@@ -439,6 +462,8 @@ class Overlay:
             self._hide_panel()
 
     def _draw(self):
+        if self.layered:
+            return self._draw_orb()
         state = self._state()
         color = COLORS.get(state, COLORS["idle"])
         c = self.canvas
@@ -456,6 +481,28 @@ class Overlay:
             c.create_arc(cx - r - 3, cy - r - 3, cx + r + 3, cy + r + 3, start=(-self.phase * 90) % 360, extent=70, style="arc", outline=AMBER, width=3)
         inner = 6 + (2 * abs(math.sin(self.phase * 2.2)) if state in ("recording", "speaking") else 0)
         c.create_oval(cx - inner, cy - inner, cx + inner, cy + inner, fill=color, outline="")
+
+    def _draw_orb(self):
+        """Smooth orb frames: ~30 fps while something is happening, ~15 fps at rest; time-based, so a late frame
+        never makes the motion stutter."""
+        now = time.time()
+        state = self._state()
+        approval = bool(self.data and self.data.get("approvals"))
+        resting = state in ("waiting", "idle", "offline") and not approval
+        if now - self._last < (1 / 15 if resting else 1 / 30):
+            return
+        self.orb.t += min(0.2, now - self._last)
+        self._last = now
+        self.orb.state, self.orb.approval = state, approval
+        self.orb.color = ease_color(self.orb.color, ORB_COLORS.get(state, ORB_COLORS["idle"]), 0.16)
+        try:
+            self.layered.show(render(self.orb))
+        except Exception:  # noqa: BLE001 - fall back to the flat drawing rather than lose the icon
+            self.layered = None
+            try:
+                self.root.attributes("-transparentcolor", KEY)
+            except tk.TclError:
+                pass
 
     def _render(self):
         d = self.data

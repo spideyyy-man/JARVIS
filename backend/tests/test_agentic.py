@@ -242,7 +242,8 @@ def test_flat_mode_does_the_job_in_two_model_calls_instead_of_four(home, tmp_pat
     r = run(j.chat("is my laptop struggling right now?"))
     assert r["text"] == "CPU and memory are fine." and len(llm.seen) == 2
     assert llm.seen[0]["meta"] == {"agent": "assistant"} and "delegate" not in llm.seen[0]["tools"]
-    assert len(llm.seen[0]["tools"]) == j.settings.max_tools and {"system_stats", "list_tools"} <= set(llm.seen[0]["tools"])
+    from jarvis.agents import FLAT_CORE
+    assert llm.seen[0]["tools"] == [n for n in FLAT_CORE if j.tools.get(n)]  # exactly the fixed list: the prompt stays cached
     assert j.db.one("SELECT COUNT(*) AS n FROM tasks")["n"] == 1  # no sub-agents
 
     j.settings.agent_mode = "team"

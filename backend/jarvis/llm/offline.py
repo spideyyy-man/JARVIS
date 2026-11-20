@@ -142,13 +142,16 @@ def R(agent: str, pattern: str, build, whole: bool = False) -> Rule:
 
 # -- per-request context for local models ---------------------------------------------------------------------
 # A local model's system prompt is kept identical between requests so the model server can reuse it; the time and
-# recalled memories are put in front of the user's words instead. The rule engine strips them again.
-_CONTEXT = re.compile(r"^<context>\n.*?\n</context>\n\n", re.S)
+# recalled memories travel with the user's words instead - AFTER them, so the next request (whose history holds the
+# plain words) still matches what the server already processed up to the end of those words. With the block in front,
+# the whole conversation history was re-read on every turn (~200 tokens, ~15 s on the owner's busy laptop, 2026-11-20).
+# The rule engine strips the block again.
+_CONTEXT = re.compile(r"^<context>\n.*?\n</context>\n\n|\n\n<context>\n.*?\n</context>$", re.S)
 
 
 def with_context(task: str, note: str = "") -> str:
     lines = [f"Current time: {time.strftime('%A %Y-%m-%d %H:%M')}."] + ([note] if note else [])
-    return "<context>\n" + "\n\n".join(lines) + "\n</context>\n\n" + task
+    return task + "\n\n<context>\n" + "\n\n".join(lines) + "\n</context>"
 
 
 def strip_context(text: str) -> str:
@@ -261,6 +264,13 @@ FAST_TALK: list[tuple[re.Pattern, Callable[[], str]]] = [(re.compile(p, re.I), f
     (r"^(?:hi|hello|hey|good (?:morning|afternoon|evening))(?: there| jarvis)?" + _END, lambda: "Hello! What can I do for you?"),
     (r"^(?:thanks|thank you)(?: so much| very much| a lot)?(?: jarvis)?" + _END, lambda: "You're welcome."),
     (r"^(?:who are you|what(?:'s| is) your name|what are you)" + _END, lambda: "I'm JARVIS, your personal assistant on this computer."),
+    # small talk said to a voice assistant all the time - not worth 30 s of a local model (2026-11-20)
+    (r"^(?:what are you doing(?: now| right now)?|what(?:'s| is) up|are you (?:there|listening|awake)|can you hear me|you there)" + _END,
+     lambda: "I'm here and listening. What can I do for you?"),
+    (r"^(?:how are you(?: doing| today)?|how(?:'s| is) it going)(?: jarvis)?" + _END, lambda: "I'm doing well, thanks. What can I do for you?"),
+    (r"^(?:(?:can you )?say something|talk to me|testing(?: testing)?(?: 1 2 3| one two three)?|test)" + _END,
+     lambda: "I'm here. Ask me anything, or tell me what to do."),
+    (r"^(?:never ?mind|forget it|cancel that|that'?s all|nothing)" + _END, lambda: "Okay."),
     (r"^(?:இப்போ\S*\s*)?(?:(?:நேரம்|மணி|டைம்)\s*(?:இப்போ\S*\s*)?(?:என்ன|எவ்வளவு|ஆச்சு|ஆகுது|ஆகிறது|சொல்லு)\S*(?:\s+(?:ஆச்சு|ஆகுது|ஆகிறது|சொல்லு|சொல்லுங்க))?|என்ன\s*(?:நேரம்|டைம்)\S*)" + _END, _ta_time),
     (r"^(?:இன்று|இன்னைக்கு|இன்றைக்கு)?\s*(?:என்ன\s*(?:நாள்|கிழமை|தேதி)|(?:தேதி|கிழமை)\s*(?:என்ன|எது|சொல்லு))\S*" + _END, _ta_date),
     (r"^(?:ஹாய்|ஹலோ|வணக்கம்)(?:\s*(?:ஜார்விஸ்|jarvis))?" + _END, lambda: "வணக்கம்! நான் என்ன செய்ய வேண்டும்?"),

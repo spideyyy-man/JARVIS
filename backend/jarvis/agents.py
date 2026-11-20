@@ -112,7 +112,8 @@ AGENTS: dict[str, AgentSpec] = {a.name: a for a in [
 # start of the tool list are identical on every request. Ollama then reuses the prompt it already processed instead
 # of re-reading ~1000 tokens (measured on the owner's laptop: 21 s -> 1.1 s). Simple commands never reach the model -
 # the fast path handles them - so the core covers what the model is actually asked to do.
-FLAT_CORE = ["list_tools", "web_search", "fetch_url", "open_application", "open_url", "search_files", "list_dir", "read_file", "remember", "add_dev_task"]
+FLAT_CORE = ["list_tools", "web_search", "fetch_url", "open_application", "open_url", "search_files", "list_dir", "read_file", "remember", "add_dev_task",
+             "system_stats"]  # fixed: request-specific tools are added only for a clear reason (flat_extras)
 # (recall left the core for open_url on 2026-11-20: recalled memories already travel in every request's <context>.)
 
 
@@ -140,7 +141,7 @@ def flat_system(app: "Jarvis") -> str:
     """The flat agent's system prompt for a local model. Must not change between requests (see FLAT_CORE)."""
     return (f"{AGENTS['assistant'].prompt}\n{COMMON_RULES}\n\nHome folder: {app.settings.allowed_roots[0]}. "
             f"Desktop: {desktop_folder(app.settings.allowed_roots[0])}. "
-            "The user's message may begin with a <context> block (current time, things you remember about the user); "
+            "The user's message may end with a <context> block (current time, things you remember about the user); "
             "use it when it is relevant and never mention the block itself.")
 
 
@@ -170,19 +171,15 @@ def file_action_tools(task: str) -> set[str]:
 
 
 def flat_extras(task: str, tools: list, core: list, embedder, hinted: set[str], limit: int) -> list:
-    """Request-specific tools added after the core: the rule engine's pick, file actions the request clearly asks for
-    (file_action_tools), then read-only tools the request shares words with. A plain question matches none of these,
-    so its prompt is exactly the cached one. Tools that change something are never added on shared words alone:
-    "write a two line poem" made the small model call write_file (measured on the owner's laptop)."""
+    """Request-specific tools added after the core - only for a clear reason: the rule engine recognised the request,
+    or it asks to change a named file (file_action_tools). Anything else keeps exactly the core, so the prompt stays
+    cached across a whole conversation: the tool list sits before the history, and tools picked on shared words
+    ("fun fact about the moon" -> github_repo_info) changed it from turn to turn and made every turn re-read the history
+    (~20 s instead of ~4 s to the first word, measured 2026-11-20). Other tools are found through list_tools."""
     core_names = {t.name for t in core}
     rest = [t for t in tools if t.name not in core_names]
     picked = {t.name for t in rest if t.name in hinted | file_action_tools(task)}
-    for t, overlap in rank_tools(task, [t for t in rest if t.level == Level.READ], embedder):
-        if len(picked) >= limit:
-            break
-        if overlap:
-            picked.add(t.name)
-    return [t for t in rest if t.name in picked]
+    return [t for t in rest if t.name in picked][:max(limit, 3)]
 
 
 async def warm_local_model(app: "Jarvis") -> dict | None:

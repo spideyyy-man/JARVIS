@@ -301,3 +301,21 @@ def test_no_access_excuse_gets_sent_to_the_web(home, tmp_path):
     assert "Call web_search" in llm.seen[1]["messages"][-1]["content"]
     assert [t["tool"] for t in r["tools"]] == ["web_search"]
     j.db.close()
+
+
+# -- the smooth orb --------------------------------------------------------------------------------------------------------
+def test_orb_frames_are_smooth_transparent_images_for_every_state():
+    from jarvis.orb import COLORS, SIZE, OrbState, ease_color, render
+
+    for state in COLORS:
+        for approval in (False, True):
+            img = render(OrbState(state=state, t=0.37, color=COLORS[state], approval=approval))
+            assert img.size == (SIZE, SIZE) and img.mode == "RGBA"
+            assert img.getpixel((0, 0))[3] == 0  # corners are see-through (clicks pass through them too)
+            assert img.getpixel((SIZE // 2, SIZE // 2))[3] > 100  # the orb itself is solid
+            edge = [img.getpixel((SIZE // 2 + 21 + d, SIZE // 2))[3] for d in range(-1, 3)]
+            assert len(set(edge)) > 1  # soft, anti-aliased edge - not a hard step
+    c = COLORS["waiting"]
+    for _ in range(40):
+        c = ease_color(c, COLORS["thinking"], 0.16)
+    assert all(abs(a - b) < 2 for a, b in zip(c, COLORS["thinking"]))  # colours ease into the new state

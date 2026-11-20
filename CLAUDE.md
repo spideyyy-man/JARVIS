@@ -87,6 +87,18 @@ Since 2026-11-19 (Edge's online recogniser failed on the laptop with "Speech rec
     `browser_open` stays for reading pages / local files. `open_application` finds Store apps (`Get-StartApps`, cached),
     strips "which is already open"-style tails (`clean_app_name`), and switches to an already-open window.
   - A new user message cancels the answer still running in that conversation (no more two contradicting replies).
+- **Speed, VAD, speech output, orb** (2026-11-20, measured with `prompt/cached/output` token usage now recorded per
+  model call in `LLMResponse.usage`): follow-up turns went from 15-22 s to ~4 s to the first word (31-100 s -> 10-13 s
+  total) because (1) the `<context>` block now goes AFTER the user's words, (2) the local model gets a FIXED tool list
+  (`FLAT_CORE` + system_stats; extras only for a rule-engine hint or a named-file action) - per-request tools changed
+  the tools block, which sits before the history, and broke the cache every turn; (3) spoken requests ask for at most
+  two sentences; (4) `jarvis-model` runs with `num_thread 8` (~40% faster than 4 on the busy laptop; setup.ps1 too).
+  Small talk ("what are you doing", "can you hear me", "how are you") is answered instantly by `fast_talk`.
+  End of speech uses the Silero detector shipped with openWakeWord (0.5 s pause, hysteresis 0.5/0.35); loudness is the
+  fallback. Speech output synthesises the next sentence while the current one plays (gaps ~0.3 s -> 0.02-0.06 s).
+  The orb (`orb.py`) is rendered with Pillow at 2x with real blur and shown on a per-pixel-alpha layered window
+  (UpdateLayeredWindow; transparent pixels click through), ~30 fps active / 15 fps at rest, 2-5 ms per frame thanks
+  to cached glow levels and pre-rotated arc sprites; the panel and approval bar slide while they fade.
 - **Floating icon** (`overlay.py`, tkinter, its own `pythonw` process started by the desktop app with
   `--parent PID`): a 46 px always-on-top circle, coloured by state; hover (or click to pin) shows a panel from
   `GET /api/overlay` - now/heard/last exchange, approvals with Approve/Deny, activity (`EventBus.activity`,

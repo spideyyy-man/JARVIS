@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 
 import httpx
 
@@ -178,7 +179,7 @@ class OpenAICompatProvider:
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(600, connect=10), transport=self.transport) as client:
                 if self.stream:
-                    resp = await self._streamed(client, url, {**body, "stream": True}, headers, on_text)
+                    resp = await self._streamed(client, url, {**body, "stream": True, "stream_options": {"include_usage": True}}, headers, on_text)
                     if resp.text or resp.tool_calls:
                         return resp
                     # Nothing came back. Some servers silently drop tool calls when streaming: ask again in one piece.
@@ -191,9 +192,9 @@ class OpenAICompatProvider:
         text = _strip_think(msg.get("content") or "")
         if text and on_text:
             on_text(text)
-        return LLMResponse(text=text, tool_calls=calls, provider=self.name, model=self.model)
+        return LLMResponse(text=text, tool_calls=calls, provider=self.name, model=self.model, usage=_usage(r.json().get("usage")))
 
-    def _raise_for_status(self, status: int, text: str) -> None:
+    def _raise_for_status(self, status: int, text: str) -> None:  # noqa: D401
         if status >= 400:
             raise LLMError(f"{self.base_url} returned {status}: {text[:200]}", retryable=status in (408, 429) or status >= 500)
 
@@ -209,7 +210,8 @@ class OpenAICompatProvider:
             return raw
 
     async def _streamed(self, client, url, body, headers, on_text) -> LLMResponse:
-        text, slots, shown = "", {}, 0
+        text, slots, shown, usage = "", {}, 0, {}
+        t0, first = time.time(), None
         async with client.stream("POST", url, json=body, headers=headers) as r:
             if r.status_code >= 400:
                 self._raise_for_status(r.status_code, (await r.aread()).decode(errors="replace"))
@@ -220,13 +222,18 @@ class OpenAICompatProvider:
                 if data == "[DONE]":
                     break
                 try:
-                    choices = json.loads(data).get("choices") or []
+                    chunk = json.loads(data)
                 except ValueError:
                     continue
+                if chunk.get("usage"):
+                    usage = chunk["usage"]
+                choices = chunk.get("choices") or []
                 if not choices:
                     continue
                 delta = choices[0].get("delta") or {}
                 piece = delta.get("content") or ""
+                if piece or delta.get("tool_calls"):
+                    first = first or time.time()
                 if piece:
                     text += piece
                     # Private working in <think>...</think> (reasoning models; local models also work Tamil answers out
@@ -243,4 +250,13 @@ class OpenAICompatProvider:
                     args = fn.get("arguments")
                     slot["args"] += args if isinstance(args, str) else (json.dumps(args) if args else "")
         calls = [ToolCall(s["id"] or f"call_{i}", s["name"], self._args(s["args"])) for i, s in sorted(slots.items()) if s["name"]]
-        return LLMResponse(text=_strip_think(text), tool_calls=calls, provider=self.name, model=self.model)
+        out = _usage(usage)
+        out.update(seconds=round(time.time() - t0, 1), first_token=round(first - t0, 1) if first else None)
+        return LLMResponse(text=_strip_think(text), tool_calls=calls, provider=self.name, model=self.model, usage=out)
+
+
+def _usage(u: dict | None) -> dict:
+    """Token counts from an OpenAI-style usage block: prompt, how much of it came from the server's cache, answer."""
+    u = u or {}
+    return {k: v for k, v in {"prompt": u.get("prompt_tokens"), "cached": (u.get("prompt_tokens_details") or {}).get("cached_tokens"),
+                               "output": u.get("completion_tokens")}.items() if v is not None}

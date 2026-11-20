@@ -144,11 +144,12 @@ class Speaker:
     def stop(self) -> None:
         """Barge-in: drop everything queued and cut the sentence being spoken."""
         self._gen += 1
-        try:
-            while True:
-                self._queue.get_nowait()
-        except queue.Empty:
-            pass
+        for q in (self._queue, getattr(self, "_ready", None)):
+            try:
+                while q is not None:
+                    q.get_nowait()
+            except queue.Empty:
+                pass
         try:
             import winsound
 
@@ -158,8 +159,10 @@ class Speaker:
 
     def _ensure_thread(self) -> None:
         if not (self._thread and self._thread.is_alive()):
-            self._thread = threading.Thread(target=self._run, daemon=True, name="jarvis-speaker")
+            self._ready: queue.Queue = queue.Queue(maxsize=3)  # synthesised sentences waiting to be played
+            self._thread = threading.Thread(target=self._synthesise, daemon=True, name="jarvis-speaker")
             self._thread.start()
+            threading.Thread(target=self._play, daemon=True, name="jarvis-speaker-play").start()
 
     def _set(self, speaking: bool) -> None:
         if speaking != self.speaking:
@@ -169,9 +172,9 @@ class Speaker:
             except Exception:  # noqa: BLE001
                 pass
 
-    def _run(self) -> None:
-        import winsound
-
+    def _synthesise(self) -> None:
+        """Turns queued sentences into WAV files ahead of playback, so the next sentence is ready the moment the
+        current one ends (synthesising after each sentence left a ~0.3 s gap between sentences)."""
         from winrt.windows.media.speechsynthesis import SpeechSynthesizer
         from winrt.windows.storage.streams import DataReader
 
@@ -189,33 +192,44 @@ class Speaker:
             return bytes(buf)
 
         while True:
-            try:
-                gen, lang, text = self._queue.get(timeout=0.3)
-            except queue.Empty:
-                self._set(False)
-                continue
+            gen, lang, text = self._queue.get()
             if gen != self._gen:
                 continue
             try:
                 audio = loop.run_until_complete(to_wav(text, lang))
-                if gen != self._gen:
-                    continue
-                fd, path = tempfile.mkstemp(prefix="jarvis-say-", suffix=".wav")
-                with os.fdopen(fd, "wb") as f:
-                    f.write(audio)
-                self._set(True)
-                try:
-                    winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_NODEFAULT)  # blocks; stop() cuts it
-                finally:
-                    try:
-                        os.remove(path)
-                    except OSError:
-                        pass
             except Exception as e:  # noqa: BLE001 - one bad sentence must not silence the rest
                 self._error = f"{type(e).__name__}: {e}"
-            if self._queue.empty():
-                self._set(False)
+                continue
+            if gen != self._gen:
+                continue
+            fd, path = tempfile.mkstemp(prefix="jarvis-say-", suffix=".wav")
+            with os.fdopen(fd, "wb") as f:
+                f.write(audio)
+            self._ready.put((gen, path))
 
+    def _play(self) -> None:
+        import winsound
+
+        while True:
+            try:
+                gen, path = self._ready.get(timeout=0.3)
+            except queue.Empty:
+                if self._queue.empty():
+                    self._set(False)
+                continue
+            try:
+                if gen == self._gen:
+                    self._set(True)
+                    winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_NODEFAULT)  # blocks; stop() cuts it
+            except Exception as e:  # noqa: BLE001
+                self._error = f"{type(e).__name__}: {e}"
+            finally:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            if self._queue.empty() and self._ready.empty():
+                self._set(False)
 
 
 def _write_chime() -> str:

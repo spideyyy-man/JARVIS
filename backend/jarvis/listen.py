@@ -35,7 +35,9 @@ FAST_TEXT_LANGUAGES = {"en"}
 # still comes out empty (no invented words).
 VOCABULARY = ("JARVIS, what time is it? Open Notepad, Claude, Chrome, Google, YouTube. Create a file, a folder, on my Desktop, "
               "Documents, Downloads. index.html, notes.txt, hi.txt. Search the web. Volume, brightness. Remind me. Delete, rename, move.")
-KEEP_SAMPLES = 30  # the last utterances are kept (only on this computer) to tune recognition on the user's real voice  # languages whose text the fast model writes well enough (its Tamil was poor)
+VAD_START, VAD_STAY = 0.5, 0.35  # speech probability to start talking / to keep counting as talking
+SPEECH_END_VAD = 0.5  # s of non-speech that ends an utterance with the speech detector (0.7 s with loudness only)
+KEEP_SAMPLES = 30  # the last utterances are kept (only on this computer) to tune recognition on the user's real voice
 FRAME = 1280  # 80 ms: what openWakeWord expects per call
 FRAME_S = FRAME / RATE
 
@@ -64,9 +66,13 @@ class Endpointer:
         return max(self.noise * 2.5, 250.0)
 
     def feed(self, rms: float) -> str:
+        """Loudness-based (the fallback when the speech detector is unavailable): see feed_speech."""
+        return self.feed_speech(rms >= self.threshold)
+
+    def feed_speech(self, is_speech: bool) -> str:
         """'wait' (nothing said yet), 'speech', 'done' (finished talking), 'timeout' (never started)."""
         self.elapsed += FRAME_S
-        if rms >= self.threshold:
+        if is_speech:
             self.speech += FRAME_S
             self.silence = 0.0
             if self.speech >= 0.16:
@@ -230,6 +236,12 @@ class LocalListener:
             threading.Thread(target=self._load_whisper, daemon=True, name="jarvis-whisper-load").start()
             openwakeword.utils.download_models(["hey_jarvis"])  # ~6 MB once; no-op when present
             wake = Model(wakeword_models=["hey_jarvis"], inference_framework="onnx")
+            try:  # Silero speech detector (shipped with openWakeWord): tells speech from fans, typing and music
+                from openwakeword.vad import VAD
+
+                vad = VAD()
+            except Exception:  # noqa: BLE001 - fall back to loudness
+                vad = None
         except Exception as e:  # noqa: BLE001
             self.error = f"could not start: {e}"
             self._set("error", error=self.error)
@@ -241,7 +253,8 @@ class LocalListener:
             except queue.Full:  # the processing thread is behind (CPU busy): drop audio rather than lag further
                 pass
 
-        endpoint = Endpointer()
+        endpoint = Endpointer(end_silence=SPEECH_END_VAD if vad else 0.7)
+        speaking = False
         try:
             stream = sd.InputStream(samplerate=RATE, channels=1, dtype="int16", blocksize=FRAME, callback=callback)
             stream.start()
@@ -270,6 +283,9 @@ class LocalListener:
                         self._listen_now.clear()
                         wake.reset()
                         endpoint.reset()
+                        speaking = False
+                        if vad:
+                            vad.reset_states()
                         recording = []
                         skip = CHIME_FRAMES  # the "I'm listening" chime is playing: neither speech nor silence
                         self._set("recording", trigger="hotkey" if by_hotkey else "wake word", score=round(float(score), 2))
@@ -280,7 +296,12 @@ class LocalListener:
                         skip -= 1
                         continue
                     recording.append(frame)
-                    verdict = endpoint.feed(rms)
+                    if vad:
+                        prob = vad.predict(frame, frame_size=640)
+                        speaking = prob >= (VAD_STAY if speaking else VAD_START)  # hysteresis: no flicker inside words
+                        verdict = endpoint.feed_speech(speaking)
+                    else:
+                        verdict = endpoint.feed(rms)
                     if verdict == "timeout":
                         self.last = {"heard": "", "note": "nothing said", "at": time.time()}
                         self._set("waiting", note="nothing said")

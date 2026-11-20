@@ -256,6 +256,8 @@ class Jarvis:
         memories = self.memory.recall(text, k=4)
         if memories:
             notes.append("Long-term memory relevant to this request:\n" + "\n".join(f"- {m['content']}" for m in memories))
+        if source == "voice":  # every extra word is ~0.3 s of a local model on a busy laptop, and it is read aloud
+            notes.append("This request was spoken and the reply is read aloud: answer in at most two short sentences.")
         project = self.db.get_setting("default_project", "")
         if project:
             notes.append(f"The user's current project directory is {project}.")

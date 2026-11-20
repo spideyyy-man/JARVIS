@@ -101,7 +101,7 @@ def test_english_replies_are_short_enough_to_speak():
 
 def test_rule_engine_ignores_the_context_block_a_local_model_gets():
     wrapped = with_context("open notepad", "Long-term memory relevant to this request:\n- The user likes tea")
-    assert wrapped.startswith("<context>\nCurrent time: ") and wrapped.endswith("\n\nopen notepad")
+    assert wrapped.startswith("open notepad\n\n<context>\nCurrent time: ") and wrapped.endswith("</context>")
     assert strip_context(wrapped) == "open notepad"
     resp = run(OfflineProvider(ENV).complete("", [{"role": "user", "content": wrapped}], [{"name": "open_application"}], meta={"agent": "assistant"}))
     assert resp.tool_calls[0].name == "open_application" and resp.tool_calls[0].args == {"name": "notepad"}
@@ -156,7 +156,7 @@ def test_local_model_gets_the_same_prompt_start_every_time(home, tmp_path):
             assert s["tools"][: len(core)] == core, s["tools"]
         assert llm.seen[0]["tools"] == core, "a plain question adds no request-specific tools"
         user = llm.seen[0]["messages"][-1]["content"]
-        assert user.startswith("<context>\nCurrent time: ") and user.endswith("what is the capital of France?")
+        assert user.startswith("what is the capital of France?\n\n<context>\nCurrent time: ")  # words first: history stays cached
         run(j.chat("what is my favourite city?"))
         assert "favourite city is Paris" in llm.seen[-1]["messages"][-1]["content"]  # recalled memory travels with the request
         assert llm.seen[-1]["system"] == flat_system(j)
@@ -284,9 +284,9 @@ def test_tamil_request_goes_through_english_and_only_the_tamil_reply_is_shown(ho
     try:
         r = run(j.chat("இந்தியாவின் தலைநகரம் எது?"))
         assert r["text"] == "இந்தியாவின் தலைநகரம் புது தில்லி."
-        assert llm.seen[0]["messages"][-1]["content"].endswith(j.TO_ENGLISH + "இந்தியாவின் தலைநகரம் எது?")
+        assert llm.seen[0]["messages"][-1]["content"].startswith(j.TO_ENGLISH + "இந்தியாவின் தலைநகரம் எது?")
         assert llm.seen[0]["system"] == llm.seen[1]["system"]  # same cached prefix for reading and answering
-        assert llm.seen[1]["messages"][-1]["content"].endswith("What is the capital of India?")  # the model works in English
+        assert llm.seen[1]["messages"][-1]["content"].startswith("What is the capital of India?")  # the model works in English
         assert j.translator.calls == [("en", "ta", "The capital of India is New Delhi.")]
         assert deltas == ["இந்தியாவின் தலைநகரம் புது தில்லி."]  # the English answer is never streamed (shown/spoken)
         assert r["via_english"] == {"language": "ta", "request": "What is the capital of India?", "reply": "The capital of India is New Delhi."}
@@ -328,7 +328,7 @@ def test_reading_falls_back_to_the_translation_model_when_the_chat_model_does_no
     j.translator = FakeTranslator({"ஒரு வாரத்தில் எத்தனை நாட்கள்?": "How many days in a week?", "Seven.": "ஏழு."})
     try:
         r = run(j.chat("ஒரு வாரத்தில் எத்தனை நாட்கள்?"))
-        assert r["text"] == "ஏழு." and llm.seen[1]["messages"][-1]["content"].endswith("How many days in a week?")
+        assert r["text"] == "ஏழு." and llm.seen[1]["messages"][-1]["content"].startswith("How many days in a week?")
         assert ("ta", "en", "ஒரு வாரத்தில் எத்தனை நாட்கள்?") in j.translator.calls
     finally:
         j.db.close()
