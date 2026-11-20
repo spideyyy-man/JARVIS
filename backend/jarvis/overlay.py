@@ -5,7 +5,7 @@
 The circle's colour shows the state (cyan ready, green listening, amber thinking, orange working, blue speaking, red
 error, grey when JARVIS is not reachable).
 - Hover (or click to keep it open): a compact panel that fades in - one status line, the last request and reply,
-  a "Last 5" drop-down, a command box, and Talk / Window / Self-test.
+  a "Last 5" drop-down, a command box, and Talk / Window.
 - An action waiting for approval shows by itself, without hovering: a small bar under the circle with what it is,
   a moving progress line, and Allow / Deny.
 Drag the circle to move it; the position is remembered.
@@ -36,10 +36,10 @@ BAR_W = 250
 KEY = "#010203"  # transparent colour around the circle
 BG, CARD, FG, MUTED, LINE, ACCENT, AMBER = "#0b1220", "#131c30", "#e2e8f0", "#8b98ad", "#1f2a44", "#22d3ee", "#f59e0b"
 COLORS = {"idle": "#22d3ee", "waiting": "#22d3ee", "listening": "#22c55e", "recording": "#22c55e", "transcribing": "#a3e635",
-          "thinking": "#f59e0b", "executing": "#fb923c", "speaking": "#60a5fa", "error": "#ef4444", "offline": "#64748b", "loading": "#94a3b8"}
+          "thinking": "#f59e0b", "executing": "#fb923c", "speaking": "#60a5fa", "error": "#ef4444", "offline": "#64748b", "loading": "#94a3b8", "following": "#4ade80"}
 LABELS = {"idle": "Ready", "waiting": "Listening for “Hey Jarvis”", "recording": "Listening…", "transcribing": "Understanding…",
           "thinking": "Thinking…", "executing": "Working…", "speaking": "Speaking", "error": "Something went wrong", "offline": "Not running",
-          "loading": "Loading speech model…", "listening": "Listening…"}
+          "loading": "Loading speech model…", "listening": "Listening…", "following": "Listening — just keep talking"}
 FONT = ("Segoe UI", 9)
 SMALL = ("Segoe UI", 8)
 BOLD = ("Segoe UI Semibold", 9)
@@ -119,6 +119,74 @@ class Fader:
             self._job = self.win.after(FADE_MS, self._step)
         elif self.alpha == 0:
             self.win.withdraw()
+
+
+def rounded_image(w: int, h: int, r: int, fill: str, bg: str):
+    """An anti-aliased rounded rectangle (Tk's own canvas shapes have jagged corners), drawn at 3x and scaled down."""
+    from PIL import Image, ImageDraw, ImageTk
+
+    s = 3
+    img = Image.new("RGB", (max(1, w) * s, max(1, h) * s), bg)
+    ImageDraw.Draw(img).rounded_rectangle((0, 0, w * s - 1, h * s - 1), radius=r * s, fill=fill)
+    return ImageTk.PhotoImage(img.resize((max(1, w), max(1, h)), Image.LANCZOS))
+
+
+class Pill(tk.Canvas):
+    """A rounded button: text on an anti-aliased pill, lighter while hovered."""
+
+    def __init__(self, parent, text: str, cmd, bg: str = "#1e293b", fg: str = FG, font=SMALL, padx: int = 10, pady: int = 4):
+        import tkinter.font as tkfont
+
+        f = tkfont.Font(font=font)
+        w, h = f.measure(text) + 2 * padx, f.metrics("linespace") + 2 * pady
+        parent_bg = parent.cget("bg")
+        super().__init__(parent, width=w, height=h, bg=parent_bg, highlightthickness=0, bd=0, cursor="hand2")
+        self._imgs = (rounded_image(w, h, h // 2, bg, parent_bg), rounded_image(w, h, h // 2, _lighter(bg), parent_bg))
+        self._bgitem = self.create_image(0, 0, image=self._imgs[0], anchor="nw")
+        self.create_text(w // 2, h // 2, text=text, fill=fg, font=font)
+        self.bind("<Button-1>", lambda _e: cmd())
+        self.bind("<Enter>", lambda _e: self.itemconfigure(self._bgitem, image=self._imgs[1]))
+        self.bind("<Leave>", lambda _e: self.itemconfigure(self._bgitem, image=self._imgs[0]))
+
+
+class RoundBox(tk.Canvas):
+    """A rounded card holding other widgets (in `.inner`); it follows the height of what it holds."""
+
+    def __init__(self, parent, width: int, fill: str = CARD, radius: int = 10, pad: int = 8):
+        parent_bg = parent.cget("bg")
+        super().__init__(parent, width=width, height=2 * pad, bg=parent_bg, highlightthickness=0, bd=0)
+        self.w, self.fill, self.radius, self.pad, self.parent_bg, self._size = width, fill, radius, pad, parent_bg, None
+        self._bg = self.create_image(0, 0, anchor="nw")
+        self.inner = tk.Frame(self, bg=fill)
+        self.create_window(pad, pad, window=self.inner, anchor="nw", width=width - 2 * pad)
+        self.inner.bind("<Configure>", lambda _e: self._fit())
+
+    def _fit(self):
+        h = self.inner.winfo_reqheight() + 2 * self.pad
+        if self._size != h:
+            self._size = h
+            self._img = rounded_image(self.w, h, self.radius, self.fill, self.parent_bg)
+            self.itemconfigure(self._bg, image=self._img)
+            self.configure(height=h)
+
+
+def round_window(win: tk.Toplevel, border: str) -> None:
+    """Windows 11 rounds the window's corners and draws a thin coloured border (no-op elsewhere)."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+
+        win.update_idletasks()
+        hwnd = int(win.wm_frame(), 16)
+        dwm = ctypes.windll.dwmapi
+        pref = ctypes.c_int(2)  # DWMWCP_ROUND
+        dwm.DwmSetWindowAttribute(ctypes.c_void_p(hwnd), 33, ctypes.byref(pref), 4)  # DWMWA_WINDOW_CORNER_PREFERENCE
+        r, g, b = (int(border[i:i + 2], 16) for i in (1, 3, 5))
+        color = ctypes.c_uint(r | (g << 8) | (b << 16))  # COLORREF
+        dwm.DwmSetWindowAttribute(ctypes.c_void_p(hwnd), 34, ctypes.byref(color), 4)  # DWMWA_BORDER_COLOR
+    except Exception:  # noqa: BLE001 - square corners are fine
+        pass
 
 
 class Overlay:
@@ -221,20 +289,17 @@ class Overlay:
             self._texts[key] = text
             widget.configure(text=text, **extra)
 
-    def _button(self, parent, text: str, cmd, bg: str = "#1e293b", fg: str = FG, font=SMALL) -> tk.Label:
-        b = tk.Label(parent, text=text, font=font, bg=bg, fg=fg, padx=8, pady=2, cursor="hand2")
-        b.bind("<Button-1>", lambda _e: cmd())
-        b.bind("<Enter>", lambda _e: b.configure(bg=_lighter(bg)))
-        b.bind("<Leave>", lambda _e: b.configure(bg=bg))
-        return b
+    def _button(self, parent, text: str, cmd, bg: str = "#1e293b", fg: str = FG, font=SMALL) -> Pill:
+        return Pill(parent, text, cmd, bg=bg, fg=fg, font=font)
 
     # -- the hover panel ----------------------------------------------------------------------------------------------------
     def _build_panel(self):
         p = self.panel = tk.Toplevel(self.root)
         p.overrideredirect(True)
         p.attributes("-topmost", True)
-        p.configure(bg=BG, highlightthickness=1, highlightbackground=LINE)
+        p.configure(bg=BG, highlightthickness=0)
         p.withdraw()
+        round_window(p, LINE)
         self.panel_fade = Fader(p, on_step=lambda f: self._place_panel(slide=(1 - f) ** 2 * 18))  # eased slide
 
         head = tk.Frame(p, bg=BG)
@@ -249,11 +314,11 @@ class Overlay:
         self.meta = tk.Label(p, text="", font=SMALL, fg=MUTED, bg=BG, anchor="w")
         self.meta.pack(fill="x", padx=10)
 
-        card = tk.Frame(p, bg=CARD, padx=8, pady=6)
-        card.pack(fill="x", padx=10, pady=(6, 0))
-        self.you = tk.Label(card, text="", font=SMALL, fg=MUTED, bg=CARD, anchor="w", justify="left")
+        card = RoundBox(p, PANEL_W - 20, fill=CARD, radius=10, pad=9)
+        card.pack(padx=10, pady=(6, 0))
+        self.you = tk.Label(card.inner, text="", font=SMALL, fg=MUTED, bg=CARD, anchor="w", justify="left")
         self.you.pack(fill="x")
-        self.reply = tk.Label(card, text="", font=FONT, fg=FG, bg=CARD, anchor="w", justify="left", wraplength=PANEL_W - 40)
+        self.reply = tk.Label(card.inner, text="", font=FONT, fg=FG, bg=CARD, anchor="w", justify="left", wraplength=PANEL_W - 44)
         self.reply.pack(fill="x", pady=(2, 0))
 
         self.hist_toggle = tk.Label(p, text="▸ Last 5", font=SMALL, fg=ACCENT, bg=BG, anchor="w", cursor="hand2")
@@ -268,17 +333,17 @@ class Overlay:
 
         self.box = tk.Frame(p, bg=BG)
         self.box.pack(fill="x", padx=10, pady=(6, 0))
-        self.entry = tk.Entry(self.box, font=FONT, bg=CARD, fg=FG, insertbackground=FG, relief="flat", highlightthickness=1,
-                              highlightbackground=LINE, highlightcolor=ACCENT)
-        self.entry.pack(side="left", fill="x", expand=True, ipady=3)
+        field = RoundBox(self.box, PANEL_W - 20 - 40, fill=CARD, radius=14, pad=6)
+        field.pack(side="left")
+        self.entry = tk.Entry(field.inner, font=FONT, bg=CARD, fg=FG, insertbackground=FG, relief="flat", highlightthickness=0, bd=0)
+        self.entry.pack(fill="x", ipady=2, padx=4)
         self.entry.bind("<Return>", lambda _e: self._send())
-        self._button(self.box, "➤", self._send, bg="#0e7490").pack(side="left", padx=(4, 0))
+        self._button(self.box, "➤", self._send, bg="#0e7490").pack(side="right")
 
         row = tk.Frame(p, bg=BG)
-        row.pack(fill="x", padx=10, pady=(6, 8))
+        row.pack(fill="x", padx=10, pady=(7, 10))
         self._button(row, "🎤 Talk", self._talk).pack(side="left")
-        self._button(row, "Window", self._open_window).pack(side="left", padx=4)
-        self._button(row, "Self-test", self._selftest).pack(side="left")
+        self._button(row, "Window", self._open_window).pack(side="left", padx=5)
         self.note = tk.Label(row, text="", font=SMALL, fg=MUTED, bg=BG, anchor="e")
         self.note.pack(side="right")
         p.bind("<Enter>", lambda _e: setattr(self, "outside_since", None))
@@ -335,8 +400,9 @@ class Overlay:
         b = self.bar = tk.Toplevel(self.root)
         b.overrideredirect(True)
         b.attributes("-topmost", True)
-        b.configure(bg=BG, highlightthickness=1, highlightbackground=AMBER)
+        b.configure(bg=BG, highlightthickness=0)
         b.withdraw()
+        round_window(b, AMBER)
         self.bar_fade = Fader(b, top=0.98, on_step=lambda f: self._place_bar(slide=(1 - f) ** 2 * -10))
         self.bar_title = tk.Label(b, text="", font=BOLD, fg=AMBER, bg=BG, anchor="w")
         self.bar_title.pack(fill="x", padx=8, pady=(6, 0))
@@ -411,7 +477,7 @@ class Overlay:
         if not d:
             return "offline"
         v = d.get("voice") or {}
-        if v.get("state") in ("recording", "transcribing"):
+        if v.get("state") in ("recording", "transcribing", "following"):
             return v["state"]
         if d.get("state") not in (None, "idle"):
             return d["state"]
@@ -532,20 +598,8 @@ class Overlay:
             h = history[i] if i < len(history) else None
             txt = (time.strftime("%H:%M ", time.localtime(h["at"])) + elide(h["request"], 40) + "\n  → " + elide(h["reply"] or "…", 70)) if h else ""
             self._set_text(f"hist{i}", row, txt)
-        st = d.get("selftest") or {}
-        steps = st.get("steps") or []
-        if st.get("running"):
-            done = sum(1 for s in steps if s["status"] not in ("pending", "running"))
-            note = f"Self-test {done}/{len(steps)}…"
-        elif steps:
-            passed = sum(1 for s in steps if s["status"] == "passed")
-            note = f"Self-test {passed}/{len(steps)} {'✓' if passed == len(steps) else '✗'}"
-        else:
-            note = ""
-        if not (d.get("capabilities") or {}).get("browser_control") and not st.get("running"):
-            note = (note + "  " if note else "") + "(browser step off)"
         if not self._texts.get("note_override"):
-            self._set_text("note", self.note, note)
+            self._set_text("note", self.note, "")
         self._place_panel()
 
     # -- actions --------------------------------------------------------------------------------------------------------
@@ -597,11 +651,6 @@ class Overlay:
             finally:
                 self.root.after(3000, lambda: self.deciding.discard(aid))
         self._bg(go, "allowed" if approve else "denied")
-
-    def _selftest(self):
-        if not (self.data or {}).get("capabilities", {}).get("browser_control"):
-            self._flash("browser step needs Browser control")
-        self._bg(lambda: self.api.call("POST", "/api/selftest"), "self-test started")
 
     def _open_window(self):
         def go():

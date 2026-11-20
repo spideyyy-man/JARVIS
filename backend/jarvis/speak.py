@@ -128,6 +128,11 @@ class Speaker:
         self._queue.put((self._gen, lang, words))
         return True
 
+    def idle(self) -> bool:
+        """Nothing queued, being synthesised or playing."""
+        ready = getattr(self, "_ready", None)
+        return not self.speaking and self._queue.empty() and (ready is None or ready.empty())
+
     def chime(self) -> None:
         """A short rising two-note tone, played at once: "I heard 'Hey Jarvis', go ahead"."""
         if os.name != "nt":

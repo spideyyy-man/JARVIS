@@ -16,11 +16,12 @@ from PIL import Image, ImageDraw, ImageFilter
 
 SIZE = 72  # window size in px (orb + room for the glow and ripples)
 ORB_R = 21  # orb radius in px
-SS = 2  # supersampling factor
+SS = 3  # supersampling factor (3x: crisper edges than 2x)
 
 COLORS = {"idle": (34, 211, 238), "waiting": (34, 211, 238), "listening": (34, 197, 94), "recording": (34, 197, 94),
           "transcribing": (163, 230, 53), "thinking": (245, 158, 11), "executing": (251, 146, 60), "speaking": (96, 165, 250),
-          "error": (239, 68, 68), "offline": (100, 116, 139), "loading": (148, 163, 184)}
+          "error": (239, 68, 68), "offline": (100, 116, 139), "loading": (148, 163, 184),
+          "following": (74, 222, 128)}  # conversation mode: listening without the wake word
 AMBER = (245, 158, 11)
 
 
@@ -47,10 +48,10 @@ def _glow(color: tuple[int, int, int]) -> Image.Image:
         s = SIZE * SS
         img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
         d = ImageDraw.Draw(img)
-        r = (ORB_R + 7) * SS
+        r = (ORB_R + 4) * SS  # a tight halo: the wide one made the orb look blurry (2026-11-20)
         c = s // 2
-        d.ellipse((c - r, c - r, c + r, c + r), fill=(*key, 150))
-        _GLOW[key] = img.filter(ImageFilter.GaussianBlur(6 * SS))
+        d.ellipse((c - r, c - r, c + r, c + r), fill=(*key, 120))
+        _GLOW[key] = img.filter(ImageFilter.GaussianBlur(3.5 * SS))
     return _GLOW[key]
 
 
@@ -69,8 +70,8 @@ def _core_glow(color, cr: float, active: bool) -> Image.Image:
     if key not in _GLOW:
         s, c = SIZE * SS, SIZE * SS / 2
         core = Image.new("RGBA", (s, s), (0, 0, 0, 0))
-        ImageDraw.Draw(core).ellipse((c - cr * 1.9, c - cr * 1.9, c + cr * 1.9, c + cr * 1.9), fill=(*key[1], 110 if active else 40))
-        _GLOW[key] = core.filter(ImageFilter.GaussianBlur(3 * SS))
+        ImageDraw.Draw(core).ellipse((c - cr * 1.9, c - cr * 1.9, c + cr * 1.9, c + cr * 1.9), fill=(*key[1], 60 if active else 25))
+        _GLOW[key] = core.filter(ImageFilter.GaussianBlur(1.5 * SS))
     return _GLOW[key]
 
 
@@ -132,13 +133,13 @@ def render(o: OrbState) -> Image.Image:
     if active:
         speed, lo, hi = {"recording": (2.2, 0.55, 1.0), "listening": (2.2, 0.55, 1.0), "speaking": (3.0, 0.5, 0.95),
                          "thinking": (1.2, 0.45, 0.8), "executing": (1.4, 0.5, 0.85), "transcribing": (1.6, 0.5, 0.85),
-                         "error": (1.0, 0.4, 0.9)}.get(o.state, (0.55, 0.22, 0.5))
+                         "error": (1.0, 0.4, 0.9), "following": (1.0, 0.3, 0.6)}.get(o.state, (0.55, 0.18, 0.4))
         k = lo + (hi - lo) * (0.5 + 0.5 * math.sin(t * speed * math.pi))
         img.alpha_composite(_glow_at(col, k))
     d = ImageDraw.Draw(img)
     # ripples while listening; soft waves while speaking
-    if o.state in ("recording", "listening", "speaking"):
-        period = 1.3 if o.state != "speaking" else 0.9
+    if o.state in ("recording", "listening", "speaking", "following"):
+        period = {"speaking": 0.9, "following": 2.2}.get(o.state, 1.3)  # following: slow, calm ripples
         for i in range(2):
             ph = ((t / period) + i / 2) % 1.0
             rr = r + (4 + 14 * ph) * SS

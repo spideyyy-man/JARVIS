@@ -99,6 +99,15 @@ Since 2026-11-19 (Edge's online recogniser failed on the laptop with "Speech rec
   The orb (`orb.py`) is rendered with Pillow at 2x with real blur and shown on a per-pixel-alpha layered window
   (UpdateLayeredWindow; transparent pixels click through), ~30 fps active / 15 fps at rest, 2-5 ms per frame thanks
   to cached glow levels and pre-rotated arc sprites; the panel and approval bar slide while they fade.
+- **Conversation mode** (2026-11-20; the owner could not hold a conversation: every question needed "Hey Jarvis",
+  and after the wake word JARVIS stopped before they spoke). After a spoken reply has been fully said
+  (`Speaker` idle -> `VoiceService._speaking(False)`), `LocalListener.follow_up(8)` opens an 8 s window (state
+  `following`, green ripples, "Listening — just keep talking"): Silero speech (>= 0.6 for 2 frames) starts recording
+  with 0.48 s of pre-roll, no wake word, no chime, and the language detection pass is skipped (same language as the
+  last turn; follow-up transcription ~0.9 s). Audio heard while JARVIS spoke is drained first (no echo loop).
+  "thanks", "that's all", "stop", "bye"... end it (`CONVERSATION_ENDS`). After the wake word the listener skips
+  0.4 s (its tail + chime), and a short sound followed by a pause no longer ends the recording (`Endpointer`).
+  Tamil replies spoken by the window do not open the window yet.
 - **Floating icon** (`overlay.py`, tkinter, its own `pythonw` process started by the desktop app with
   `--parent PID`): a 46 px always-on-top circle, coloured by state; hover (or click to pin) shows a panel from
   `GET /api/overlay` - now/heard/last exchange, approvals with Approve/Deny, activity (`EventBus.activity`,

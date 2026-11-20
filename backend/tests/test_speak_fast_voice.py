@@ -21,7 +21,10 @@ def test_speakable_and_sentences():
 
 class FakeSpeaker:
     def __init__(self, langs=("en",)):
-        self.langs, self.said, self.rate, self.stopped = set(langs), [], 1.0, 0
+        self.langs, self.said, self.rate, self.stopped, self.speaking = set(langs), [], 1.0, 0, False
+
+    def idle(self):
+        return not self.speaking
 
     def can_speak(self, lang):
         return lang in self.langs
@@ -319,3 +322,75 @@ def test_orb_frames_are_smooth_transparent_images_for_every_state():
     for _ in range(40):
         c = ease_color(c, COLORS["thinking"], 0.16)
     assert all(abs(a - b) < 2 for a, b in zip(c, COLORS["thinking"]))  # colours ease into the new state
+
+
+
+# -- conversation mode and the wake word's tail (2026-11-20) -----------------------------------------------------------------
+def test_a_short_sound_before_a_pause_does_not_end_listening():
+    """After "Hey Jarvis" the end of the wake word (or a cough) was taken as the whole request and JARVIS stopped
+    listening before the user spoke. Now it keeps waiting for the real request."""
+    from jarvis.listen import Endpointer
+
+    ep = Endpointer(end_silence=0.5)
+    feed = [True] * 3 + [False] * 13 + [True] * 18 + [False] * 8  # 0.24 s blip, 1 s pause, 1.4 s speech, pause
+    verdicts = [ep.feed_speech(s) for s in feed]
+    assert "done" not in verdicts[:20]  # not after the blip
+    assert verdicts[-1] == "done" and verdicts.index("done") > 32
+
+
+class FakeListener:
+    def __init__(self):
+        self.follow_ups = []
+
+    def follow_up(self, seconds=8.0):
+        self.follow_ups.append(seconds)
+
+    def running(self):
+        return True
+
+
+def test_after_a_spoken_reply_the_next_request_needs_no_wake_word(home, tmp_path):
+    j = _voice_app(home, tmp_path, "Paris is the capital of France.")
+    speaker, listener = FakeSpeaker(), FakeListener()
+    svc = VoiceService(j, speaker=speaker)
+    svc.listener = listener
+    run(svc.handle("What is the capital of France?", "en"))
+    assert listener.follow_ups == [8.0]  # conversation mode opened once the reply was said
+    run(svc.handle("thanks", "en"))
+    assert listener.follow_ups == [8.0]  # "thanks" ends the conversation: back to the wake word
+    j.db.close()
+
+
+def test_conversation_window_opens_only_after_the_last_sentence_is_spoken(home, tmp_path):
+    j = _voice_app(home, tmp_path, "One. Two.")
+    speaker, listener = FakeSpeaker(), FakeListener()
+    speaker.speaking = True  # still saying the reply when the turn finishes
+    svc = VoiceService(j, speaker=speaker)
+    svc.listener = listener
+    run(svc.handle("count to two", "en"))
+    assert listener.follow_ups == [] and svc._follow_pending
+    svc._speaking(False)  # the speaker reports it has finished
+    assert listener.follow_ups == [8.0]
+    svc._event("voice.wake", {"trigger": "follow-up"})
+    j.db.close()
+
+
+def test_follow_up_does_not_chime_but_the_wake_word_does(home, tmp_path):
+    j = make(home, tmp_path)
+    speaker = FakeSpeaker()
+    svc = VoiceService(j, speaker=speaker)
+    svc._event("voice.wake", {"trigger": "follow-up"})
+    assert getattr(speaker, "chimes", 0) == 0 and speaker.stopped == 1
+    svc._event("voice.wake", {"trigger": "wake word"})
+    assert speaker.chimes == 1
+    j.db.close()
+
+
+def test_a_follow_up_skips_language_detection(tmp_path):
+    """In a conversation the user keeps speaking the same language: the detection pass (~1-2 s) is skipped."""
+    detector = FakeWhisper("base", "en", {"en": 0.9}, "unused")
+    detector.detect_language = lambda audio: (_ for _ in ()).throw(AssertionError("detection should be skipped"))
+    english = FakeWhisper("base.en", "en", {}, " And what about Mars?")
+    lst = _listener(tmp_path, detector, english, FakeWhisper("small", "ta", {}, "unused"))
+    text, lang, info = lst.transcribe(np.zeros(16000, "float32"), language="en")
+    assert (text, lang, info["model"]) == ("And what about Mars?", "en", "base.en")

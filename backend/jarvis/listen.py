@@ -27,6 +27,9 @@ from pathlib import Path
 from typing import Callable
 
 RATE = 16000
+WAKE_SKIP_FRAMES = 5  # 0.4 s after the wake word: the end of "Jarvis" and the chime are not the request
+PRE_ROLL_FRAMES = 6  # 0.48 s kept before a follow-up starts, so its first word is not cut off
+FOLLOW_START = 0.6  # speech probability that starts a follow-up (stricter than VAD_START: no wake word to confirm it)
 CHIME_FRAMES = 3  # 0.24 s after the wake word: the chime (speak.Speaker.chime, 0.18 s) is not the user's speech
 STALE_AFTER = 20.0  # s: a request heard this slowly is not acted on (on the laptop one took 912 s while the CPU was full)
 FAST_TEXT_LANGUAGES = {"en"}
@@ -48,7 +51,7 @@ class Endpointer:
 
     The noise floor is learned while waiting for the wake word, so a fan or a noisy room raises the bar."""
 
-    def __init__(self, noise: float = 120.0, start_timeout: float = 6.0, end_silence: float = 0.7, max_length: float = 15.0, min_speech: float = 0.25):
+    def __init__(self, noise: float = 120.0, start_timeout: float = 7.0, end_silence: float = 0.7, max_length: float = 15.0, min_speech: float = 0.35):
         self.noise, self.start_timeout, self.end_silence, self.max_length, self.min_speech = noise, start_timeout, end_silence, max_length, min_speech
         self.reset()
 
@@ -79,10 +82,19 @@ class Endpointer:
                 self.started = True
         else:
             self.silence += FRAME_S
+            if not self.started and self.silence >= 0.3:
+                self.speech = 0.0  # scattered noise must not add up to "speech started"
         if not self.started:
             return "timeout" if self.elapsed >= self.start_timeout else "wait"
-        if self.elapsed >= self.max_length or (self.silence >= self.end_silence and self.speech >= self.min_speech):
+        if self.elapsed >= self.max_length:
             return "done"
+        if self.silence >= self.end_silence:
+            if self.speech >= self.min_speech:
+                return "done"
+            # Only a short sound before the pause - the end of "Jarvis", a cough: not the request. Keep waiting for it
+            # (it used to end here, so JARVIS stopped listening before the user had said anything; 2026-11-20).
+            self.started, self.speech, self.silence = False, 0.0, 0.0
+            return "timeout" if self.elapsed >= self.start_timeout else "wait"
         return "speech"
 
 
@@ -133,6 +145,10 @@ class LocalListener:
         self.last: dict = {}
         self._stop = threading.Event()
         self._listen_now = threading.Event()
+        self._drain = threading.Event()
+        self._follow_until = 0.0
+        self._trigger = ""
+        self._last_lang: str | None = None
         self._thread: threading.Thread | None = None
         self._whisper = None
         self._whisper_ready = threading.Event()
@@ -163,6 +179,26 @@ class LocalListener:
         if self._thread:
             self._thread.join(timeout=5)
         self._set("off")
+
+    def follow_up(self, seconds: float = 8.0) -> None:
+        """Conversation mode: for `seconds` the next thing the user says is taken without the wake word. Called when
+        JARVIS has finished saying its reply (what the mic heard while it spoke is dropped first)."""
+        if not self.running():
+            return
+        self._drain.set()
+        self._follow_until = time.time() + seconds
+        if self.state == "waiting":
+            self._set("following", seconds=seconds)
+
+    def end_follow_up(self) -> None:
+        self._follow_until = 0.0
+        if self.state == "following":
+            self._set("waiting")
+
+    def _end_follow_up(self) -> None:
+        self._follow_until = 0.0
+        if self.state == "following":
+            self._set("waiting", note="conversation ended - say Hey Jarvis to start again")
 
     def listen_now(self) -> None:
         """Hotkey / Talk button: take the next utterance without the wake word."""
@@ -267,29 +303,62 @@ class LocalListener:
         recording: list = []
         skip = 0
         cooldown_until = 0.0
+        pre: collections.deque = collections.deque(maxlen=PRE_ROLL_FRAMES)  # the moment before a follow-up starts
+        heard_run = 0  # consecutive speech frames seen during a follow-up window
         try:
             while not self._stop.is_set():
                 try:
                     frame = self._frames.get(timeout=0.5)
                 except queue.Empty:
+                    if self._follow_until and time.time() > self._follow_until:
+                        self._end_follow_up()
+                    continue
+                if self._drain.is_set():  # JARVIS was talking: what the mic heard meanwhile is its own voice
+                    self._drain.clear()
+                    while not self._frames.empty():
+                        self._frames.get_nowait()
+                    pre.clear()
+                    heard_run = 0
+                    if vad:
+                        vad.reset_states()
                     continue
                 rms = float(np.sqrt(np.mean(frame.astype(np.float32) ** 2)))
-                if self.state == "waiting":
+                if self.state in ("waiting", "following"):
                     endpoint.learn(rms)
                     score = max(wake.predict(frame).values())
                     now = time.time()
-                    if self._listen_now.is_set() or (score >= self.wake_threshold and now >= cooldown_until):
-                        by_hotkey = self._listen_now.is_set()
+                    trigger = None
+                    if self._listen_now.is_set():
+                        trigger = "hotkey"
+                    elif score >= self.wake_threshold and now >= cooldown_until:
+                        trigger = "wake word"
+                    elif self.state == "following" and vad:
+                        # conversation mode: the user just keeps talking - no wake word needed
+                        heard_run = heard_run + 1 if vad.predict(frame, frame_size=640) >= FOLLOW_START else 0
+                        if heard_run >= 2:
+                            trigger = "follow-up"
+                    pre.append(frame)
+                    if self.state == "following" and now > self._follow_until:
+                        self._end_follow_up()
+                    if trigger:
                         self._listen_now.clear()
+                        self._follow_until = 0.0
                         wake.reset()
                         endpoint.reset()
-                        speaking = False
-                        if vad:
+                        speaking = trigger == "follow-up"
+                        recording = list(pre) if trigger == "follow-up" else []
+                        if trigger == "follow-up":
+                            endpoint.feed_speech(True)
+                            endpoint.feed_speech(True)  # already talking: the two frames that started it
+                        elif vad:
                             vad.reset_states()
-                        recording = []
-                        skip = CHIME_FRAMES  # the "I'm listening" chime is playing: neither speech nor silence
-                        self._set("recording", trigger="hotkey" if by_hotkey else "wake word", score=round(float(score), 2))
-                        self.on_event("voice.wake", {"trigger": "hotkey" if by_hotkey else "wake word"})
+                        pre.clear()
+                        heard_run = 0
+                        # after the wake word: skip its tail and the chime; after the hotkey: just the chime
+                        skip = {"wake word": WAKE_SKIP_FRAMES, "hotkey": CHIME_FRAMES}.get(trigger, 0)
+                        self._trigger = trigger
+                        self._set("recording", trigger=trigger, score=round(float(score), 2))
+                        self.on_event("voice.wake", {"trigger": trigger})
                     continue
                 if self.state == "recording":
                     if skip:
@@ -314,13 +383,15 @@ class LocalListener:
                             self._frames.get_nowait()
                         wake.reset()
                         cooldown_until = time.time() + 1.5
-                        self._set("waiting")
+                        if self.state == "transcribing":
+                            self._set("waiting")
         finally:
             stream.stop()
             stream.close()
 
-    def transcribe(self, audio) -> tuple[str, str, dict]:
-        """(text, language, info) for float32 mono 16 kHz audio. Blocks until the speech model is loaded."""
+    def transcribe(self, audio, language: str | None = None) -> tuple[str, str, dict]:
+        """(text, language, info) for float32 mono 16 kHz audio. Blocks until the speech model is loaded. With
+        `language` (a follow-up in a conversation: the user is still speaking the same language) detection is skipped."""
         self._whisper_ready.wait()
         if self._whisper is None:
             raise RuntimeError(self.error or "speech model not loaded")
@@ -329,8 +400,11 @@ class LocalListener:
         # 1. English or Tamil - never anything else. Left to choose freely, the model heard accented English through a
         #    laptop mic as Malay or Indonesian and wrote gibberish (29% word errors on 28 test clips; 28/28 + 12/12 right
         #    when only English and Tamil are allowed).
-        detected, probability, all_probs = self._whisper.detect_language(audio)
-        lang = pick_language(detected, dict(all_probs or []), self.languages)
+        if language in self.languages:
+            detected, probability, lang = language, 1.0, language  # saves a model pass (~1-2 s on the busy laptop)
+        else:
+            detected, probability, all_probs = self._whisper.detect_language(audio)
+            lang = pick_language(detected, dict(all_probs or []), self.languages)
         detect_s = time.time() - t0
         # 2. English: the English-only model with the words the user says to JARVIS (2.3% word errors, ~1 s);
         #    Tamil: the bigger multilingual model, which writes Tamil properly.
@@ -378,7 +452,9 @@ class LocalListener:
 
     def _transcribe(self, audio) -> None:
         try:
-            text, lang, info = self.transcribe(audio)
+            hint = self._last_lang if self._trigger == "follow-up" else None
+            text, lang, info = self.transcribe(audio) if hint is None else self.transcribe(audio, language=hint)
+            self._last_lang = lang
         except Exception as e:  # noqa: BLE001
             self.error = f"transcription failed: {e}"
             self.on_event("voice.state", {"state": "error", "error": self.error})
@@ -395,6 +471,11 @@ class LocalListener:
         self.on_utterance(text, lang, info)
 
 
+FOLLOW_UP_SECONDS = 8.0  # after a spoken reply, how long the next request is taken without the wake word
+CONVERSATION_ENDS = re.compile(r"^(?:thanks?|thank you|that'?s all|that is all|never ?mind|stop|bye|goodbye|cancel|ok(?:ay)? thanks?)"
+                               r"(?: jarvis)?[.!]*$", re.I)
+
+
 # -- connection to JARVIS -----------------------------------------------------------------------------------------------
 class VoiceService:
     """Owns the listener and the speaker and turns what is heard into chat turns. Lives on the server's event loop; the
@@ -409,6 +490,7 @@ class VoiceService:
         self.conversation: str | None = None
         self.last_used = 0.0
         self._tasks: set = set()
+        self._follow_pending = False
         self.speaker = speaker  # made in start(): only the desktop app speaks out loud (never tests or the bare server)
 
     def enabled(self) -> bool:
@@ -460,15 +542,21 @@ class VoiceService:
 
     # called on the listener / speaker threads
     def _event(self, type_: str, data: dict) -> None:
-        if type_ == "voice.wake" and self.speaker:
-            self.speaker.stop()  # "Hey Jarvis" while it talks: stop talking and listen
-            self.speaker.chime()  # ...and let the user hear that it is listening
+        if type_ == "voice.wake":
+            self._follow_pending = False
+            if self.speaker:
+                self.speaker.stop()  # "Hey Jarvis" while it talks: stop talking and listen
+                if data.get("trigger") != "follow-up":
+                    self.speaker.chime()  # ...and let the user hear that it is listening (a follow-up is already talking)
         if type_ == "voice.slow" and self.speaker:
             self.speaker.say("Sorry, I was too slow to catch that. Please say it again.")
         if self.loop and not self.loop.is_closed():
             self.loop.call_soon_threadsafe(lambda: self.app.bus.emit(type_, **data))
 
     def _speaking(self, on: bool) -> None:
+        if not on and self._follow_pending and self.listener:  # the whole reply has been said: listen for the next thing
+            self._follow_pending = False
+            self.listener.follow_up(FOLLOW_UP_SECONDS)
         if self.loop and not self.loop.is_closed():
             def report():
                 if on:
@@ -525,4 +613,11 @@ class VoiceService:
         rest = split.rest() + (final[len(so_far):] if final.startswith(so_far) else ("" if so_far else final))
         if rest.strip() and not self.speaker.say(rest):
             self.app.bus.emit("voice.say", conversation_id=cid, text=rest)  # no voice for this language here: the window says it
+        # Conversation mode: once the reply has been said, the next thing the user says needs no "Hey Jarvis"
+        # (the owner could not hold a conversation: every question needed the wake word again; 2026-11-20).
+        if self.listener and not CONVERSATION_ENDS.match(text.strip()):
+            if self.speaker.speaking or not self.speaker.idle():
+                self._follow_pending = True  # _speaking(False) opens the window when the last sentence has been said
+            else:
+                self.listener.follow_up(FOLLOW_UP_SECONDS)
         return result
