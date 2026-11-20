@@ -116,6 +116,19 @@ Since 2026-11-19 (Edge's online recogniser failed on the laptop with "Speech rec
   (piper | kokoro | windows) or the voice setting `local_tts` (switches live). `python -m jarvis.speak [--kokoro]`
   downloads the voices (setup.ps1 does Piper). The cloud "voice studio" type services were not used: they need the
   internet and credits and add network delay to every sentence.
+- **Plain "Jarvis", unclear speech, hover** (2026-11-20; from the owner's real recordings in `~/.jarvis/voice-samples`):
+  the ready-made wake model scored the owner's plain "JARVIS" 0.02 (their "Hey JARVIS" 0.94), so plain "Jarvis" is
+  confirmed by base.en: every short separate utterance (speech segment after >= 0.48 s quiet, 0.3-6 s, not while
+  JARVIS talks, at most one check per `VERIFY_GAP` 1 s) is transcribed with `VERIFY_PROMPT` (the look-alike names
+  "Jarvis, Travis, JavaScript, service, nervous." - 9/9 right incl. the owner's voice; no prompt 5/9; a prompt starting
+  "Jarvis," invented "Jarvis" before "Javascript is fun") and must match `WAKE_START`. "Jarvis" alone -> chime + listen;
+  "Jarvis, <request>" in one breath -> acted on directly (no chime, no second transcription). A clear "Hey Jarvis"
+  still triggers on the wake model; while JARVIS speaks only >= 0.85 counts (`set_talking`). Confidence: base.en
+  below -0.6 -> the bigger model too, kept only if 0.15 more confident; below -0.95 -> not acted on, "Sorry, I didn't
+  catch that" and the conversation window stays open (on the owner's recordings every garbled transcription scored
+  -0.96..-1.28, right ones -0.05..-0.5). The conversation window is 5 s. Follow-ups accept "yes"/"no" (min speech
+  0.15 s); requests after the wake word get a 0.75 s pause allowance. The hover panel no longer pins on click (only
+  the pin button keeps it), closes 0.25 s after the pointer leaves, and opens only over the visible orb.
 - **Everyday skills** (2026-11-20, `tools/everyday.py`, `docs/ASSESSMENT.md`): timers (labels, "how much time is
   left", cancel) and alarms (next occurrence of a clock time) stored in the `timers` setting and rung by
   `app._timers_loop` (every 0.5 s; spoken with a chime via `Proactive.announce` -> `VoiceService.say_aloud`,

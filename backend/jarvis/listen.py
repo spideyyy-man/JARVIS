@@ -29,6 +29,22 @@ from typing import Callable
 RATE = 16000
 WAKE_SKIP_FRAMES = 5  # 0.4 s after the wake word: the end of "Jarvis" and the chime are not the request
 PRE_ROLL_FRAMES = 6  # 0.48 s kept before a follow-up starts, so its first word is not cut off
+RETRY_BELOW = -0.6  # base.en less sure than this -> ask the bigger model too and keep the more confident text
+UNCLEAR_BELOW = -0.95  # still this unsure -> "didn't catch that" instead of acting on it. On the owner's real recordings
+#   every garbled transcription scored -0.96..-1.28 ("Return to the pre-order", "...link in the description below") and
+#   the right ones -0.05..-0.5 (2026-11-20).
+# Prompt for the plain-"Jarvis" check: naming the look-alikes lets the model tell them apart. Measured on 9 cases
+# (synthetic voices + the owner's real "JARVIS, I want you..." and "Hey JARVIS"): 9/9 with this prompt; 5/9 with no
+# prompt ("Jair is", "Jardus"); a prompt starting "Jarvis," made it write "Jarvis" before "Javascript is fun".
+VERIFY_PROMPT = "Jarvis, Travis, JavaScript, service, nervous."
+RETRY_MARGIN = 0.15
+VERIFY_GAP = 1.0  # s between plain-"Jarvis" checks, so background chatter cannot keep the CPU busy
+WAKE_PREFILTER = 0.03  # any hint of "jarvis" in a speech segment -> confirm with the English model (ordinary speech: 0.00)
+WAKE_WHILE_TALKING = 0.85  # while JARVIS speaks, only a very clear wake word counts (it must not wake itself)
+MIN_WAKE_FRAMES = 4  # 0.32 s: shorter sounds are not "Jarvis"
+SEG_END_FRAMES = 6  # 0.48 s of quiet ends a speech segment
+SEG_MAX_FRAMES = 75  # 6 s: longer speech is conversation, not "Jarvis, <request>"
+WAKE_START = re.compile(r"^\W*(?:(?:hey|hi|ok|okay|yo)\W+)?(?:jarvis|jervis|jarvi|jarves|javis)\b\W*", re.I)
 FOLLOW_START = 0.6  # speech probability that starts a follow-up (stricter than VAD_START: no wake word to confirm it)
 CHIME_FRAMES = 3  # 0.24 s after the wake word: the chime (speak.Speaker.chime, 0.18 s) is not the user's speech
 STALE_AFTER = 20.0  # s: a request heard this slowly is not acted on (on the laptop one took 912 s while the CPU was full)
@@ -101,7 +117,13 @@ class Endpointer:
 WAKE_PREFIX = re.compile(r"^\s*(?:(?:hey|hi|ok|okay|ஹே)[\s,.!]*)?(?:jarvis|ஜார்விஸ்|ஜார்வீஸ்)[\s,.!?:]*", re.I)
 # What Whisper tends to "hear" in silence or noise.
 HALLUCINATIONS = {"", "you", "thank you", "thanks", "thank you for watching", "thanks for watching", "bye", "okay", "ok", "so", "uh", "um",
-                  "subtitles by the amara.org community", "please subscribe", "நன்றி"}
+                  "subtitles by the amara.org community", "please subscribe", "like and subscribe", "oh", "நன்றி"}
+HALLUCINATION_PARTS = ("link in the description", "subscribe to", "thanks for watching", "see you in the next")
+
+
+def seg_quiet_at_end(frames: list, n: int) -> int:
+    """A segment always ends with the quiet frames that closed it; they are not speech."""
+    return min(n, len(frames))
 
 
 def clean_transcript(text: str) -> str:
@@ -112,7 +134,7 @@ def clean_transcript(text: str) -> str:
 
 def is_noise(text: str, no_speech: float, logprob: float) -> bool:
     plain = re.sub(r"[^\w\s]", "", text.lower()).strip()
-    if plain in HALLUCINATIONS:
+    if plain in HALLUCINATIONS or any(part in plain for part in HALLUCINATION_PARTS):
         return True
     return no_speech > 0.6 and logprob < -0.8
 
@@ -146,6 +168,8 @@ class LocalListener:
         self._stop = threading.Event()
         self._listen_now = threading.Event()
         self._drain = threading.Event()
+        self._jarvis_talking = False
+        self._spoke_until = 0.0
         self._follow_until = 0.0
         self._trigger = ""
         self._last_lang: str | None = None
@@ -180,6 +204,33 @@ class LocalListener:
             self._thread.join(timeout=5)
         self._set("off")
 
+    def set_talking(self, on: bool) -> None:
+        """JARVIS is (not) speaking: while it does, its own voice must not wake it or count as the user's follow-up."""
+        self._jarvis_talking = on
+        if not on:
+            self._spoke_until = time.time() + 0.6  # the room still echoes for a moment
+
+    def _verify_wake(self, audio) -> tuple[str, dict] | None:
+        """Was this short speech segment "Jarvis ..."? (text after the wake word, info) or None. ~1 s with base.en."""
+        if not self._whisper_ready.wait(timeout=0.1) or self._whisper is None:
+            return None
+        t0 = time.time()
+        model = self._english_model() if self.english_size else self._whisper
+        segments = list(model.transcribe(audio, language="en", beam_size=1, vad_filter=True, condition_on_previous_text=False,
+                                         without_timestamps=True, initial_prompt=VERIFY_PROMPT)[0])
+        text = " ".join(x.text.strip() for x in segments).strip()
+        m = WAKE_START.match(text)
+        if not m:
+            return None
+        rest = text[m.end():].strip()
+        no_speech = max((x.no_speech_prob for x in segments), default=1.0)
+        logprob = min((x.avg_logprob for x in segments), default=-9.0)
+        if rest and (is_noise(rest, no_speech, logprob) or logprob < UNCLEAR_BELOW):
+            rest = ""  # the wake word was clear but the rest was not: just "Jarvis" - listen for the request again
+        return rest, {"seconds": round(time.time() - t0, 1), "audio_seconds": round(len(audio) / RATE, 1),
+                      "model": self.english_size or self.fast_size, "detected": "en", "probability": 1.0,
+                      "no_speech": round(no_speech, 2), "logprob": round(logprob, 2), "fast_seconds": 0.0}
+
     def follow_up(self, seconds: float = 8.0) -> None:
         """Conversation mode: for `seconds` the next thing the user says is taken without the wake word. Called when
         JARVIS has finished saying its reply (what the mic heard while it spoke is dropped first)."""
@@ -209,7 +260,7 @@ class LocalListener:
         if self.model_size != self.fast_size:
             model += f" + {self.model_size} (Tamil)"
         return {"state": self.state, "error": self.error, "model": model, "speech_model_ready": self._whisper_ready.is_set(),
-                "wake_phrase": "Hey Jarvis", "last": self.last}
+                "wake_phrase": "Jarvis", "last": self.last}
 
     # -- internals ---------------------------------------------------------------------------------------------------
     def _set(self, state: str, **data) -> None:
@@ -305,6 +356,8 @@ class LocalListener:
         cooldown_until = 0.0
         pre: collections.deque = collections.deque(maxlen=PRE_ROLL_FRAMES)  # the moment before a follow-up starts
         heard_run = 0  # consecutive speech frames seen during a follow-up window
+        seg: list = []  # the current speech segment while waiting (checked for a plain "Jarvis")
+        seg_score, seg_quiet, quiet_run, seg_after_quiet, next_verify = 0.0, 0, 99, False, 0.0
         try:
             while not self._stop.is_set():
                 try:
@@ -326,18 +379,56 @@ class LocalListener:
                 if self.state in ("waiting", "following"):
                     endpoint.learn(rms)
                     score = max(wake.predict(frame).values())
+                    prob = vad.predict(frame, frame_size=640) if vad else (1.0 if rms >= endpoint.threshold else 0.0)
                     now = time.time()
+                    talking = self._jarvis_talking or now < self._spoke_until  # JARVIS's own voice is in the mic
+                    pre.append(frame)
+                    # Speech segments, for plain "Jarvis" (the ready-made model is trained on "hey jarvis" and scored
+                    # plain "Jarvis" anywhere from 0.02 to 1.00 across voices; 2026-11-20).
+                    if prob >= (VAD_STAY if seg else VAD_START):
+                        if not seg:
+                            seg_after_quiet = quiet_run >= SEG_END_FRAMES  # a separate utterance, not mid-conversation
+                        seg = seg + [frame] if seg else list(pre)
+                        seg_quiet, seg_score, quiet_run = 0, max(seg_score, score), 0
+                    else:
+                        quiet_run += 1
+                        if seg:
+                            seg.append(frame)
+                            seg_quiet += 1
                     trigger = None
                     if self._listen_now.is_set():
                         trigger = "hotkey"
-                    elif score >= self.wake_threshold and now >= cooldown_until:
+                    elif score >= (WAKE_WHILE_TALKING if talking else self.wake_threshold) and now >= cooldown_until:
                         trigger = "wake word"
-                    elif self.state == "following" and vad:
+                    elif self.state == "following" and not talking:
                         # conversation mode: the user just keeps talking - no wake word needed
-                        heard_run = heard_run + 1 if vad.predict(frame, frame_size=640) >= FOLLOW_START else 0
+                        heard_run = heard_run + 1 if prob >= FOLLOW_START else 0
                         if heard_run >= 2:
                             trigger = "follow-up"
-                    pre.append(frame)
+                    if not trigger and seg and (seg_quiet >= SEG_END_FRAMES or len(seg) >= SEG_MAX_FRAMES):
+                        candidate, cand_score = seg, seg_score
+                        seg, seg_score, seg_quiet = [], 0.0, 0
+                        speech_len = len(candidate) - seg_quiet_at_end(candidate, SEG_END_FRAMES)
+                        worth = cand_score >= WAKE_PREFILTER or (seg_after_quiet and speech_len >= MIN_WAKE_FRAMES and now >= next_verify)
+                        if worth and not talking and now >= cooldown_until and len(candidate) < SEG_MAX_FRAMES:
+                            next_verify = time.time() + VERIFY_GAP
+                            found = self._verify_wake(np.concatenate(candidate).astype(np.float32) / 32768.0)
+                            if found is not None:
+                                text, info = found
+                                if text:  # "Jarvis, what time is it?" in one breath: that is the request - act on it now
+                                    self._trigger = "jarvis"
+                                    self._follow_until = 0.0
+                                    self.on_event("voice.wake", {"trigger": "jarvis", "direct": True})
+                                    self.last = {"heard": text, "language": "en", "at": time.time(), **info}
+                                    self.on_utterance(text, "en", info)
+                                    while not self._frames.empty():
+                                        self._frames.get_nowait()
+                                    cooldown_until = time.time() + 1.5
+                                    pre.clear()
+                                    if self.state == "following":
+                                        self._set("waiting")
+                                    continue
+                                trigger = "jarvis"  # just "Jarvis": chime, then listen for the request
                     if self.state == "following" and now > self._follow_until:
                         self._end_follow_up()
                     if trigger:
@@ -345,26 +436,32 @@ class LocalListener:
                         self._follow_until = 0.0
                         wake.reset()
                         endpoint.reset()
+                        # follow-ups and "yes"/"no" are short; requests after the wake word get room for a thinking pause
+                        endpoint.min_speech = 0.15 if trigger == "follow-up" else 0.35
+                        endpoint.end_silence = (SPEECH_END_VAD if vad else 0.7) + (0.0 if trigger == "follow-up" else 0.25)
                         speaking = trigger == "follow-up"
-                        recording = list(pre) if trigger == "follow-up" else []
                         if trigger == "follow-up":
+                            recording = list(pre)
                             endpoint.feed_speech(True)
                             endpoint.feed_speech(True)  # already talking: the two frames that started it
-                        elif vad:
-                            vad.reset_states()
+                        else:
+                            # "hey jarvis what time..." in one go: keep what was already said (the wake phrase is
+                            # removed from the text later), but count speech afresh from here
+                            recording = list(seg) if trigger == "wake word" and seg else []
+                            if vad:
+                                vad.reset_states()
                         pre.clear()
-                        heard_run = 0
-                        # after the wake word: skip its tail and the chime; after the hotkey: just the chime
-                        skip = {"wake word": WAKE_SKIP_FRAMES, "hotkey": CHIME_FRAMES}.get(trigger, 0)
+                        seg, seg_score, seg_quiet, heard_run = [], 0.0, 0, 0
+                        skip = CHIME_FRAMES if trigger in ("wake word", "hotkey", "jarvis") else 0  # the chime is not speech
                         self._trigger = trigger
                         self._set("recording", trigger=trigger, score=round(float(score), 2))
                         self.on_event("voice.wake", {"trigger": trigger})
                     continue
                 if self.state == "recording":
+                    recording.append(frame)  # everything is kept; the chime only pauses the end-of-speech count
                     if skip:
                         skip -= 1
                         continue
-                    recording.append(frame)
                     if vad:
                         prob = vad.predict(frame, frame_size=640)
                         speaking = prob >= (VAD_STAY if speaking else VAD_START)  # hysteresis: no flicker inside words
@@ -418,10 +515,22 @@ class LocalListener:
         text = " ".join(s.text.strip() for s in segments)
         no_speech = max((s.no_speech_prob for s in segments), default=1.0)
         logprob = min((s.avg_logprob for s in segments), default=-9.0)
+        if lang == "en" and logprob < RETRY_BELOW and self.model_size not in (self.english_size, self.fast_size):
+            # unsure: the bigger model hears some of these right ("What is the weather right now?"), others worse -
+            # keep whichever is more confident
+            alt = list(self._accurate_model().transcribe(audio, language="en", **opts, initial_prompt=VOCABULARY)[0])
+            alt_lp = min((x.avg_logprob for x in alt), default=-9.0)
+            if alt and alt_lp > logprob + RETRY_MARGIN:  # clearly more confident only ("Follow me" -> "Ah, mama" was not)
+                segments, logprob, model_used = alt, alt_lp, self.model_size
+                text = " ".join(x.text.strip() for x in alt)
+                no_speech = max((x.no_speech_prob for x in alt), default=1.0)
         info_out = {"seconds": round(time.time() - t0, 1), "audio_seconds": round(len(audio) / RATE, 1), "detected": detected,
                     "probability": round(probability, 2), "no_speech": round(no_speech, 2), "logprob": round(logprob, 2),
                     "model": model_used, "fast_seconds": round(detect_s, 1)}
         if is_noise(text, no_speech, logprob):
+            return "", lang, info_out
+        if lang == "en" and logprob < UNCLEAR_BELOW:
+            info_out["unclear"] = text  # what it thought it heard, for the log - not acted on
             return "", lang, info_out
         return clean_transcript(text), lang, info_out
 
@@ -466,12 +575,15 @@ class LocalListener:
             self.on_event("voice.slow", {"text": text, "seconds": info["seconds"]})
             return
         if not text:
+            if info.get("unclear"):
+                self.last["note"] = f"unclear (heard {info['unclear'][:40]!r}) - asked to repeat"
+                self.on_event("voice.unclear", {"guess": info["unclear"], "logprob": info.get("logprob")})
             self.on_event("voice.state", {"state": "waiting", "note": "didn't catch that"})
             return
         self.on_utterance(text, lang, info)
 
 
-FOLLOW_UP_SECONDS = 8.0  # after a spoken reply, how long the next request is taken without the wake word
+FOLLOW_UP_SECONDS = 5.0  # after a spoken reply, how long the next request is taken without the wake word
 CONVERSATION_ENDS = re.compile(r"^(?:thanks?|thank you|that'?s all|that is all|never ?mind|stop|bye|goodbye|cancel|ok(?:ay)? thanks?)"
                                r"(?: jarvis)?[.!]*$", re.I)
 
@@ -562,14 +674,19 @@ class VoiceService:
             self._follow_pending = False
             if self.speaker:
                 self.speaker.stop()  # "Hey Jarvis" while it talks: stop talking and listen
-                if data.get("trigger") != "follow-up":
+                if data.get("trigger") != "follow-up" and not data.get("direct"):
                     self.speaker.chime()  # ...and let the user hear that it is listening (a follow-up is already talking)
+        if type_ == "voice.unclear" and self.speaker:
+            self._follow_pending = True  # after the apology, listen again - no wake word needed to repeat it
+            self.speaker.say("Sorry, I didn't catch that. Please say it again.")
         if type_ == "voice.slow" and self.speaker:
             self.speaker.say("Sorry, I was too slow to catch that. Please say it again.")
         if self.loop and not self.loop.is_closed():
             self.loop.call_soon_threadsafe(lambda: self.app.bus.emit(type_, **data))
 
     def _speaking(self, on: bool) -> None:
+        if self.listener:
+            self.listener.set_talking(on)
         if not on and self._follow_pending and self.listener:  # the whole reply has been said: listen for the next thing
             self._follow_pending = False
             self.listener.follow_up(FOLLOW_UP_SECONDS)

@@ -37,7 +37,7 @@ KEY = "#010203"  # transparent colour around the circle
 BG, CARD, FG, MUTED, LINE, ACCENT, AMBER = "#0b1220", "#131c30", "#e2e8f0", "#8b98ad", "#1f2a44", "#22d3ee", "#f59e0b"
 COLORS = {"idle": "#22d3ee", "waiting": "#22d3ee", "listening": "#22c55e", "recording": "#22c55e", "transcribing": "#a3e635",
           "thinking": "#f59e0b", "executing": "#fb923c", "speaking": "#60a5fa", "error": "#ef4444", "offline": "#64748b", "loading": "#94a3b8", "following": "#4ade80"}
-LABELS = {"idle": "Ready", "waiting": "Listening for “Hey Jarvis”", "recording": "Listening…", "transcribing": "Understanding…",
+LABELS = {"idle": "Ready", "waiting": "Say “Jarvis”", "recording": "Listening…", "transcribing": "Understanding…",
           "thinking": "Thinking…", "executing": "Working…", "speaking": "Speaking", "error": "Something went wrong", "offline": "Not running",
           "loading": "Loading speech model…", "listening": "Listening…", "following": "Listening — just keep talking"}
 FONT = ("Segoe UI", 9)
@@ -266,11 +266,11 @@ class Overlay:
                 self.pos_file.write_text(json.dumps({"x": self.root.winfo_x(), "y": self.root.winfo_y()}))
             except OSError:
                 pass
-        elif self.panel_fade.shown and self.pinned:  # a click keeps the panel open, a second click closes it
-            self.pinned = False
+        elif self.panel_fade.shown:  # a click just opens/closes it; only the pin keeps it open (clicks used to pin it,
+            self.pinned = False      # so it stayed after the pointer left - the owner's "it stays for a long time")
+            self._pin_color()
             self._hide_panel()
         else:
-            self.pinned = True
             self._show_panel()
 
     def _area(self) -> tuple[int, int, int, int]:
@@ -351,7 +351,19 @@ class Overlay:
 
     def _toggle_pin(self):
         self.pinned = not self.pinned
+        self._pin_color()
+
+    def _pin_color(self):
         self.pin.configure(fg=ACCENT if self.pinned else MUTED)
+
+    def _on_orb(self) -> bool:
+        """The pointer is over the visible orb (a circle), not just the square window around its glow."""
+        try:
+            px, py = self.root.winfo_pointerxy()
+            cx, cy = self.root.winfo_rootx() + ORB / 2, self.root.winfo_rooty() + ORB / 2
+        except tk.TclError:
+            return False
+        return (px - cx) ** 2 + (py - cy) ** 2 <= 27 ** 2
 
     def _toggle_history(self):
         self.history_open = not self.history_open
@@ -507,7 +519,7 @@ class Overlay:
 
     def _hover(self):
         """Open after a short, deliberate hover; close shortly after the pointer leaves (not while typing)."""
-        on_orb = self._pointer_in(self.root, margin=2)
+        on_orb = self._on_orb()
         if not self.panel_fade.shown:
             if on_orb:
                 self.hover_since = self.hover_since or time.time()
@@ -518,13 +530,14 @@ class Overlay:
             return
         if self.pinned:
             return
-        inside = on_orb or self._pointer_in(self.panel) or self._pointer_in(self.bar)
-        typing = self.root.focus_get() is self.entry and self.entry.get().strip()
+        inside = on_orb or self._pointer_in(self.panel, margin=4) or self._pointer_in(self.bar, margin=4)
+        # half-typed text keeps it open only while the pointer is still near it
+        typing = self.root.focus_get() is self.entry and self.entry.get().strip() and self._pointer_in(self.panel, margin=80)
         if inside or typing:
             self.outside_since = None
         elif self.outside_since is None:
             self.outside_since = time.time()
-        elif time.time() - self.outside_since > 0.45:
+        elif time.time() - self.outside_since > 0.25:
             self.hover_since = None
             self._hide_panel()
 

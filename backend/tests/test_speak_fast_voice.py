@@ -1,5 +1,6 @@
 """Spoken replies from the server (speak.py) and the fast/accurate speech model pair (listen.py), without audio."""
 import asyncio
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -345,6 +346,9 @@ class FakeListener:
     def follow_up(self, seconds=8.0):
         self.follow_ups.append(seconds)
 
+    def set_talking(self, on):
+        self.talking = on
+
     def running(self):
         return True
 
@@ -355,9 +359,9 @@ def test_after_a_spoken_reply_the_next_request_needs_no_wake_word(home, tmp_path
     svc = VoiceService(j, speaker=speaker)
     svc.listener = listener
     run(svc.handle("What is the capital of France?", "en"))
-    assert listener.follow_ups == [8.0]  # conversation mode opened once the reply was said
+    assert listener.follow_ups == [5.0]  # conversation mode opened once the reply was said
     run(svc.handle("thanks", "en"))
-    assert listener.follow_ups == [8.0]  # "thanks" ends the conversation: back to the wake word
+    assert listener.follow_ups == [5.0]  # "thanks" ends the conversation: back to the wake word
     j.db.close()
 
 
@@ -370,7 +374,7 @@ def test_conversation_window_opens_only_after_the_last_sentence_is_spoken(home, 
     run(svc.handle("count to two", "en"))
     assert listener.follow_ups == [] and svc._follow_pending
     svc._speaking(False)  # the speaker reports it has finished
-    assert listener.follow_ups == [8.0]
+    assert listener.follow_ups == [5.0]
     svc._event("voice.wake", {"trigger": "follow-up"})
     j.db.close()
 
@@ -442,3 +446,74 @@ def test_voice_engine_setting_is_validated(jarvis):
         h = {"Authorization": f"Bearer {jarvis.settings.api_token()}"}
         assert c.put("/api/settings", json={"voice": {"local_tts": "robot"}}, headers=h).status_code >= 400
         assert c.put("/api/settings", json={"voice": {"local_tts": "kokoro"}}, headers=h).json()["voice"]["local_tts"] == "kokoro"
+
+
+# -- plain "Jarvis", unclear speech, JARVIS's own voice (2026-11-20) ----------------------------------------------------------
+def test_plain_jarvis_wake_pattern():
+    from jarvis.listen import WAKE_START
+
+    for text, rest in (("Jarvis.", ""), ("Jarvis, what time is it?", "what time is it?"), ("Hey, Jarvis.", ""), ("Okay Jarvis open notepad", "open notepad")):
+        m = WAKE_START.match(text)
+        assert m and text[m.end():].strip() == rest, text
+    for text in ("Javascript is fun.", "Travis, come here.", "Jevas Grip is fun.", "What is the capital of France?"):
+        assert not WAKE_START.match(text), text
+
+
+def test_wake_check_uses_the_look_alike_prompt_and_drops_an_unclear_rest(tmp_path):
+    from jarvis.listen import VERIFY_PROMPT
+
+    class Model:
+        def __init__(self, text, lp):
+            self.text, self.lp, self.prompts = text, lp, []
+
+        def transcribe(self, audio, language=None, **opts):
+            self.prompts.append(opts.get("initial_prompt"))
+            return iter([SimpleNamespace(text=self.text, no_speech_prob=0.02, avg_logprob=self.lp)]), None
+
+    lst = LocalListener(tmp_path, lambda *a: None, lambda *a: None, english_size="base.en")
+    lst._whisper_ready.set()
+    lst._whisper = lst._english = Model("Jarvis, what time is it?", -0.1)
+    assert lst._verify_wake(np.zeros(16000, "float32"))[0] == "what time is it?" and lst._english.prompts == [VERIFY_PROMPT]
+    lst._english = Model("Jarvis, mumble grumble", -1.2)
+    assert lst._verify_wake(np.zeros(16000, "float32"))[0] == ""  # the wake word counts, the unclear rest is asked for again
+    lst._english = Model("Javascript is fun", -0.2)
+    assert lst._verify_wake(np.zeros(16000, "float32")) is None
+
+
+def test_unclear_speech_is_not_acted_on_and_the_user_is_asked_again(tmp_path):
+    events, done = [], []
+    detector = FakeWhisper("base", "en", {"en": 0.9}, "unused")
+    english = FakeWhisper("base.en", "en", {}, " You can change your view.")
+    english.transcribe = lambda audio, language=None, **o: (iter([SimpleNamespace(text=" You can change your view.", no_speech_prob=0.27, avg_logprob=-1.2)]), None)
+    lst = LocalListener(tmp_path, lambda t, d: events.append((t, d)), lambda *a: done.append(a), model_size="base", fast_size="base", english_size="base.en")
+    lst._whisper, lst._english, lst.keep_samples = detector, english, False
+    lst._whisper_ready.set()
+    lst._transcribe(np.zeros(16000, "float32"))
+    assert done == [] and ("voice.unclear" in [t for t, _ in events]) and "asked to repeat" in lst.last["note"]
+
+
+def test_after_saying_sorry_the_conversation_stays_open(home, tmp_path):
+    j = make(home, tmp_path)
+    speaker, listener = FakeSpeaker(), FakeListener()
+    svc = VoiceService(j, speaker=speaker)
+    svc.listener = listener
+    svc._event("voice.unclear", {"guess": "x"})
+    assert speaker.said == ["Sorry, I didn't catch that. Please say it again."] and svc._follow_pending
+    svc._speaking(False)
+    assert listener.follow_ups == [5.0]
+    j.db.close()
+
+
+def test_jarvis_talking_is_passed_to_the_listener(home, tmp_path):
+    j = make(home, tmp_path)
+    svc = VoiceService(j, speaker=FakeSpeaker())
+    calls = []
+    svc.listener = SimpleNamespace(set_talking=calls.append, follow_up=lambda s: None, running=lambda: True)
+    svc._speaking(True)
+    svc._speaking(False)
+    assert calls == [True, False]
+    lst = LocalListener(tmp_path, lambda *a: None, lambda *a: None)
+    lst.set_talking(True)
+    assert lst._jarvis_talking
+    lst.set_talking(False)
+    assert not lst._jarvis_talking and lst._spoke_until > time.time()  # the room's echo is ignored for a moment too

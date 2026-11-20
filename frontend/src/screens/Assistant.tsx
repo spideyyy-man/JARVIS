@@ -24,7 +24,7 @@ export function Assistant({ listen = false }: { listen?: boolean }) {
   const [saveError, setSaveError] = useState("");
   const scroller = useRef<HTMLDivElement>(null);
   const vs = settings?.voice;
-  const wake = v.local ? "Hey Jarvis" : (vs?.wake_word || "jarvis").split(",")[0].trim();
+  const wake = v.local ? "Jarvis" : (vs?.wake_word || "jarvis").split(",")[0].trim();
   const speakReplies = vs?.speak_replies !== false;
   const lang = vs?.language === "auto" ? "auto" : vs?.language?.startsWith("ta") ? "ta-IN" : "en-IN";
 
@@ -125,7 +125,7 @@ export function Assistant({ listen = false }: { listen?: boolean }) {
         {settings?.voice_local && !settings.voice_local.unavailable ? (
           <label className="toggle-row">
             <Switch checked={(vs?.engine ?? "local") === "local"} onChange={(on) => void saveVoice({ engine: on ? "local" : "browser" })} label="Offline listener" />
-            <span>Offline listener (“Hey Jarvis”)</span>
+            <span>Offline listener (“Jarvis”)</span>
           </label>
         ) : null}
         {!v.local && (
