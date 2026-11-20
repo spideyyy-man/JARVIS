@@ -587,6 +587,16 @@ class VoiceService:
             self._tasks.add(fut)
             fut.add_done_callback(self._tasks.discard)
 
+    def say_aloud(self, text: str, alert: bool = False) -> bool:
+        """Announce something unprompted (a timer, an alarm, a reminder). True when this server said it."""
+        from .speak import language_of_text
+
+        if not self.speaks(language_of_text(text)):
+            return False
+        if alert:
+            self.speaker.chime()
+        return self.speaker.say(text)
+
     def speaks(self, lang: str) -> bool:
         """True when this server will say the reply out loud (else the JARVIS window does, if it is open)."""
         voice = self.app.db.get_setting("voice", {})

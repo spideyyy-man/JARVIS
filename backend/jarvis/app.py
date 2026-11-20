@@ -18,7 +18,7 @@ from .knowledge import KnowledgeBase, Memory, make_embedder
 from .llm.base import FORCE_PROVIDER, LLMProvider, LLMRouter
 from .llm.offline import Env, OfflineProvider, fast_talk, match_rules, with_context
 from .security import AuditLog, PathGuard
-from .tools import browser, coding, desktop, files, images, personal, research, system
+from .tools import browser, coding, desktop, everyday, files, images, personal, research, system
 from .tools.registry import ToolExecutor, ToolRegistry, ToolResult
 from .translate import NLLB, Translator, language_of
 from .voice import build_voice
@@ -63,6 +63,7 @@ class Jarvis:
         desktop.register(self.tools, self)
         personal.register(self.tools, self)
         browser.register(self.tools, self)
+        everyday.register(self.tools)
         automation_mod.register(self.tools, self)
         agents_mod.register(self.tools, self)
         self.offline = OfflineProvider(Env(home=self.settings.allowed_roots[0], default_project=lambda: self.db.get_setting("default_project", ""),
@@ -79,7 +80,7 @@ class Jarvis:
         self._continued: dict[str, int] = {}  # per conversation: the decisions the latest continuation already covers
         for name in ("delete_path", "run_command", "git_commit"):  # always ask, every time
             self.tools.get(name).grantable = False
-        for name in ("fetch_url", "web_search", "github_repo_info", "browser_open", "browser_read", "browser_click", "browser_fill", "screen_read", "clipboard_read"):
+        for name in ("fetch_url", "web_search", "github_repo_info", "browser_open", "browser_read", "browser_click", "browser_fill", "screen_read", "clipboard_read", "weather"):
             self.tools.get(name).untrusted_output = True
 
     # -- providers ---------------------------------------------------------------
@@ -124,6 +125,26 @@ class Jarvis:
         self._warm_task = asyncio.create_task(self._keep_model_warm(), name="jarvis-model-warm")
         if self.settings.listen_on_start:
             self.voice.start(asyncio.get_running_loop())
+        self._timer_task = asyncio.create_task(self._timers_loop(), name="jarvis-timers")
+
+    async def _timers_loop(self) -> None:
+        """Timers and alarms (tools/everyday.py) ring on time: checked twice a second (the reminder loop's 15 s
+        would make a one-minute timer up to 15 s late). A missed one (JARVIS was not running) rings at start."""
+        while True:
+            try:
+                items = everyday.timers(self)
+                now = time.time()
+                due = [t for t in items if t["due"] <= now]
+                if due:
+                    self.db.set_setting("timers", [t for t in items if t not in due])
+                    self.bus.emit("timers.changed", timers=[t for t in items if t not in due])
+                    for t in due:
+                        self.proactive.announce("Timer" if t["kind"] == "timer" else "Alarm", everyday.due_message(t), t["kind"])
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - a broken timer must not stop the others
+                pass
+            await asyncio.sleep(0.5)
 
     WARM_EVERY = 45 * 60  # seconds; shorter than the 2 h keep-alive, so the model stays loaded while JARVIS runs
 
@@ -154,9 +175,10 @@ class Jarvis:
             await asyncio.sleep(delay)
 
     async def stop(self) -> None:
-        task = getattr(self, "_warm_task", None)
-        if task:
-            task.cancel()
+        for name in ("_warm_task", "_timer_task"):
+            task = getattr(self, name, None)
+            if task:
+                task.cancel()
         await asyncio.to_thread(self.voice.stop)
         primary = self.llm.primary
         if getattr(primary, "keep_alive", "") and hasattr(primary, "unload"):

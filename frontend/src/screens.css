@@ -149,3 +149,19 @@ input[type="range"] { width: 100%; accent-color: var(--cyan); }
   .screen-head h1 { font-size: 17px; }
 }
 .page-hidden *, .page-hidden *::before, .page-hidden *::after { animation-play-state: paused !important; }
+
+/* everyday skills: quick-try chips and running timers (Assistant screen) */
+.asst-try { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; }
+.try-chip { font: inherit; font-size: 12px; color: var(--text-2); background: var(--panel); border: 1px solid var(--line);
+  border-radius: 999px; padding: 5px 11px; cursor: pointer; transition: background .15s, color .15s, border-color .15s; }
+.try-chip:hover { color: var(--text); border-color: var(--cyan); background: var(--panel-hi); }
+.timer-chips { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; margin-top: 8px; }
+.timer-chip { position: relative; overflow: hidden; display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px;
+  font-variant-numeric: tabular-nums; color: var(--text); background: var(--panel-hi); border: 1px solid var(--line-strong);
+  border-radius: 999px; padding: 4px 6px 4px 11px; }
+.timer-chip.alarm { border-color: color-mix(in srgb, var(--amber) 55%, var(--line)); }
+.timer-chip button { font: inherit; line-height: 1; color: var(--text-3); background: transparent; border: 0; border-radius: 999px;
+  width: 20px; height: 20px; cursor: pointer; }
+.timer-chip button:hover { color: var(--text); background: var(--panel); }
+.timer-bar { position: absolute; left: 0; bottom: 0; height: 2px; background: var(--cyan); transition: width 1s linear; }
+@media (prefers-reduced-motion: reduce) { .timer-bar, .try-chip { transition: none; } }

@@ -21,7 +21,7 @@ from .app import Jarvis
 from .automation import daily_summary
 from .knowledge import search_conversations
 from .security import Level, SecurityError
-from .tools import coding, files, system
+from .tools import coding, everyday, files, system
 from .tools.registry import ToolContext
 
 COOKIE = "jarvis_token"
@@ -182,9 +182,21 @@ def create_app(jarvis: Jarvis | None = None) -> FastAPI:
                 "last": {"request": (request or {}).get("content", "")[:300], "reply": (reply or {}).get("content", "")[:700],
                          "reply_at": (reply or {}).get("created"), "conversation_id": (reply or {}).get("conversation_id")},
                 "history": history,
+                "timers": [{k: t[k] for k in ("id", "kind", "label", "due")} | {"seconds": t.get("seconds")} for t in everyday.timers(j)],
                 "approvals": [{**a, "preview": (a["preview"] or "").strip()[:300]} for a in pending],
                 "activity": list(j.bus.activity)[-14:], "selftest": j.selftest.summary() if j.selftest else last,
                 "capabilities": j.capabilities(), "model": j.llm.current().name, "windows": len(j.bus._subscribers)}
+
+    @app.get("/api/timers")
+    async def timers_list():
+        return {"timers": everyday.timers(j), "now": time.time()}
+
+    @app.delete("/api/timers/{tid}")
+    async def timers_cancel(tid: str):
+        keep = [t for t in everyday.timers(j) if t["id"] != tid]
+        j.db.set_setting("timers", keep)
+        j.bus.emit("timers.changed", timers=keep)
+        return {"ok": True, "timers": keep}
 
     @app.post("/api/selftest")
     async def selftest_start():

@@ -74,6 +74,7 @@ export function Assistant({ listen = false }: { listen?: boolean }) {
             ))}
           </div>)}
         </div>
+        <TimerChips />
       </section>
 
       {!v.sttSupported && (
@@ -86,7 +87,11 @@ export function Assistant({ listen = false }: { listen?: boolean }) {
         {v.turns.length === 0 && !v.reply && !live && (
           <div className="asst-empty dim">
             <p>Say <b>“{wake}”</b> and your request, press <b>Ctrl+Alt+J</b>, or tap the mic.</p>
-            <p>Try: “what time is it” · “turn the volume up” · “open notepad” · “நேரம் என்ன”</p>
+            <div className="asst-try" data-testid="try-chips">
+              {TRY.map((t) => (
+                <button key={t} type="button" className="try-chip" onClick={() => voice.sendText(t)}>{t}</button>
+              ))}
+            </div>
             {v.local && <p>Speak English or Tamil - the offline listener tells them apart. Nothing leaves this computer.</p>}
             {!v.local && lang === "auto" && <p>Auto language: say <b>“Jarvis, Tamil”</b> or <b>“Vanakkam Jarvis”</b> to talk in Tamil, <b>“Jarvis, English”</b> to switch back. Typing in either language switches too.</p>}
           </div>
@@ -134,6 +139,45 @@ export function Assistant({ listen = false }: { listen?: boolean }) {
           <span>{speakReplies ? <Volume2 size={13} /> : <VolumeX size={13} />} Speak replies</span>
         </label>
       </div>
+    </div>
+  );
+}
+
+const TRY = ["what's the weather", "set a timer for 5 minutes", "add milk to my shopping list", "what is 15% of 240",
+  "convert 5 km to miles", "play some lo-fi music", "open notepad", "நேரம் என்ன"];
+
+function clock(left: number): string {
+  const s = Math.max(0, Math.round(left));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  return h ? `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}` : `${m}:${String(sec).padStart(2, "0")}`;
+}
+
+/** Running timers (live countdown, with a thin progress bar) and alarms; × cancels one. */
+function TimerChips() {
+  const timers = useStore((s) => s.timers);
+  const [, tick] = useState(0);
+  useEffect(() => {
+    if (!timers.length) return;
+    const id = window.setInterval(() => tick((n) => n + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [timers.length]);
+  if (!timers.length) return null;
+  const now = Date.now() / 1000;
+  return (
+    <div className="timer-chips" data-testid="timer-chips">
+      {timers.map((t) => {
+        const left = t.due - now;
+        const frac = t.kind === "timer" && t.seconds ? Math.max(0, Math.min(1, left / t.seconds)) : null;
+        const label = t.kind === "timer" ? `${t.label ? t.label + " · " : ""}${clock(left)}`
+          : `${new Date(t.due * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}${t.label ? " · " + t.label : ""}`;
+        return (
+          <span key={t.id} className={`timer-chip ${t.kind}`} title={t.kind === "timer" ? "Timer" : "Alarm"}>
+            <span aria-hidden="true">{t.kind === "timer" ? "⏱" : "⏰"}</span> {label}
+            {frac !== null && <i className="timer-bar" style={{ width: `${frac * 100}%` }} />}
+            <button type="button" aria-label={`Cancel ${t.label || t.kind}`} onClick={() => void api.cancelTimer(t.id)}>×</button>
+          </span>
+        );
+      })}
     </div>
   );
 }

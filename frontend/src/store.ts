@@ -11,8 +11,10 @@ export interface LiveChat { messages: Message[]; streamText: string; streaming: 
 export interface Toast { id: number; kind: "approval" | "info" | "warning" | "error"; title: string; body: string }
 export type RevKey = "chat" | "approval" | "agent" | "workflow" | "notification" | "tool" | "plan";
 
+export interface Timer { id: string; kind: "timer" | "alarm"; label: string; due: number; seconds?: number | null }
 export interface State {
   auth: "unknown" | "ok" | "locked";
+  timers: Timer[];
   connected: boolean;
   status: Status | null;
   settings: Settings | null;
@@ -31,7 +33,7 @@ export interface State {
 
 let state: State = {
   auth: "unknown", connected: false, status: null, settings: null, assistantState: "idle", stateDetail: "", metrics: null, history: [],
-  approvals: {}, notifications: [], runningAgents: {}, agentFeed: [], live: {}, toasts: [],
+  approvals: {}, notifications: [], runningAgents: {}, agentFeed: [], live: {}, toasts: [], timers: [],
   rev: { chat: 0, approval: 0, agent: 0, workflow: 0, notification: 0, tool: 0, plan: 0 },
 };
 const listeners = new Set<() => void>();
@@ -108,6 +110,7 @@ export async function bootstrap() {
     await installServerSpeech().then(() => voice.detect(), () => undefined);
     if (settings.voice.wake_on_start) voice.setWakeMode(true);
     setState({ auth: "ok", settings, approvals: { ...state.approvals, ...map }, notifications, history: hist.points.slice(-150) });
+    api.timers().then((r) => setState({ timers: r.timers }), () => undefined);
     applyStatus(status);
     bus.connect();
   } catch (e) {
@@ -178,7 +181,10 @@ export function initStore() {
     setState({ notifications: [n, ...state.notifications.filter((x) => x.id !== n.id)].slice(0, 40), rev: bump("notification") });
     pushToast(n.level === "error" ? "error" : n.level === "warning" ? "warning" : "info", n.title, n.body);
   });
-  bus.on("assistant.announce", (e) => voice.announce(String(e.text ?? "")));
+  bus.on("assistant.announce", (e) => {
+    if (!e.server_speaks) voice.announce(String(e.text ?? "")); // JARVIS itself already said it (no second voice)
+  });
+  bus.on("timers.changed", (e) => setState({ timers: (e.timers as Timer[]) ?? [] }));
   bus.on("ui.listen", () => voice.listenNow()); // Ctrl+Alt+J or the tray's "Talk to JARVIS"
   bus.on("voice.engine", (e) => {
     const st = (e.status ?? {}) as { running?: boolean; state?: string };

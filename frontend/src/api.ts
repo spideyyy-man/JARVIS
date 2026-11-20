@@ -200,6 +200,8 @@ export const api = {
     req<{ conversation_id: string; streaming: boolean }>("POST", "/api/chat", { text, conversation_id, source }),
   cancelChat: (id: string) => req<{ cancelled: boolean }>("POST", `/api/chat/${enc(id)}/cancel`),
   voiceListen: () => req<{ ok: boolean; reason?: string }>("POST", "/api/voice/listen"),
+  timers: () => req<{ timers: { id: string; kind: "timer" | "alarm"; label: string; due: number; seconds?: number | null }[] }>("GET", "/api/timers"),
+  cancelTimer: (id: string) => req<{ ok: boolean }>("DELETE", `/api/timers/${enc(id)}`),
   conversations: () => req<ConversationSummary[]>("GET", "/api/conversations"),
   searchConversations: (query: string) => req<SearchHit[]>("GET", `/api/conversations/search${q({ q: query })}`),
   conversation: (id: string) => req<Conversation>("GET", `/api/conversations/${enc(id)}`),

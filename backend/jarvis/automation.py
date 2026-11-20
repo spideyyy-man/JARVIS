@@ -515,7 +515,9 @@ class Proactive:
     def announce(self, title: str, text: str, kind: str) -> None:
         note = self.app.db.notify("info", title, text)
         self.app.bus.emit("notification", notification=note)
-        self.app.bus.emit("assistant.announce", text=text, kind=kind, title=title)
+        # Said by JARVIS itself when it can (no window needed); the window speaks it otherwise.
+        spoken = self.app.voice.say_aloud(text, alert=kind in ("timer", "alarm")) if getattr(self.app, "voice", None) else False
+        self.app.bus.emit("assistant.announce", text=text, kind=kind, title=title, server_speaks=spoken)
 
     def _upcoming_events(self, now: float) -> list[str]:
         """Announce each event once, about ten minutes before it starts."""

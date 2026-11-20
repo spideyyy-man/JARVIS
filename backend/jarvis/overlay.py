@@ -313,6 +313,7 @@ class Overlay:
         self.pin.bind("<Button-1>", lambda _e: self._toggle_pin())
         self.meta = tk.Label(p, text="", font=SMALL, fg=MUTED, bg=BG, anchor="w")
         self.meta.pack(fill="x", padx=10)
+        self.timer_row = tk.Label(p, text="", font=BOLD, fg=ACCENT, bg=BG, anchor="w")  # live countdowns; hidden when none
 
         card = RoundBox(p, PANEL_W - 20, fill=CARD, radius=10, pad=9)
         card.pack(padx=10, pady=(6, 0))
@@ -548,18 +549,49 @@ class Overlay:
         inner = 6 + (2 * abs(math.sin(self.phase * 2.2)) if state in ("recording", "speaking") else 0)
         c.create_oval(cx - inner, cy - inner, cx + inner, cy + inner, fill=color, outline="")
 
+    def _timer_text(self) -> str:
+        now, parts = time.time(), []
+        for t in (self.data or {}).get("timers") or []:
+            if t["kind"] == "timer":
+                left = max(0, int(t["due"] - now))
+                h, rem = divmod(left, 3600)
+                clock = f"{h}:{rem // 60:02d}:{rem % 60:02d}" if h else f"{rem // 60}:{rem % 60:02d}"
+                parts.append(f"⏱ {t['label'] + ' ' if t['label'] else ''}{clock}")
+            else:
+                parts.append("⏰ " + time.strftime("%I:%M %p", time.localtime(t["due"])).lstrip("0") + (f" {t['label']}" if t["label"] else ""))
+        return "   ·   ".join(parts[:3])
+
+    def _render_timers(self):
+        text = self._timer_text()
+        if text and not self.timer_row.winfo_manager():
+            self.timer_row.pack(fill="x", padx=10, pady=(2, 0), after=self.meta)
+        elif not text and self.timer_row.winfo_manager():
+            self.timer_row.pack_forget()
+        self._set_text("timers", self.timer_row, text)
+
+    def _nearest_timer(self) -> float | None:
+        """Fraction of the soonest countdown still to go (for the ring round the orb), or None."""
+        running = [t for t in (self.data or {}).get("timers") or [] if t["kind"] == "timer" and t.get("seconds")]
+        if not running:
+            return None
+        soonest = min(running, key=lambda t: t["due"])
+        return max(0.0, min(1.0, (soonest["due"] - time.time()) / soonest["seconds"]))
+
     def _draw_orb(self):
         """Smooth orb frames: ~30 fps while something is happening, ~15 fps at rest; time-based, so a late frame
         never makes the motion stutter."""
         now = time.time()
         state = self._state()
         approval = bool(self.data and self.data.get("approvals"))
-        resting = state in ("waiting", "idle", "offline") and not approval
+        resting = state in ("waiting", "idle", "offline") and not approval and not (self.data or {}).get("timers")
         if now - self._last < (1 / 15 if resting else 1 / 30):
             return
         self.orb.t += min(0.2, now - self._last)
         self._last = now
         self.orb.state, self.orb.approval = state, approval
+        self.orb.timer = self._nearest_timer()
+        if self.panel_fade.shown and self.orb.timer is not None:
+            self._render_timers()  # the countdown ticks every second, not only when new data arrives
         self.orb.color = ease_color(self.orb.color, ORB_COLORS.get(state, ORB_COLORS["idle"]), 0.16)
         try:
             self.layered.show(render(self.orb))
@@ -590,6 +622,7 @@ class Overlay:
         elif last.get("note"):
             bits.append(elide(last["note"], 40))
         self._set_text("meta", self.meta, " · ".join(bits))
+        self._render_timers()
         ex = d.get("last") or {}
         self._set_text("you", self.you, "You: " + elide(ex.get("request") or "-", 48))
         self._set_text("reply", self.reply, elide(ex.get("reply") or "-", 170))

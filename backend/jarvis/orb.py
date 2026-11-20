@@ -31,6 +31,7 @@ class OrbState:
     t: float = 0.0  # seconds, for animation
     color: tuple[float, float, float] = COLORS["waiting"]  # current (eased) colour
     approval: bool = False
+    timer: float | None = None  # fraction of the soonest timer still to go: a thin ring that shrinks as it runs down
 
 
 def ease_color(current, target, k: float = 0.12) -> tuple[float, float, float]:
@@ -165,6 +166,10 @@ def render(o: OrbState) -> Image.Image:
         img.alpha_composite(_core_glow(col, cr, active))
         d = ImageDraw.Draw(img)
         d.ellipse((c - cr, c - cr, c + cr, c + cr), fill=(*[min(255, v + 60) for v in col], 255 if active else 150))
+    # a running timer: a thin bright ring just outside the rim, shrinking clockwise from the top as time runs out
+    if o.timer is not None:
+        rr = r + 3.2 * SS
+        d.arc((c - rr, c - rr, c + rr, c + rr), -90, -90 + 360 * max(0.004, o.timer), fill=(226, 232, 240, 230), width=int(1.6 * SS))
     # an action waiting for approval: an amber arc sweeping round the outside, and a badge
     if o.approval:
         img.alpha_composite(_rotated(_comet(AMBER, inset=-4, span=6, n=14, width=2.4), t * 220))

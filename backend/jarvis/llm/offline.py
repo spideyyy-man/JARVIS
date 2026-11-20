@@ -321,8 +321,95 @@ def _calendar_view(text: str, m: re.Match, env: Env):
     return "calendar_events", {}
 
 
+# -- everyday skills (tools/everyday.py): answered instantly, no model ------------------------------------------------------
+def _timer(text, m, env):
+    from ..tools.everyday import parse_duration
+
+    if not parse_duration(text):
+        return None
+    label = ""
+    for pattern in (r"\b(?:for|called|named)\s+(?:the\s+|my\s+)?([a-z][a-z ]{0,20}?)\s*[.!]?$", r"\b(?:a|an|the|my)\s+([a-z]+)\s+timer\b"):
+        hit = re.search(pattern, text, re.I)
+        if hit and not re.search(r"\d|second|minute|hour|half|quarter|\btimer\b", hit.group(1), re.I):
+            label = hit.group(1).strip()
+            break
+    return "set_timer", {"duration": text, "label": label}
+
+
+def _alarm(text, m, env):
+    hit = re.search(r"\b(?:at|for)\s+(\d{1,2}(?:[:.]\d{2})?\s*(?:a\.?\s?m\.?|p\.?\s?m\.?)?|noon|midnight)", text, re.I)
+    if not hit:
+        return None
+    label = re.search(r"\b(?:to|for)\s+(?!\d)([a-z][a-z ]{2,30}?)\s*[.!]?$", text[hit.end():], re.I)
+    return "set_alarm", {"time_of_day": hit.group(1), "label": label.group(1) if label else ""}
+
+
+def _cancel_timer(text, m, env):
+    label, kind = (m.group("label") or "").lower(), m.group("kind").lower()
+    if label in ("", "the", "my", "all", "a"):
+        return "cancel_timer", {"which": "all" if "all" in text.lower() or kind.endswith("s") else kind}
+    return "cancel_timer", {"which": label}
+
+
+def _weather(text, m, env):
+    t = strip_context(text)
+    place = re.search(r"\b(?:in|at|for)\s+(?!here\b|today\b|tomorrow\b|the week\b)([A-Za-z][A-Za-z .'-]*?)(?:\s+(?:today|tomorrow|now|right now|this week|later))?\s*[?.!]*$", t)
+    return "weather", {"place": place.group(1).strip() if place else "", "day": "tomorrow" if re.search(r"\btomorrow\b", t, re.I) else "today"}
+
+
+def _convert(text, m, env):
+    from ..tools.everyday import _unit
+
+    if not (_unit(m.group("f")) and _unit(m.group("to"))):
+        return None
+    return "convert_units", {"value": float(m.group("v")), "from_unit": m.group("f").strip(), "to_unit": m.group("to").strip()}
+
+
+def _math(text, m, env):
+    from ..tools.everyday import is_math
+
+    t = strip_context(text)
+    return ("calculate", {"expression": t}) if is_math(t) else None
+
+
+def _list(tool):
+    def build(text, m, env):
+        name = (m.groupdict().get("list") or "shopping").strip()
+        if re.fullmatch(r"to-?\s?do|tasks?|task", name, re.I):
+            return None  # JARVIS's task list ("what's on my to-do list") is list_dev_tasks
+        args = {"list_name": name}
+        if "items" in m.groupdict() and m.group("items"):
+            args["items"] = m.group("items")
+        if "item" in m.groupdict() and m.group("item"):
+            args["item"] = m.group("item")
+        return tool, args
+    return build
+
+
+EVERYDAY_RULES = [
+    R("orchestrator", r"\b(?:cancel|stop|delete|remove|clear|turn off|dismiss)\s+(?:the |my |all |all my |all the )?(?:(?P<label>[a-z]+)\s+)?(?P<kind>timers?|alarms?)\b", _cancel_timer),
+    R("orchestrator", r"\b(?:how (?:much|long) (?:time )?(?:is )?left|time (?:is )?left on|(?:what|which|any) (?:timers?|alarms?)|(?:list|show)(?: me)?(?: my| the)? (?:timers?|alarms?)|timer status)\b",
+      lambda t, m, e: ("list_timers", {})),
+    R("orchestrator", r"\b(?:set|start|put on|make|create|begin)\b.*\btimer\b|\btimer\s+for\b|^\s*(?:a\s+)?\S+\s*(?:minute|min|second|sec|hour)s?\s+timer\b", _timer),
+    R("orchestrator", r"\b(?:set|create|make)\b.*\balarm\b|\bwake me(?: up)?\s+at\b|\balarm\s+(?:for|at)\b", _alarm),
+    R("orchestrator", r"^\s*(?:set|change|update)\s+my\s+(?:home\s+)?(?:city|location|town)\s+to\s+(?P<c>.+?)\s*[.!]?$|^\s*my\s+(?:home\s+)?(?:city|town|location)\s+is\s+(?P<c2>.+?)\s*[.!]?$",
+      lambda t, m, e: ("set_home_city", {"city": m.group("c") or m.group("c2")})),
+    R("orchestrator", r"\b(?:weather|forecast|temperature outside|how (?:hot|cold) is it(?: outside)?|(?:is it|will it)(?: going to)? (?:rain|snow)|need an umbrella)\b", _weather),
+    R("orchestrator", r"^\s*(?:please\s+)?(?:add|put)\s+(?P<items>.+?)\s+(?:to|on|in)\s+(?:my|the)\s+(?P<list>[a-z -]+?)\s*list\s*[.!]?$", _list("list_add")),
+    R("orchestrator", r"^\s*(?:what(?:'s| is)\s+(?:on|in)|show(?: me)?|read(?: me| out)?|tell me|open)\s+(?:my|the)\s+(?P<list>[a-z -]+?)\s*list\s*\??$", _list("list_show")),
+    R("orchestrator", r"^\s*(?:please\s+)?(?:remove|delete|take|cross off|tick off)\s+(?P<item>.+?)\s+(?:from|off)\s+(?:my|the)\s+(?P<list>[a-z -]+?)\s*list\s*[.!]?$", _list("list_remove")),
+    R("orchestrator", r"^\s*(?:clear|empty|reset)\s+(?:my|the)\s+(?P<list>[a-z -]+?)\s*list\s*[.!]?$", _list("list_clear")),
+    R("orchestrator", r"^\s*(?:what(?:'s| is)\s+|convert\s+|how much is\s+)?(?P<v>-?\d+(?:\.\d+)?)\s*(?P<f>[a-z°/][a-z°/ ]*?)\s+(?:to|in|into)\s+(?P<to>[a-z°/][a-z°/ ]*?)\s*\??$", _convert),
+    R("orchestrator", r"^\s*how many\s+(?P<to>[a-z°/][a-z°/ ]*?)\s+(?:are\s+)?(?:in|is)\s+(?P<v>-?\d+(?:\.\d+)?)\s*(?P<f>[a-z°/][a-z°/ ]*?)\s*\??$", _convert),
+    R("orchestrator", r"\d", _math),
+    R("orchestrator", r"^\s*(?:jarvis[,\s]+)?(?:please\s+)?play\s+(?!(?:the |some |my |a )?(?:music|songs?|video|playback|media|next|previous)\b)(?P<q>.+?)(?:\s+on\s+(?P<svc>youtube music|youtube|spotify))?\s*[.!]?$",
+      lambda t, m, e: ("play_music", {"query": m.group("q"), "service": "youtube music" if (m.group("svc") or "") == "youtube music" else "youtube"})),
+]
+
+
 RULES: list[Rule] = [
     *TA_RULES,  # Tamil first: they only fire on Tamil script, so they never take an English request
+    *EVERYDAY_RULES,
     R("orchestrator", r"^\s*(?:jarvis[,\s]+)?(?:please\s+)?(?:schedule|add|book|put|create|set up)\b.*\b(meeting|event|appointment|call|lunch|dinner|interview|session|class|calendar)\b", _calendar_add, whole=True),
     R("orchestrator", r"\b(my|the) (calendar|agenda|schedule)\b|\b(any|what|which|do i have)\b.*\b(meetings?|appointments?|events?)\b|\bwhat (do i have|is planned|am i doing) (today|tomorrow|this week)\b", _calendar_view),
     R("orchestrator", r"^\s*(?:jarvis[,\s]+)?(?:please\s+)?(?:send\s+(?:an?\s+)?e-?mail\s+to|e-?mail)\s+([^\s,]+@[^\s,]+)\s*(?:with (?:the )?subject\s+[\"']?(.+?)[\"']?\s+)?(?:saying|that says|telling (?:him|her|them)(?: that)?|:|about)\s*(.+)$",
@@ -779,6 +866,31 @@ def _r_workflows(d, q, t):
     return "**Workflows**\n" + "\n".join(f"- {w['name']} (`{w['id']}`): {w['schedule']}, {'enabled' if w['enabled'] else 'disabled'}" for w in d["workflows"])
 
 
+def _and(items: list) -> str:
+    items = [str(i) for i in items]
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1] if items else ""
+
+
+def _r_timers(d, q, t):
+    if not d["timers"]:
+        return "You have no timers or alarms."
+    parts = [(f"the {x['label']} timer has {x['left']} left" if x["label"] else f"your timer has {x['left']} left") if x["kind"] == "timer"
+             else f"your alarm is set for {x['at']}" + (f" ({x['label']})" if x["label"] else "") for x in d["timers"]]
+    text = _and(parts)
+    return text[0].upper() + text[1:] + "."
+
+
+def _r_weather(d, q, t):
+    def deg(v):
+        return f"{round(v)}°" if v is not None else "?"
+    rain = f", {d['rain_chance']}% chance of rain" if d.get("rain_chance") is not None else ""
+    if d["day"] == "tomorrow":
+        return f"Tomorrow in {d['place']}: {d['sky'] or 'no forecast'}, {deg(d['low'])} to {deg(d['high'])}C{rain}."
+    n = d["now"]
+    return (f"In {d['place']} it's {deg(n['temp'])}C and {n['sky'] or 'no report'}" + (f", feels like {deg(n['feels'])}" if n.get("feels") is not None else "")
+            + f". Today {deg(d['low'])} to {deg(d['high'])}{rain}.")
+
+
 def _r_page(d, q, t):
     els = "\n".join(f"{x['index']}. [{x['kind']}] {x['label']}" for x in d.get("elements", [])[:14])
     return f"**{d.get('title') or d.get('url')}** ({d.get('url')})\n\n{' '.join(d.get('text', '').split())[:700]}" + (f"\n\nYou can interact with:\n{els}" if els else "")
@@ -864,6 +976,20 @@ RENDERERS: dict[str, Callable] = {
     "organize_folder_plan": lambda d, q, t: (f"`{d['path']}` has no loose files to organize." if not d.get("files") else ""),
     "organize_folder": lambda d, q, t: f"Organized `{d['path']}`: moved {d['moved']} file(s) into category folders.",
     "add_dev_task": lambda d, q, t: f"Noted. I'll track: \"{d['title']}\"" + (f" and remind you at {time.strftime('%H:%M', time.localtime(d['due']))}." if d.get("due") else ".") + f" (`{d['id']}`)",
+    "set_timer": lambda d, q, t: f"Timer set for {d['in']}" + (f" for {d['label']}" if d.get("label") else "") + ".",
+    "set_alarm": lambda d, q, t: f"Alarm set for {d['at']}" + (f" ({d['label']})" if d.get("label") else "") + f", {d['in']} from now.",
+    "list_timers": _r_timers,
+    "cancel_timer": lambda d, q, t: ("Cancelled " + _and([f"the {x}" if x in ("timer", "alarm") else f"the {x} timer" for x in d["cancelled"]]) + "."
+                                     if d["cancelled"] else "There was nothing to cancel."),
+    "weather": _r_weather,
+    "set_home_city": lambda d, q, t: f"Got it - your city is {d['city']}. Ask me about the weather any time.",
+    "calculate": lambda d, q, t: f"That's {d['result']}.",
+    "convert_units": lambda d, q, t: f"{d['value']} {d['from']} is {d['result']} {d['to']}.",
+    "list_add": lambda d, q, t: (f"Added {_and(d['added'])} to your {d['list']} list." if d["added"] else f"That's already on your {d['list']} list."),
+    "list_show": lambda d, q, t: (f"Your {d['list']} list: {_and(d['items'])}." if d["items"] else f"Your {d['list']} list is empty."),
+    "list_remove": lambda d, q, t: (f"Removed {_and(d['removed'])} from your {d['list']} list." if d["removed"] else f"That wasn't on your {d['list']} list."),
+    "list_clear": lambda d, q, t: f"Cleared your {d['list']} list.",
+    "play_music": lambda d, q, t: f"Playing {d['playing']} on YouTube in your browser.",
     "remember": lambda d, q, t: f"I'll remember that: \"{d['content']}\".",
     "recall": lambda d, q, t: ("Here's what I have:\n" + "\n".join(f"- {m['content']}" for m in d["memories"])) if d["memories"] else "I don't have anything stored about that.",
     "kb_ingest": lambda d, q, t: (f"Indexed {d.get('indexed')} document(s) into the '{d.get('space')}' space ({d.get('new_or_updated')} new or updated)." if "indexed" in d else f"\"{d['title']}\" is {d['status']}" + (f" ({d['chunks']} passages, space '{d['space']}')." if d.get("chunks") else ".")),

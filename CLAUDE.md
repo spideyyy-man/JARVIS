@@ -116,6 +116,16 @@ Since 2026-11-19 (Edge's online recogniser failed on the laptop with "Speech rec
   (piper | kokoro | windows) or the voice setting `local_tts` (switches live). `python -m jarvis.speak [--kokoro]`
   downloads the voices (setup.ps1 does Piper). The cloud "voice studio" type services were not used: they need the
   internet and credits and add network delay to every sentence.
+- **Everyday skills** (2026-11-20, `tools/everyday.py`, `docs/ASSESSMENT.md`): timers (labels, "how much time is
+  left", cancel) and alarms (next occurrence of a clock time) stored in the `timers` setting and rung by
+  `app._timers_loop` (every 0.5 s; spoken with a chime via `Proactive.announce` -> `VoiceService.say_aloud`,
+  `assistant.announce.server_speaks` stops the window repeating it); weather (Open-Meteo, no key, `set_home_city` /
+  "my city is X", READ + untrusted output); `calculate` (spoken maths, AST evaluator, bounded powers) and
+  `convert_units`; lists in the `lists` setting (`list_clear` asks); `play_music` (YouTube search via `open_url`,
+  CONFIRM). Routed instantly by `offline.EVERYDAY_RULES` (placed right after the Tamil rules; "to-do list" stays
+  `list_dev_tasks`, "play some music" stays media keys) and owned by the orchestrator. UI: `GET/DELETE /api/timers`,
+  `timers.changed` events, timer chips + quick-try chips on the Assistant screen, countdown row in the hover panel,
+  a shrinking ring on the orb (`OrbState.timer`).
 - **Floating icon** (`overlay.py`, tkinter, its own `pythonw` process started by the desktop app with
   `--parent PID`): a 46 px always-on-top circle, coloured by state; hover (or click to pin) shows a panel from
   `GET /api/overlay` - now/heard/last exchange, approvals with Approve/Deny, activity (`EventBus.activity`,
