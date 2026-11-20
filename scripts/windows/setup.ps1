@@ -63,6 +63,9 @@ Write-Host "== Offline speech (wake word 'Jarvis' + Whisper, English and Tamil)"
 Write-Host "   downloading the speech models (~490 MB, once)..."
 & backend\.venv\Scripts\python.exe -c "from jarvis.config import load_settings; from faster_whisper.utils import download_model; import openwakeword; s = load_settings(); openwakeword.utils.download_models(['hey_jarvis']); download_model(s.stt_english_model, cache_dir=str(s.data_dir / 'models' / 'whisper')) if s.stt_english_model else None; download_model(s.stt_fast_model, cache_dir=str(s.data_dir / 'models' / 'whisper')); download_model(s.stt_local_model, cache_dir=str(s.data_dir / 'models' / 'whisper')); print('   ok')"
 if ($LASTEXITCODE -ne 0) { Write-Host "   download incomplete - JARVIS fetches the models itself on first start." -ForegroundColor Yellow }
+Write-Host "   'Jarvis' keyword spotter (~17 MB)..."
+& backend\.venv\Scripts\python.exe -c "import sys; from jarvis.config import load_settings; from jarvis.listen import download_wake_model; sys.exit(0 if download_wake_model(load_settings().data_dir / 'models') else 1)"
+if ($LASTEXITCODE -ne 0) { Write-Host "   download incomplete - plain 'Jarvis' is checked the slower way until you re-run this script." -ForegroundColor Yellow }
 Write-Host "   Tamil speech model (Whisper small trained on Tamil, ~240 MB)..."
 & backend\.venv\Scripts\python.exe -c "import sys; from jarvis.config import load_settings; from jarvis.listen import download_tamil_model; sys.exit(0 if download_tamil_model(load_settings().data_dir / 'models') else 1)"
 if ($LASTEXITCODE -ne 0) { Write-Host "   download incomplete - Tamil is written by the plain model until you re-run this script." -ForegroundColor Yellow }

@@ -181,6 +181,20 @@ Since 2026-11-19 (Edge's online recogniser failed on the laptop with "Speech rec
   - Replay of the owner's 22 recordings since 19:34 (`scratchpad/replay_new.py`): Tamil now comes out as Tamil, "talk in
     Tamil" right twice. The CPU was overloaded (an unknown elevated python, PID 37240, using ~1 core since 2026-11-19), so
     transcription took 10-125 s per request during the test.
+- **"Jarvis" caught at once, better English** (2026-11-21; the owner had to call 5-10 times):
+  - The plain-"Jarvis" Whisper check ran inside the listening loop and took a median 15 s per check (up to 57 s) on the
+    overloaded laptop; repeated calls piled up and were skipped. Now a streaming keyword spotter catches "Jarvis" and
+    "Hey Jarvis" (sherpa-onnx 2.0.2, zipformer GigaSpeech 3.3M int8, `~/.jarvis/models/kws`, ~20 MB, checksum-checked,
+    `listen.download_wake_model`, setup.ps1; `KWS_BOOST` 2.0 / `KWS_THRESHOLD` 0.2; BPE pieces hard-coded in
+    `KWS_KEYWORDS`, labels must be one word). A hit acts like "Hey Jarvis" (trigger `keyword`): chime, and the recording
+    keeps the segment so "Jarvis, open notepad" works in one breath. Hits while JARVIS talks are ignored. The Whisper
+    check per segment now runs only when the spotter is missing (`status().wake_detector`).
+  - Measured: all 6 of the owner's real "Jarvis" recordings caught, 0 false wakes in 184 s of their ordinary speech,
+    ~0.16 s CPU per second of audio; misses robotic Indian WinRT voices. Fake-microphone run with the hey_jarvis model
+    disabled: owner's recording woke 0.25 s after the word, one-breath requests mid-sentence, look-alikes ignored.
+    Rejected: tiny.en for the check (fast but 16/22), the phone-based zh-en spotter (7-9/17).
+  - English: beam 5 for base.en (`ENGLISH_BEAM`; 2.8% -> 2.3% WER on test clips, ~8% slower); more words in `VOCABULARY`.
+  - `docs/TECHNICAL_SUMMARY.md`: models, sizes, storage, capabilities (~100 lines).
 - **Floating icon** (`overlay.py`, tkinter, its own `pythonw` process started by the desktop app with
   `--parent PID`): a 46 px always-on-top circle, coloured by state; hover (or click to pin) shows a panel from
   `GET /api/overlay` - now/heard/last exchange, approvals with Approve/Deny, activity (`EventBus.activity`,

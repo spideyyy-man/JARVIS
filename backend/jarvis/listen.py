@@ -56,6 +56,18 @@ TIE = 0.15  # a Tamil share within 0.35..0.65 is too close to call: the conversa
 VERIFY_PROMPT = "Jarvis, Travis, JavaScript, service, nervous."
 RETRY_MARGIN = 0.15
 VERIFY_GAP = 1.0  # s between plain-"Jarvis" checks, so background chatter cannot keep the CPU busy
+# Plain "Jarvis" is caught by a streaming keyword spotter (sherpa-onnx, zipformer trained on GigaSpeech, 3.3M parameters,
+# ~17 MB). The Whisper check it replaces took a median 15 s per check on the owner's overloaded laptop (up to 57 s), so
+# they had to call 5-10 times (2026-11-21). Measured: all 6 of the owner's real "Jarvis" recordings caught, 0 false wakes
+# in 184 s of their ordinary English and Tamil speech, ~0.16 s of CPU per second of audio. It misses some robotic
+# synthetic Indian voices. Whisper checking stays only as the fallback when the spotter is not installed.
+KWS_FOLDER = "sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01"
+KWS_TAG = "epoch-12-avg-2-chunk-16-left-64"
+KWS_BOOST, KWS_THRESHOLD = 2.0, 0.2
+KWS_KEYWORDS = ("\u2581JA R VI S @JARVIS", "\u2581HE Y \u2581JA R VI S @HEY_JARVIS")  # the model's BPE pieces for the words
+KWS_URL = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/"
+           "sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01.tar.bz2")
+KWS_SHA256 = "f170013b4716e41b62b9bfd809687c207cef798ef9bc6534d524e17af9b6561a"
 WAKE_PREFILTER = 0.03  # any hint of "jarvis" in a speech segment -> confirm with the English model (ordinary speech: 0.00)
 WAKE_WHILE_TALKING = 0.85  # while JARVIS speaks, only a very clear wake word counts (it must not wake itself)
 MIN_WAKE_FRAMES = 4  # 0.32 s: shorter sounds are not "Jarvis"
@@ -71,7 +83,11 @@ FAST_TEXT_LANGUAGES = {"en"}
 # still comes out empty (no invented words).
 VOCABULARY = ("JARVIS, what time is it? Open Notepad, Claude, Chrome, Google, YouTube. Create a file, a folder, on my Desktop, "
               "Documents, Downloads. index.html, notes.txt, hi.txt. Search the web. Volume, brightness. Remind me. Delete, rename, move. "
-              "Can you talk in Tamil? Weather, timer, alarm.")  # "talk in Tamil" was heard as "dock in the mill" (2026-11-20)
+              "Can you talk in Tamil? Weather, timer, alarm. Maths exam, accountancy, business studies project. Browser control.")
+# "talk in Tamil" was heard as "dock in the mill", "maths exam" as "Maxx exam" (2026-11-20)
+# English is decoded with beam search (5 candidates): 2.8% -> 2.3% word errors on the Indian-English test clips for ~8% more
+# time, and on the owner's recordings "I'm glad to go" -> "I'm not going to let it go", "Ejaris" -> "Hey JARVIS" (2026-11-21)
+ENGLISH_BEAM = 5
 VAD_START, VAD_STAY = 0.5, 0.35  # speech probability to start talking / to keep counting as talking
 SPEECH_END_VAD = 0.5  # s of non-speech that ends an utterance with the speech detector (0.7 s with loudness only)
 KEEP_SAMPLES = 30  # the last utterances are kept (only on this computer) to tune recognition on the user's real voice
@@ -167,6 +183,37 @@ def resolve_tamil_model(models_dir: Path, choice: str) -> str | None:
     if Path(choice).is_dir():
         return choice
     return choice if re.fullmatch(r"(?:tiny|base|small|medium|large-v\d)(?:\.en)?", choice) else None
+
+
+def download_wake_model(models_dir: Path, log=print) -> bool:
+    """The "Jarvis" keyword spotter (~17 MB archive, checksum-checked) into <models>/kws; skips it when present."""
+    import hashlib
+    import tarfile
+
+    import httpx
+
+    dest = Path(models_dir) / "kws"
+    if (dest / KWS_FOLDER / "tokens.txt").is_file():
+        return True
+    dest.mkdir(parents=True, exist_ok=True)
+    archive = dest / "kws.tar.bz2"
+    try:
+        with httpx.stream("GET", KWS_URL, follow_redirects=True, timeout=httpx.Timeout(120, connect=20)) as r:
+            r.raise_for_status()
+            with open(archive, "wb") as f:
+                for chunk in r.iter_bytes(1 << 20):
+                    f.write(chunk)
+        if hashlib.sha256(archive.read_bytes()).hexdigest() != KWS_SHA256:
+            raise ValueError("checksum mismatch")
+        with tarfile.open(archive, "r:bz2") as t:
+            t.extractall(dest, filter="data")
+        log("   keyword spotter: ok")
+        return True
+    except Exception as e:  # noqa: BLE001
+        log(f"   keyword spotter: failed ({type(e).__name__}: {e})")
+        return False
+    finally:
+        archive.unlink(missing_ok=True)
 
 
 def download_tamil_model(models_dir: Path, log=print) -> bool:
@@ -391,7 +438,8 @@ class LocalListener:
         elif self.model_size != self.fast_size:
             model += f" + {self.model_size} (Tamil)"
         return {"state": self.state, "error": self.error, "model": model, "speech_model_ready": self._whisper_ready.is_set(),
-                "wake_phrase": "Jarvis", "last": self.last}
+                "wake_phrase": "Jarvis", "wake_detector": "keyword spotter" if getattr(self, "spotter_ready", False) else "speech check",
+                "last": self.last}
 
     # -- internals ---------------------------------------------------------------------------------------------------
     def _set(self, state: str, **data) -> None:
@@ -470,6 +518,25 @@ class LocalListener:
     def ta_sure(self) -> float | None:
         return TA_TRAINED_SURE if self.tamil_trained else TA_SURE
 
+    def _load_spotter(self):
+        """The "Jarvis" keyword spotter, or None when it is not installed (then Whisper checks speech segments)."""
+        folder = self.models_dir / "kws" / KWS_FOLDER
+        try:
+            import sherpa_onnx
+
+            if not (folder / "tokens.txt").is_file():
+                return None
+            keywords = self.models_dir / "kws" / "jarvis-keywords.txt"
+            keywords.write_text("\n".join(f"{k.split(' @')[0]} :{KWS_BOOST} #{KWS_THRESHOLD} @{k.split(' @')[1]}" for k in KWS_KEYWORDS) + "\n",
+                                encoding="utf-8")
+            return sherpa_onnx.KeywordSpotter(
+                tokens=str(folder / "tokens.txt"), encoder=str(folder / f"encoder-{KWS_TAG}.int8.onnx"),
+                decoder=str(folder / f"decoder-{KWS_TAG}.int8.onnx"), joiner=str(folder / f"joiner-{KWS_TAG}.int8.onnx"),
+                num_threads=1, keywords_file=str(keywords), keywords_score=KWS_BOOST, keywords_threshold=KWS_THRESHOLD, max_active_paths=4)
+        except Exception as e:  # noqa: BLE001 - fall back to Whisper checks
+            self.error = f"keyword spotter unavailable ({type(e).__name__}); using the slower check"
+            return None
+
     def _run(self) -> None:
         try:
             import numpy as np
@@ -481,6 +548,9 @@ class LocalListener:
             threading.Thread(target=self._load_whisper, daemon=True, name="jarvis-whisper-load").start()
             openwakeword.utils.download_models(["hey_jarvis"])  # ~6 MB once; no-op when present
             wake = Model(wakeword_models=["hey_jarvis"], inference_framework="onnx")
+            spotter = self._load_spotter()
+            self.spotter_ready = spotter is not None
+            spot = spotter.create_stream() if spotter else None
             try:  # Silero speech detector (shipped with openWakeWord): tells speech from fans, typing and music
                 from openwakeword.vad import VAD
 
@@ -540,6 +610,14 @@ class LocalListener:
                     prob = vad.predict(frame, frame_size=640) if vad else (1.0 if rms >= endpoint.threshold else 0.0)
                     now = time.time()
                     talking = self._jarvis_talking or now < self._spoke_until  # JARVIS's own voice is in the mic
+                    keyword = False
+                    if spot is not None:
+                        spot.accept_waveform(RATE, frame.astype(np.float32) / 32768.0)
+                        while spotter.is_ready(spot):
+                            spotter.decode_stream(spot)
+                            if spotter.get_result(spot):
+                                keyword = not talking  # it must not wake itself ("I'm JARVIS, your assistant")
+                                spotter.reset_stream(spot)
                     pre.append(frame)
                     # Speech segments, for plain "Jarvis" (the ready-made model is trained on "hey jarvis" and scored
                     # plain "Jarvis" anywhere from 0.02 to 1.00 across voices; 2026-11-20).
@@ -558,11 +636,15 @@ class LocalListener:
                         trigger = "hotkey"
                     elif score >= (WAKE_WHILE_TALKING if talking else self.wake_threshold) and now >= cooldown_until:
                         trigger = "wake word"
+                    elif keyword and now >= cooldown_until:
+                        trigger = "keyword"  # "Jarvis" heard by the keyword spotter: at once, no Whisper check
                     elif self.state == "following" and not talking:
                         # conversation mode: the user just keeps talking - no wake word needed
                         heard_run = heard_run + 1 if prob >= FOLLOW_START else 0
                         if heard_run >= 2:
                             trigger = "follow-up"
+                    if not trigger and spot is not None and seg and (seg_quiet >= SEG_END_FRAMES or len(seg) >= SEG_MAX_FRAMES):
+                        seg, seg_score, seg_quiet = [], 0.0, 0  # the spotter listens for "Jarvis"; no Whisper check per segment
                     if not trigger and seg and (seg_quiet >= SEG_END_FRAMES or len(seg) >= SEG_MAX_FRAMES):
                         candidate, cand_score = seg, seg_score
                         seg, seg_score, seg_quiet = [], 0.0, 0
@@ -595,6 +677,8 @@ class LocalListener:
                         self._listen_now.clear()
                         self._follow_until = 0.0
                         wake.reset()
+                        if spot is not None:
+                            spotter.reset_stream(spot)
                         endpoint.reset()
                         # follow-ups and "yes"/"no" are short; requests after the wake word get room for a thinking pause
                         endpoint.min_speech = 0.15 if trigger == "follow-up" else 0.35
@@ -607,12 +691,12 @@ class LocalListener:
                         else:
                             # "hey jarvis what time..." in one go: keep what was already said (the wake phrase is
                             # removed from the text later), but count speech afresh from here
-                            recording = list(seg) if trigger == "wake word" and seg else []
+                            recording = list(seg) if trigger in ("wake word", "keyword") and seg else []
                             if vad:
                                 vad.reset_states()
                         pre.clear()
                         seg, seg_score, seg_quiet, heard_run = [], 0.0, 0, 0
-                        skip = CHIME_FRAMES if trigger in ("wake word", "hotkey", "jarvis") else 0  # the chime is not speech
+                        skip = CHIME_FRAMES if trigger in ("wake word", "hotkey", "jarvis", "keyword") else 0  # the chime is not speech
                         self._trigger = trigger
                         self._set("recording", trigger=trigger, score=round(float(score), 2))
                         self.on_event("voice.wake", {"trigger": trigger})
@@ -671,14 +755,14 @@ class LocalListener:
         # 2. English: the English-only model with the words the user says to JARVIS (2.3% word errors, ~1 s);
         #    Tamil: the bigger multilingual model, which writes Tamil properly.
         if lang == "en" and self.english_size:
-            model, model_used, extra = self._english_model(), self.english_size, {"initial_prompt": VOCABULARY}
+            model, model_used, extra = self._english_model(), self.english_size, {"initial_prompt": VOCABULARY, "beam_size": ENGLISH_BEAM}
         elif lang == "ta" and self.tamil_trained:
             model, model_used, extra = self._tamil_model(), self.tamil_name, {}
         elif lang not in FAST_TEXT_LANGUAGES and self.model_size != self.fast_size:
             model, model_used, extra = self._accurate_model(), self.model_size, {}
         else:
             model, model_used, extra = self._whisper, self.fast_size, ({"initial_prompt": VOCABULARY} if lang == "en" else {})
-        segments = list(model.transcribe(audio, language=lang, **opts, **extra)[0])
+        segments = list(model.transcribe(audio, language=lang, **{**opts, **extra})[0])
         text = " ".join(s.text.strip() for s in segments)
         no_speech = max((s.no_speech_prob for s in segments), default=1.0)
         logprob = min((s.avg_logprob for s in segments), default=-9.0)
@@ -751,6 +835,8 @@ class LocalListener:
             # பிரச்சனையா; 2026-11-20). The conversation's language only breaks a near-tie.
             prior = self._last_lang if self._trigger == "follow-up" else None
             text, lang, info = self.transcribe(audio, prior=prior) if prior else self.transcribe(audio)
+            if text and lang == "ta" and self._trigger in ("keyword", "wake word") and text == strip_tamil_wake(text):
+                text = TA_WAKE_LOOSE.sub("", text, count=1).strip() if re.match(r"^\W*[ஜJj]", text) else text
             if text:
                 self._last_lang = lang
         except Exception as e:  # noqa: BLE001

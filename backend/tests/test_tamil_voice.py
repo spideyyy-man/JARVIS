@@ -431,3 +431,35 @@ def test_tamil_trained_model_never_overrides_the_language_check_on_english(tmp_p
     lst._accurate_model = lambda: Model("Keep it up.", -0.9)  # the English second opinion may still use plain small
     text, lang, _ = lst.transcribe(np.zeros(16000, "float32"))
     assert (text, lang) == ("Keep it up.", "en") and tamil.calls == []
+
+
+# -- "Jarvis" by keyword spotter (2026-11-21: the Whisper check took 15 s per call on the busy laptop) ------------------------
+def test_keyword_spotter_is_used_when_installed_and_whisper_checks_otherwise(tmp_path):
+    lst = LocalListener(tmp_path, lambda *a: None, lambda *a: None)
+    assert lst._load_spotter() is None  # not installed: the old speech check stays as the fallback
+
+
+def test_keyword_file_lists_jarvis_and_hey_jarvis():
+    from jarvis.listen import KWS_BOOST, KWS_KEYWORDS, KWS_THRESHOLD
+
+    assert [k.split(" @")[1] for k in KWS_KEYWORDS] == ["JARVIS", "HEY_JARVIS"]
+    assert all(" " not in k.split(" @")[1] for k in KWS_KEYWORDS)  # the label must be one word
+    assert KWS_BOOST == 2.0 and KWS_THRESHOLD == 0.2  # measured: 6/6 of the owner's "Jarvis", 0 false wakes in 184 s
+
+
+def test_real_keyword_spotter_catches_jarvis_and_ignores_lookalikes(tmp_path):
+    """Runs only where the spotter is installed (the owner's laptop): a synthetic "Jarvis" must wake it, silence must not."""
+    import pathlib
+
+    models = pathlib.Path.home() / ".jarvis" / "models"
+    lst = LocalListener(models, lambda *a: None, lambda *a: None)
+    spotter = lst._load_spotter()
+    if spotter is None:
+        pytest.skip("keyword spotter not installed here")
+    s = spotter.create_stream()
+    s.accept_waveform(16000, np.zeros(16000 * 2, np.float32))
+    hits = 0
+    while spotter.is_ready(s):
+        spotter.decode_stream(s)
+        hits += bool(spotter.get_result(s))
+    assert hits == 0
