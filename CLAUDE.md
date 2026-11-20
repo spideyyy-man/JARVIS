@@ -66,8 +66,9 @@ Since 2026-11-19 (Edge's online recogniser failed on the laptop with "Speech rec
   Whisper `base` (`JARVIS_STT_FAST_MODEL`) detects the language and writes English (~1.8-2.5 s); `small`
   (`JARVIS_STT_LOCAL_MODEL`) is loaded only for Tamil text and dropped after 15 idle min. `speak.py` says replies
   to spoken requests sentence by sentence as they stream, with Windows' offline voices (WinRT
-  `Windows.Media.SpeechSynthesis` -> WAV -> winsound; first audio ~0.2 s after the text). No Tamil voice is
-  installed in Windows here, so Tamil replies go to the window (`voice.say` / `voice.heard.server_speaks`).
+  `Windows.Media.SpeechSynthesis` -> WAV -> winsound; first audio ~0.2 s after the text). Tamil replies are
+  spoken by the offline Tamil voice (see "Tamil works like English"); without a voice for a language the window says it
+  (`voice.say` / `voice.heard.server_speaks`).
   "Hey Jarvis" or the hotkey stops it talking and plays a short chime (`Speaker.chime`; the listener skips the
   first 0.24 s so the chime is not taken for speech). One request took 912 s to transcribe while the CPU was full
   (cause not pinned down; standalone runs under the same load took 8-50 s), so: a request heard in over 20 s is
@@ -107,10 +108,9 @@ Since 2026-11-19 (Edge's online recogniser failed on the laptop with "Speech rec
   last turn; follow-up transcription ~0.9 s). Audio heard while JARVIS spoke is drained first (no echo loop).
   "thanks", "that's all", "stop", "bye"... end it (`CONVERSATION_ENDS`). After the wake word the listener skips
   0.4 s (its tail + chime), and a short sound followed by a pause no longer ends the recording (`Endpointer`).
-  Tamil replies spoken by the window do not open the window yet.
 - **Natural voice** (2026-11-20; the owner found the Windows voices robotic): spoken replies use Piper
   (`en_US-lessac-medium`, ONNX, `~/.jarvis/models/tts`, ~10x faster than real time here: first audio ~0.5 s) via
-  `speak.make_engines`; Windows' voices take whatever Piper cannot say (Tamil if a Windows Tamil voice is installed)
+  `speak.make_engines`; Tamil goes to the MMS Tamil voice; Windows' voices take whatever else Piper cannot say
   and any sentence Piper fails on. Kokoro (`kokoro-v1.0.int8.onnx`, most natural) is supported but only ~1x real time
   on this laptop (~2 s before each sentence, and it competes with the model). Choose with `JARVIS_LOCAL_TTS`
   (piper | kokoro | windows) or the voice setting `local_tts` (switches live). `python -m jarvis.speak [--kokoro]`
@@ -139,6 +139,29 @@ Since 2026-11-19 (Edge's online recogniser failed on the laptop with "Speech rec
   `list_dev_tasks`, "play some music" stays media keys) and owned by the orchestrator. UI: `GET/DELETE /api/timers`,
   `timers.changed` events, timer chips + quick-try chips on the Assistant screen, countdown row in the hover panel,
   a shrinking ring on the orb (`OrbState.timer`).
+- **Tamil works like English** (2026-11-20, `tests/test_tamil_voice.py`):
+  - JARVIS speaks Tamil itself: `speak.MmsTamilEngine` (Meta MMS Tamil VITS, ONNX, `~/.jarvis/models/tts/mms-tam`, 109 MB,
+    CC-BY-NC like NLLB; ~3x real time; `python -m jarvis.speak` / setup.ps1 download it). Numbers, times, % and ° become
+    Tamil words (`tamil_speakable`); English words inside a Tamil reply are said by Piper. So Tamil replies are spoken by
+    the server and open the 5 s conversation window. It says loanwords (டைமர்) poorly.
+  - "Jarvis, <Tamil request>" in one breath: when base.en is unsure of the rest (< -0.6; Tamil always is), the language
+    is checked and the Tamil model writes it. If base.en does not even write "Jarvis" (it often doesn't with Tamil after
+    it), only the first `HEAD_SECONDS` 1.6 s are checked for "Jarvis" - Tamil chatter never reaches the slow model. The
+    Tamil model's own spelling of Jarvis is dropped (`TA_WAKE`, `TA_WAKE_LOOSE`: ஜார்விஸ், ஜால்பேச், ஜாவுஐஸ்...). One-breath
+    segments may be 8 s (`SEG_MAX_FRAMES`).
+  - Unclear Tamil: below `TA_UNCLEAR_BELOW` -0.55 the English model gets a say (>= -0.5 -> it was English), else
+    "மன்னிக்கவும், சரியாகக் கேட்கவில்லை" (`SORRY`, in the conversation's language; English when no Tamil voice). Unsure
+    English with >= 20% Tamil gets a Tamil second opinion (kept only >= -0.35; otherwise small translated Tamil to English).
+    Measured on 6 Tamil clips + the owner's 23 recordings: real Tamil -0.09..-0.46, English forced into Tamil -0.39..-0.96.
+  - Tamil follow-ups keep the language check (Tamil speakers answer "yes"/"okay" in English). Tamil conversation ends:
+    நன்றி, போதும், நிறுத்து, அவ்வளவுதான்...
+  - Everyday skills in Tamil (`offline.TA_EVERYDAY`, first in `TA_RULES`): timers/alarms (`everyday.ta_duration`,
+    `ta_clock`; Tamil number words; a timer set in Tamil rings in Tamil via its `language`), weather (`TA_PLACES` maps Tamil
+    city names; "search the web for..." stays web_search), maths (கூட்டல்/பெருக்கல்/சதவீதம்...), lists, "<artist> பாட்டு போடு"
+    -> play_music. Tamil replies in `TA_RENDERERS`. Stems omit the final virama (டைமர matches டைமரை, அலார matches அலாரத்தை).
+  - Fake-microphone checks (real listener): "Jarvis" + a real Tamil recording in one breath -> heard; "Jarvis", pause,
+    Tamil -> heard; Tamil follow-up -> heard; English unchanged. Not checked: the owner's own Tamil speech, and how the
+    Tamil voice sounds to them.
 - **Floating icon** (`overlay.py`, tkinter, its own `pythonw` process started by the desktop app with
   `--parent PID`): a 46 px always-on-top circle, coloured by state; hover (or click to pin) shows a panel from
   `GET /api/overlay` - now/heard/last exchange, approvals with Approve/Deny, activity (`EventBus.activity`,
@@ -338,8 +361,8 @@ Windows laptop (2026-11-17, Python 3.13):
    window switching, autostart, a double-click install). Voice is now the offline listener: real "Hey Jarvis" and
    Tamil speech through the laptop microphone are untested, and so is the floating icon's appearance.
    Speech is slow while other apps hold the CPU (Whisper small 4-16 s); `JARVIS_STT_LOCAL_MODEL=base` is smaller but was
-   no faster under that load, and its Tamil was poor (3/6 languages right). Replies are still spoken by the page (Edge voices; no Tamil voice
-   is installed in Windows here - Settings > Time & language > Speech can add one).
+   no faster under that load, and its Tamil was poor (3/6 languages right). Replies are spoken by JARVIS itself (Piper English,
+   MMS Tamil).
 2. Real model: with prompt caching a short answer is 1-3 s on a quiet machine, 7-20 s when other apps load
    the CPU (Qwen3 4B is ~30-50% slower than qwen2.5:3b and uses ~3.7 GB instead of 2.3 GB). Tamil open questions
    now answer correctly through English (2026-11-19, real JARVIS: capital of India, Thiruvalluvar, sun rises in the

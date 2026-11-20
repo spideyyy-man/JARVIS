@@ -46,3 +46,17 @@ by JARVIS itself, so they work with the window minimised.
 
 Next most valuable, in order: a spoken news/day briefing that includes weather, timers and lists; recurring alarms
 and "every weekday" reminders; Tamil for the new skills; contacts; smart-home control if the owner has devices.
+
+## 2026-11-20 (Tamil round: Tamil works the way English does)
+
+Added (`tests/test_tamil_voice.py`): JARVIS speaks Tamil itself with an offline voice (MMS Tamil, ~3x real time, read
+back almost word for word by Whisper; English words inside Tamil replies are said by Piper), so Tamil replies open the
+5 s conversation window too. "Jarvis, <Tamil request>" in one breath, Tamil follow-ups (with a language check, as Tamil
+speakers answer "yes"/"okay" in English), unclear Tamil ("மன்னிக்கவும், சரியாகக் கேட்கவில்லை") and Tamil conversation ends
+(நன்றி, போதும், நிறுத்து...). Timers, alarms, weather, maths, lists and "play <song>" in Tamil are instant with Tamil
+replies; a timer set in Tamil rings in Tamil.
+
+| Dimension | Before | After | Industry | What changed / what is still missing |
+|---|---|---|---|---|
+| Languages (Tamil) | 5 | 7 | 8 | Tamil voice, conversation mode, one-breath requests, instant everyday skills; the Tamil voice says loanwords (டைமர்) poorly; Tamil speech is slower than English (the bigger model, 3-7 s) |
+| **Overall (unweighted)** | **6.7** | **6.8** | **8.0** | |

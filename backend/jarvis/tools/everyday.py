@@ -50,6 +50,74 @@ def parse_duration(text: str) -> int | None:
     return int(round(total)) if found and total > 0 else None
 
 
+# Tamil: number words as people say them before a unit (ஐந்து நிமிடம், அஞ்சு நிமிஷம், அரை மணி நேரம்)
+TA_NUMBERS = {"ஒன்று": 1, "ஒண்ணு": 1, "ஒரு": 1, "இரண்டு": 2, "ரெண்டு": 2, "மூன்று": 3, "மூணு": 3, "நான்கு": 4, "நாலு": 4, "ஐந்து": 5,
+              "அஞ்சு": 5, "ஆறு": 6, "ஏழு": 7, "எட்டு": 8, "ஒன்பது": 9, "பத்து": 10, "பதினொன்று": 11, "பன்னிரண்டு": 12, "பதினைந்து": 15,
+              "இருபது": 20, "இருபத்தைந்து": 25, "முப்பது": 30, "நாற்பது": 40, "நாற்பத்தைந்து": 45, "ஐம்பது": 50, "அறுபது": 60, "தொண்ணூறு": 90}
+_TA_NUM = r"(\d+(?:\.\d+)?|" + "|".join(sorted(TA_NUMBERS, key=len, reverse=True)) + r")"
+_TA_HOUR = r"(?:மணி\s*நேர\S*|மணிநேர\S*|மணி\S*|ஹவர்\S*)"
+_TA_MIN = r"(?:நிமிட\S*|நிமிஷ\S*|மினிட்\S*|நிமி\S*)"
+_TA_SEC = r"(?:வினாடி\S*|நொடி\S*|செகண்ட்\S*|செக்கண்ட்\S*)"
+
+
+def _ta_value(word: str) -> float:
+    return float(word) if word[0].isdigit() else float(TA_NUMBERS[word])
+
+
+def ta_duration(text: str) -> str | None:
+    """'ஐந்து நிமிடம்' -> '5 minutes'; 'அரை மணி நேரம்' -> '30 minutes'; '1 மணி 30 நிமிடம்' -> '1 hours 30 minutes'."""
+    t = re.sub(r"ஒன்றரை\s*" + _TA_HOUR, "90 நிமிடம்", text)
+    t = re.sub(r"முக்கால்\s*" + _TA_HOUR, "45 நிமிடம்", t)
+    t = re.sub(r"அரை\s*" + _TA_HOUR, "30 நிமிடம்", t)
+    t = re.sub(r"கால்\s*" + _TA_HOUR, "15 நிமிடம்", t)
+    parts = []
+    for unit, pattern in (("hours", _TA_HOUR), ("minutes", _TA_MIN), ("seconds", _TA_SEC)):
+        for m in re.finditer(_TA_NUM + r"\s*" + pattern, t):
+            parts.append(f"{_ta_value(m.group(1)):g} {unit}")
+    return " ".join(parts) or None
+
+
+def ta_clock(text: str) -> str | None:
+    """'காலை 6 மணிக்கு' -> '6:00 am'; 'இரவு 9:30' -> '9:30 pm'; '7 மணி 15 நிமிடத்துக்கு' -> '7:15'. None if no time."""
+    m = re.search(r"(\d{1,2})(?:[:.](\d{2}))?\s*(?:மணி\S*)?(?:\s*(\d{1,2})\s*" + _TA_MIN + ")?", text)
+    if m and (m.group(2) or re.search(r"\d\s*(?:மணி|[:.]\d)", text)):
+        hour, minute = int(m.group(1)), int(m.group(2) or m.group(3) or 0)
+    else:
+        w = re.search(r"(" + "|".join(sorted(TA_NUMBERS, key=len, reverse=True)) + r")\s*மணி", text)
+        if not w:
+            return None
+        hour, minute = int(TA_NUMBERS[w.group(1)]), 0
+    if hour > 23 or minute > 59:
+        return None
+    ampm = ""
+    if hour <= 12:
+        if re.search(r"அதிகாலை|காலை|மார்னிங்", text):
+            ampm = "am"
+        elif re.search(r"மதியம்|பிற்பகல்", text):
+            ampm = "pm"
+        elif re.search(r"மாலை|சாயங்காலம்|சாயந்திரம்|ஈவினிங்", text):
+            ampm = "pm"
+        elif re.search(r"இரவு|ராத்திரி|ராத்ரி|நைட்", text):
+            ampm = "am" if hour <= 4 or hour == 12 else "pm"
+    return f"{hour}:{minute:02d}" + (f" {ampm}" if ampm else "")
+
+
+def say_duration_ta(seconds: float) -> str:
+    s = int(round(seconds))
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    parts = [f"{h} மணி நேரம்" if h else "", f"{m} நிமிடம்" if m else "", f"{sec} வினாடி" if sec and not h else ""]
+    return " ".join(p for p in parts if p) or "0 வினாடி"
+
+
+def ta_clock_text(ts: float) -> str:
+    """A timestamp as Tamil says it: 'காலை 6:30' (the Tamil voice reads 6:30 as 'ஆறு மணி முப்பது நிமிடம்')."""
+    from ..llm.offline import _ta_day_part
+
+    lt = time.localtime(ts)
+    return f"{_ta_day_part(lt.tm_hour)} {lt.tm_hour % 12 or 12}:{lt.tm_min:02d}"
+
+
 def say_duration(seconds: float) -> str:
     s = int(round(seconds))
     h, rem = divmod(s, 3600)
@@ -92,23 +160,25 @@ def _save_timers(app, items: list[dict]) -> None:
     app.bus.emit("timers.changed", timers=items)
 
 
-def set_timer(ctx: ToolContext, duration: str = "", minutes: float = 0, seconds: float = 0, label: str = "") -> dict:
+def set_timer(ctx: ToolContext, duration: str = "", minutes: float = 0, seconds: float = 0, label: str = "", language: str = "") -> dict:
     secs = parse_duration(duration) if duration else None
     secs = secs or int(minutes * 60 + seconds)
     if not secs or secs < 1:
         raise ValueError("How long should the timer be? For example: set a timer for 5 minutes")
     if secs > 24 * 3600:
         raise ValueError("Timers can be at most 24 hours - use an alarm or a reminder for longer")
-    item = {"id": "tm_" + uuid.uuid4().hex[:8], "kind": "timer", "label": label.strip()[:40], "seconds": secs, "due": time.time() + secs, "created": time.time()}
+    item = {"id": "tm_" + uuid.uuid4().hex[:8], "kind": "timer", "label": label.strip()[:40], "seconds": secs, "due": time.time() + secs, "created": time.time(),
+            **({"language": language} if language in ("ta",) else {})}  # announced in the language it was asked in
     _save_timers(ctx.app, [*timers(ctx.app), item])
     return {**item, "in": say_duration(secs)}
 
 
-def set_alarm(ctx: ToolContext, time_of_day: str, label: str = "") -> dict:
+def set_alarm(ctx: ToolContext, time_of_day: str, label: str = "", language: str = "") -> dict:
     due = parse_clock(time_of_day)
     if due is None:
         raise ValueError("What time? For example: set an alarm for 7:30 am")
-    item = {"id": "al_" + uuid.uuid4().hex[:8], "kind": "alarm", "label": label.strip()[:40], "due": due, "created": time.time()}
+    item = {"id": "al_" + uuid.uuid4().hex[:8], "kind": "alarm", "label": label.strip()[:40], "due": due, "created": time.time(),
+            **({"language": language} if language in ("ta",) else {})}
     _save_timers(ctx.app, [*timers(ctx.app), item])
     return {**item, "at": time.strftime("%I:%M %p", time.localtime(due)).lstrip("0"), "in": say_duration(due - time.time())}
 
@@ -135,6 +205,10 @@ def cancel_timer(ctx: ToolContext, which: str = "") -> dict:
 
 
 def due_message(t: dict) -> str:
+    if t.get("language") == "ta":
+        if t["kind"] == "alarm":
+            return f"இப்போது {ta_clock_text(t['due'])}. அலாரம் நேரம்!" + (f" {t['label']}." if t["label"] else "")
+        return f"நேரம் முடிந்தது! உங்கள் {say_duration_ta(t['seconds'])} டைமர் முடிந்தது."
     if t["kind"] == "alarm":
         return f"It's {time.strftime('%I:%M %p', time.localtime(t['due'])).lstrip('0')}" + (f" - {t['label']}." if t["label"] else ". Time to get up!" if time.localtime(t["due"]).tm_hour < 11 else ".")
     return f"Time's up! Your {t['label'] + ' ' if t['label'] else ''}timer for {say_duration(t['seconds'])} is done."
@@ -370,8 +444,8 @@ def play_music(ctx: ToolContext, query: str, service: str = "youtube") -> dict:
 def register(reg: ToolRegistry) -> None:
     S, N = {"type": "string"}, {"type": "number"}
     reg.register(Tool("set_timer", "Start a countdown timer, e.g. duration '5 minutes' or '1 hour 30 minutes', with an optional label like 'tea'.",
-                      {"duration": S, "minutes": N, "seconds": N, "label": S}, set_timer))
-    reg.register(Tool("set_alarm", "Set an alarm for a time of day, e.g. '7:30 am'.", {"time_of_day": S, "label": S}, set_alarm, required=["time_of_day"]))
+                      {"duration": S, "minutes": N, "seconds": N, "label": S, "language": S}, set_timer))
+    reg.register(Tool("set_alarm", "Set an alarm for a time of day, e.g. '7:30 am'.", {"time_of_day": S, "label": S, "language": S}, set_alarm, required=["time_of_day"]))
     reg.register(Tool("list_timers", "Running timers and alarms, with the time left.", {}, list_timers))
     reg.register(Tool("cancel_timer", "Cancel a timer or alarm by its label, or 'timer', 'alarm', or 'all'.", {"which": S}, cancel_timer))
     reg.register(Tool("weather", "Current weather and today's/tomorrow's forecast for a place (default: the user's city).",

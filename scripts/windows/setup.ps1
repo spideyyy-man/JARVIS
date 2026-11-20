@@ -64,7 +64,7 @@ Write-Host "   downloading the speech models (~490 MB, once)..."
 & backend\.venv\Scripts\python.exe -c "from jarvis.config import load_settings; from faster_whisper.utils import download_model; import openwakeword; s = load_settings(); openwakeword.utils.download_models(['hey_jarvis']); download_model(s.stt_english_model, cache_dir=str(s.data_dir / 'models' / 'whisper')) if s.stt_english_model else None; download_model(s.stt_fast_model, cache_dir=str(s.data_dir / 'models' / 'whisper')); download_model(s.stt_local_model, cache_dir=str(s.data_dir / 'models' / 'whisper')); print('   ok')"
 if ($LASTEXITCODE -ne 0) { Write-Host "   download incomplete - JARVIS fetches the models itself on first start." -ForegroundColor Yellow }
 
-Write-Host "== Natural voice for spoken replies (Piper, ~63 MB)" -ForegroundColor Cyan
+Write-Host "== Offline voices for spoken replies (Piper English ~63 MB, MMS Tamil ~109 MB)" -ForegroundColor Cyan
 & backend\.venv\Scripts\python.exe -m jarvis.speak
 if ($LASTEXITCODE -ne 0) { Write-Host "   voice download incomplete - JARVIS uses the Windows voice until you re-run this script." -ForegroundColor Yellow }
 

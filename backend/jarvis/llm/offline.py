@@ -212,8 +212,106 @@ def _ta_reminder(text: str, m: re.Match, env: Env):
     return ("add_dev_task", {"title": title, "due_in_minutes": minutes}) if title else None
 
 
+# Everyday skills in Tamil (timers, alarms, weather, maths, lists, music) - instant, like their English rules.
+TA_PLACES = {"சென்னை": "Chennai", "கோயம்புத்தூர்": "Coimbatore", "கோவை": "Coimbatore", "மதுரை": "Madurai", "திருச்சி": "Tiruchirappalli",
+             "திருச்சிராப்பள்ளி": "Tiruchirappalli", "சேலம்": "Salem", "திருநெல்வேலி": "Tirunelveli", "நெல்லை": "Tirunelveli", "வேலூர்": "Vellore",
+             "ஈரோடு": "Erode", "திருப்பூர்": "Tiruppur", "தஞ்சாவூர்": "Thanjavur", "தஞ்சை": "Thanjavur", "தூத்துக்குடி": "Thoothukudi",
+             "காஞ்சிபுரம்": "Kanchipuram", "கன்னியாகுமரி": "Kanyakumari", "நாகர்கோவில்": "Nagercoil", "ஊட்டி": "Ooty", "கொடைக்கானல்": "Kodaikanal",
+             "புதுச்சேரி": "Puducherry", "பாண்டிச்சேரி": "Puducherry", "பெங்களூர்": "Bengaluru", "பெங்களூரு": "Bengaluru", "மும்பை": "Mumbai",
+             "டெல்லி": "Delhi", "தில்லி": "Delhi", "ஹைதராபாத்": "Hyderabad", "கொல்கத்தா": "Kolkata", "கொச்சி": "Kochi",
+             "யாழ்ப்பாணம்": "Jaffna", "கொழும்பு": "Colombo", "சிங்கப்பூர்": "Singapore", "துபாய்": "Dubai", "லண்டன்": "London",
+             "கோலாலம்பூர்": "Kuala Lumpur", "டொராண்டோ": "Toronto", "நியூயார்க்": "New York"}
+TA_PLACE_NAMES = {v: k for k, v in reversed(list(TA_PLACES.items()))}  # back to Tamil for the reply
+_TA_LIST = r"(?:லிஸ்ட்|லிஸ்டு|பட்டியல்|list)"
+_TA_LIST_NAME = r"(?:(?:ஷாப்பிங்|ஷாப்பிங்க்|கடை|மளிகை|shopping)\s*)?"
+
+
+def _ta_place(text: str) -> str:
+    """'சென்னையில் வானிலை' -> 'Chennai'; '' when no place is named (the user's own city is used)."""
+    for word in re.findall(r"[஀-௿]+|[A-Za-z]+", text):
+        for cand in (word, re.sub(r"(?:யில்|இல்|ல்|ல|க்கு|ுக்கு)$", "", word), re.sub(r"த்தில்$|த்துல$", "ம்", word),
+                     re.sub(r"(?:யில்|இல்)$", "", word) + "ு", re.sub(r"ையில்$|ைல$", "ை", word)):
+            if cand in TA_PLACES:
+                return TA_PLACES[cand]
+    latin = re.search(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b", text)
+    return latin.group(1) if latin else ""
+
+
+def _ta_timer(text, m, env):
+    from ..tools.everyday import ta_duration
+
+    dur = ta_duration(text)
+    return ("set_timer", {"duration": dur, "label": "", "language": "ta"}) if dur else None
+
+
+def _ta_alarm(text, m, env):
+    from ..tools.everyday import ta_clock
+
+    at = ta_clock(text)
+    return ("set_alarm", {"time_of_day": at, "label": "", "language": "ta"}) if at else None
+
+
+def _ta_math(text, m, env):
+    """Tamil arithmetic words -> the calculator's spoken English ('25 கூட்டல் 17' -> '25 plus 17')."""
+    from ..tools.everyday import is_math
+
+    t = strip_context(text)
+    t = re.sub(r"(\d+(?:\.\d+)?)\s*(?:இல்|ல்|ல)\s*(\d+(?:\.\d+)?)\s*(?:சதவீத|சதவிகித|பர்சன்ட்|பர்சென்ட்|%)\S*", r"\2 percent of \1", t)
+    for words, op in ((r"கூட்டல்|கூட்டு|பிளஸ்|ப்ளஸ்|சேர்த்தால்", " plus "), (r"கழித்தல்|கழி|மைனஸ்", " minus "),
+                      (r"பெருக்கல்|பெருக்கு|இன்டு|இண்டு|into|டைம்ஸ்", " times "), (r"வகுத்தல்|வகு|டிவைடட்\s*பை|டிவைட்", " divided by "),
+                      (r"சதவீதம்|சதவிகிதம்|பர்சன்ட்|பர்சென்ட்", " percent "), (r"ஸ்கொயர்\s*ரூட்|வர்க்கமூலம்", " square root of ")):
+        t = re.sub(r"(?:" + words + r")\S*", op, t)
+    t = re.sub(r"[஀-௿]+", " ", t)  # எவ்வளவு, என்ன, ... (how much / what)
+    t = re.sub(r"\s+", " ", t).strip(" ?.")
+    return ("calculate", {"expression": t}) if is_math(t) else None
+
+
+def _ta_list_items(raw: str) -> str:
+    raw = re.sub(r"\s*(?:என்|எனது|என்னுடைய|என்னோட)$", "", raw.strip())  # "பாலை என் லிஸ்ட்ல சேர்": "my" is not an item
+    raw = re.sub(r"\s*(?:மற்றும்|அப்புறம்|அப்றம்|and)\s*", ", ", raw)
+    return raw.strip(" ,.")
+
+
+def _ta_list_add(text, m, env):
+    items = _ta_list_items(m.group("post") or m.group("pre") or "")
+    return ("list_add", {"items": items, "list_name": "shopping"}) if items else None
+
+
+def _ta_list_remove(text, m, env):
+    items = _ta_list_items(m.group("post") or m.group("pre") or "")
+    return ("list_remove", {"item": items, "list_name": "shopping"}) if items else None
+
+
+def _ta_music(text, m, env):
+    q = _TA_WAKE.sub("", m.group("q")).strip(" ,.")
+    if not q or re.fullmatch(r"(?:ஒரு|அடுத்த|முந்தைய|அந்த|இந்த|நல்ல|ஏதாவது|ஏதாச்சும்|ஏதோ|சில|எதாவது)", q):
+        return None  # "play a song" / "next song": the media keys (the rules below)
+    return "play_music", {"query": f"{q} {m.group('s')}", "service": "youtube"}
+
+
+TA_EVERYDAY: list[Rule] = [
+    TR("orchestrator", r"(?:டைமர|அலார|timer|alarm)\S*.{0,25}?(?:ரத்து|கேன்சல்|நிறுத்து|நீக்கு|அணை|ஆஃப்|வேண்டாம்|டெலீட்)",
+       lambda t, m, e: ("cancel_timer", {"which": "all" if re.search(r"எல்லா|அனைத்து|all", t) else ("alarm" if re.search(r"அலார", t) else "timer")})),
+    TR("orchestrator", r"டைமர|timer", _ta_timer),
+    TR("orchestrator", r"(?:டைமர|அலார)\S*.{0,25}?(?:எவ்வளவு|மீதி|பாக்கி|என்ன|எத்தனை|காட்டு|இருக்கா|இருக்கு)|எவ்வளவு\s*நேரம்\s*(?:மீதி|பாக்கி|இருக்கு)",
+       lambda t, m, e: ("list_timers", {})),
+    TR("orchestrator", r"அலார|alarm|எழுப்பு|எழுப்பி", _ta_alarm),
+    TR("orchestrator", r"^\s*(?:என்\s*(?:ஊர்|நகரம்|சிட்டி|இடம்)|நான்\s*இருக்கும்\s*ஊர்|எங்க\s*ஊர்)\s*(.+?)\s*[.!]?$",
+       lambda t, m, e: ("set_home_city", {"city": _ta_place(m.group(1)) or m.group(1).strip()}) if _ta_place(m.group(1)) or re.search(r"[A-Za-z]", m.group(1)) else None),
+    TR("orchestrator", r"வானிலை|வெதர்|வெப்பநிலை|டெம்பரேச்சர்|மழை\s*(?:வருமா|பெய்யுமா|வரும்|பெய்யும்|வருதா|பெய்யுதா)|குடை\s*(?:தேவையா|வேணுமா|எடுக்க)|வெயில்\s*(?:அதிகமா|எப்படி|இருக்கா)",
+       lambda t, m, e: None if re.search(r"தேடு|சர்ச்|கூகுள்", t) else ("weather", {"place": _ta_place(t), "day": "tomorrow" if re.search(r"நாளை", t) else "today"})),
+    TR("orchestrator", r"\d.*(?:கூட்டல்|கூட்டு|பிளஸ்|ப்ளஸ்|கழித்தல்|கழி|மைனஸ்|பெருக்கல்|பெருக்கு|இன்டு|இண்டு|வகுத்தல்|வகு|டிவைட|சதவீத|சதவிகித|பர்சன்ட்|பர்சென்ட்|%)", _ta_math),
+    TR("orchestrator", r"^(?P<pre>.*?)\s*" + _TA_LIST_NAME + _TA_LIST + r"\S*\s*(?:இருந்து|லிருந்து)?\s*(?P<post>.*?)\s*(?:நீக்கு|எடு|அழி|டெலீட்|ரிமூவ்)\S*(?:\s*(?:பண்ணு|செய்|விடு)\S*)?\s*[.!]?$", _ta_list_remove, whole=True),
+    TR("orchestrator", _TA_LIST + r"\S*\s*(?:முழுவதும்|முழுசா|எல்லாம்)?\s*(?:க்ளியர்|கிளியர்|காலி)", lambda t, m, e: ("list_clear", {"list_name": "shopping"})),
+    TR("orchestrator", r"^(?P<pre>.*?)\s*" + _TA_LIST_NAME + _TA_LIST + r"\S*\s*(?P<post>.*?)\s*(?:சேர்|போடு|ஆட்)\S*(?:\s*(?:பண்ணு|செய்|விடு)\S*)?\s*[.!]?$", _ta_list_add, whole=True),
+    TR("orchestrator", _TA_LIST_NAME + _TA_LIST + r"\S*\s*(?:என்ன|என்னென்ன|காட்டு|படி|சொல்லு)", lambda t, m, e: ("list_show", {"list_name": "shopping"})),
+    TR("orchestrator", r"^(?P<q>.+?)\s*(?P<s>பாட்டு|பாடல்\S*|சாங்ஸ்|சாங்|songs?)\s*(?:போடு|போடுங்க|ப்ளே\s*பண்ணு|பிளே\s*பண்ணு|play)\S*\s*[.!]?$", _ta_music, whole=True),
+]
+
+
 TA_RULES: list[Rule] = [
     TR("orchestrator", r"(?:எனக்கு\s*)?(\d+)\s*(நிமிட|நிமிஷ|மணி)\S*(?:\s+நேர\S*)?(?:\s+(?:கழித்து|கழிச்சு))?\s+(.+?)\s*(?:நினைவூட்டு|நினைவுபடுத்து|ஞாபகப்படுத்து|ஞாபகம்\s*படுத்து|ரிமைண்ட்\s*பண்ணு)\S*\s*[.!]?$", _ta_reminder, whole=True),
+    *TA_EVERYDAY,
     TR("computer", r"(?:மியூட்|ம்யூட்|\bmute\b)|" + _TA_SOUND + r"\S*\s*.{0,12}?(?:நிறுத்து|அணை|ஆஃப்|\boff\b)", lambda t, m, e: ("system_control", {"action": "volume_mute"})),
     TR("computer", _TA_SOUND + r".{0,25}?(?:அதிக|கூட்டு|கூட்ட|ஏத்து|ஏற்று|உயர்த்து|ஜாஸ்தி|increase|\bup\b)", lambda t, m, e: ("system_control", {"action": "volume_up", "value": int(n.group(1)) if (n := re.search(r"(\d+)", t)) else 5})),
     TR("computer", _TA_SOUND + r".{0,25}?(?:குறை|கம்மி|இறக்கு|decrease|\bdown\b)", lambda t, m, e: ("system_control", {"action": "volume_down", "value": int(n.group(1)) if (n := re.search(r"(\d+)", t)) else 5})),
@@ -941,7 +1039,70 @@ TA_RENDERERS: dict[str, Callable] = {
     "add_dev_task": lambda d, q, t: (f"சரி, \"{d['title']}\" என்பதை {time.strftime('%H:%M', time.localtime(d['due']))} மணிக்கு நினைவூட்டுகிறேன்." if d.get("due")
                                      else f"சரி, \"{d['title']}\" என்று குறித்துக்கொண்டேன்."),
     "remember": lambda d, q, t: f"சரி, நினைவில் வைத்துக்கொள்கிறேன்: \"{d['content']}\".",
+    "set_timer": lambda d, q, t: f"சரி, {_ta_dur(d['seconds'])} டைமர் வைத்தேன்.",
+    "set_alarm": lambda d, q, t: f"சரி, {_ta_clock_at(d['due'])} மணிக்கு அலாரம் வைத்தேன்.",
+    "list_timers": lambda d, q, t: _r_timers_ta(d),
+    "cancel_timer": lambda d, q, t: ("சரி, ரத்து செய்தேன்." if d["cancelled"] else "ரத்து செய்ய எந்த டைமரும் அலாரமும் இல்லை."),
+    "weather": lambda d, q, t: _r_weather_ta(d),
+    "set_home_city": lambda d, q, t: f"சரி, உங்கள் ஊர் {TA_PLACE_NAMES.get(d['city'], d['city'])}. எப்போது வேண்டுமானாலும் வானிலை கேளுங்கள்.",
+    "calculate": lambda d, q, t: f"விடை {d['result']}.",
+    "convert_units": lambda d, q, t: f"{d['value']} {d['from']} என்பது {d['result']} {d['to']}.",
+    "list_add": lambda d, q, t: (f"{_and_ta(d['added'])} உங்கள் {_ta_list(d['list'])} பட்டியலில் சேர்த்தேன்." if d["added"] else f"அது ஏற்கனவே உங்கள் {_ta_list(d['list'])} பட்டியலில் உள்ளது."),
+    "list_show": lambda d, q, t: (f"உங்கள் {_ta_list(d['list'])} பட்டியலில்: {_and_ta(d['items'])}." if d["items"] else f"உங்கள் {_ta_list(d['list'])} பட்டியல் காலியாக உள்ளது."),
+    "list_remove": lambda d, q, t: (f"{_and_ta(d['removed'])} பட்டியலிலிருந்து நீக்கினேன்." if d["removed"] else f"அது உங்கள் {_ta_list(d['list'])} பட்டியலில் இல்லை."),
+    "list_clear": lambda d, q, t: f"உங்கள் {_ta_list(d['list'])} பட்டியலைக் காலி செய்தேன்.",
+    "play_music": lambda d, q, t: f"{d['playing']} யூடியூபில் போடுகிறேன்.",
 }
+
+
+def _ta_dur(seconds: float) -> str:
+    from ..tools.everyday import say_duration_ta
+
+    return say_duration_ta(seconds)
+
+
+def _ta_clock_at(ts: float) -> str:
+    from ..tools.everyday import ta_clock_text
+
+    return ta_clock_text(ts)
+
+
+def _and_ta(items: list) -> str:
+    items = [str(i) for i in items]
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " மற்றும் " + items[-1] if items else ""
+
+
+def _ta_list(name: str) -> str:
+    return {"shopping": "ஷாப்பிங்", "to-do": "செய்ய வேண்டிய"}.get(name, name)
+
+
+def _r_timers_ta(d) -> str:
+    if not d["timers"]:
+        return "டைமரோ அலாரமோ எதுவும் இல்லை."
+    now = time.time()
+    parts = [(f"{x['label']} டைமரில் இன்னும் {_ta_dur(max(0, x['due'] - now))} உள்ளது" if x["label"] else f"டைமரில் இன்னும் {_ta_dur(max(0, x['due'] - now))} உள்ளது")
+             if x["kind"] == "timer" else f"அலாரம் {_ta_clock_at(x['due'])} மணிக்கு" for x in d["timers"]]
+    return ". ".join(parts) + "."
+
+
+WMO_TA = {"clear sky": "தெளிவான வானம்", "mainly clear": "பெரும்பாலும் தெளிவு", "partly cloudy": "ஓரளவு மேகமூட்டம்", "overcast": "மேகமூட்டம்",
+          "fog": "மூடுபனி", "freezing fog": "உறைபனி மூட்டம்", "light drizzle": "லேசான தூறல்", "drizzle": "தூறல்", "heavy drizzle": "அதிக தூறல்",
+          "light rain": "லேசான மழை", "rain": "மழை", "heavy rain": "கனமழை", "freezing rain": "உறைபனி மழை", "heavy freezing rain": "கடும் உறைபனி மழை",
+          "light showers": "லேசான மழைச்சாரல்", "showers": "மழைச்சாரல்", "violent showers": "பலத்த மழை", "thunderstorm": "இடியுடன் கூடிய மழை",
+          "thunderstorm with hail": "ஆலங்கட்டியுடன் இடிமழை", "thunderstorm with heavy hail": "கடும் ஆலங்கட்டி இடிமழை", "light snow": "லேசான பனிப்பொழிவு",
+          "snow": "பனிப்பொழிவு", "heavy snow": "கடும் பனிப்பொழிவு", "snow grains": "பனித்துகள்", "snow showers": "பனிச்சாரல்", "heavy snow showers": "கடும் பனிச்சாரல்"}
+
+
+def _r_weather_ta(d) -> str:
+    def deg(v):
+        return f"{round(v)}°" if v is not None else "?"
+    place = TA_PLACE_NAMES.get(d["place"], d["place"])
+    rain = f", மழைக்கு {d['rain_chance']}% வாய்ப்பு" if d.get("rain_chance") is not None else ""
+    if d["day"] == "tomorrow":
+        return f"நாளை {place}: {WMO_TA.get(d['sky'], d['sky']) or 'முன்னறிவிப்பு இல்லை'}, {deg(d['low'])} முதல் {deg(d['high'])} வரை{rain}."
+    n = d["now"]
+    return (f"{place}: இப்போது {deg(n['temp'])}, {WMO_TA.get(n['sky'], n['sky']) or 'தகவல் இல்லை'}. "
+            f"இன்று {deg(d['low'])} முதல் {deg(d['high'])} வரை{rain}.")
 
 RENDERERS: dict[str, Callable] = {
     "calendar_events": _r_calendar,

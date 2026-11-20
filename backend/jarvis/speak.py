@@ -5,9 +5,9 @@ its connection to the server (Edge froze the page) and spoken questions got no a
 server speaks what the offline listener asked, so no window is needed: Windows.Media.SpeechSynthesis (WinRT, ~0.3 s to
 synthesise a sentence on this laptop) -> a WAV file -> winsound. Sentences are spoken as the reply streams in.
 
-Voices on the owner's laptop: Heera and Ravi (English, India), David, Zira, Mark (English, US); no Tamil voice is
-installed, so Tamil text returns False from `say` and the caller lets the browser window speak it instead. Adding a
-Tamil voice in Windows (Settings > Time & language > Speech > Add voices) makes Tamil work here too.
+Voices: Piper (English, natural) by default; Tamil with MMS Tamil (MmsTamilEngine, offline); Windows' own voices for
+anything else (on the owner's laptop: Heera, Ravi, David, Zira, Mark - English only). Text no voice can say returns
+False from `say` and the caller lets the browser window speak it instead.
 """
 from __future__ import annotations
 
@@ -138,6 +138,152 @@ class KokoroEngine:
         return _wav_bytes(samples, sr)
 
 
+# -- Tamil -------------------------------------------------------------------------------------------------------------
+_TA_UNITS = ["பூஜ்ஜியம்", "ஒன்று", "இரண்டு", "மூன்று", "நான்கு", "ஐந்து", "ஆறு", "ஏழு", "எட்டு", "ஒன்பது"]
+_TA_TEENS = ["பத்து", "பதினொன்று", "பன்னிரண்டு", "பதிமூன்று", "பதினான்கு", "பதினைந்து", "பதினாறு", "பதினேழு", "பதினெட்டு", "பத்தொன்பது"]
+# (alone, followed by more): இருபது / இருபத்தி ஐந்து
+_TA_TENS = {2: ("இருபது", "இருபத்தி"), 3: ("முப்பது", "முப்பத்தி"), 4: ("நாற்பது", "நாற்பத்தி"), 5: ("ஐம்பது", "ஐம்பத்தி"),
+            6: ("அறுபது", "அறுபத்தி"), 7: ("எழுபது", "எழுபத்தி"), 8: ("எண்பது", "எண்பத்தி"), 9: ("தொண்ணூறு", "தொண்ணூற்றி")}
+_TA_HUNDREDS = {1: ("நூறு", "நூற்றி"), 2: ("இருநூறு", "இருநூற்றி"), 3: ("முந்நூறு", "முந்நூற்றி"), 4: ("நானூறு", "நானூற்றி"),
+                5: ("ஐந்நூறு", "ஐந்நூற்றி"), 6: ("அறுநூறு", "அறுநூற்றி"), 7: ("எழுநூறு", "எழுநூற்றி"), 8: ("எண்ணூறு", "எண்ணூற்றி"),
+                9: ("தொள்ளாயிரம்", "தொள்ளாயிரத்தி")}
+
+
+def tamil_number(n: int) -> str:
+    """25 -> 'இருபத்தி ஐந்து', 1500 -> 'ஆயிரத்தி ஐந்நூறு'. The Tamil voice reads digits badly, so they become words."""
+    if n < 0:
+        return "மைனஸ் " + tamil_number(-n)
+    if n < 10:
+        return _TA_UNITS[n]
+    if n < 20:
+        return _TA_TEENS[n - 10]
+
+    def join(head: tuple[str, str], rest: int) -> str:
+        return head[1] + " " + tamil_number(rest) if rest else head[0]
+    if n < 100:
+        return join(_TA_TENS[n // 10], n % 10)
+    if n < 1000:
+        return join(_TA_HUNDREDS[n // 100], n % 100)
+    for size, alone, more in ((10_000_000, "கோடி", "கோடியே"), (100_000, "லட்சம்", "லட்சத்தி"), (1000, "ஆயிரம்", "ஆயிரத்தி")):
+        if n >= size:
+            count, rest = divmod(n, size)
+            if count >= 100 and size == 10_000_000:
+                return " ".join(_TA_UNITS[int(d)] for d in str(n))  # too long to say as a number
+            head = (alone, more) if count == 1 else (tamil_number(count) + " " + alone, tamil_number(count) + " " + more)
+            if count == 1 and size != 1000:
+                head = ("ஒரு " + alone, "ஒரு " + more)
+            return join(head, rest)
+    return str(n)
+
+
+def tamil_speakable(text: str) -> str:
+    """What the Tamil voice should say: numbers, times, decimals, % and degrees as Tamil words."""
+    t = re.sub(r"(?<=\d),(?=\d{2,3}\b)", "", text)  # 1,500 / 1,00,000
+    t = re.sub(r"\b(\d{1,2}):(\d{2})\b", lambda m: f"{int(m.group(1))} மணி" + (f" {int(m.group(2))} நிமிடம்" if int(m.group(2)) else ""), t)
+    t = re.sub(r"(\d)\s*°\s*[CcFf]?\b|(\d)\s*°", lambda m: (m.group(1) or m.group(2)) + " டிகிரி", t)
+    t = re.sub(r"(\d)\s*%", r"\1 சதவீதம்", t)
+    t = re.sub(r"(\d+)\.(\d+)", lambda m: f"{m.group(1)} புள்ளி " + " ".join(_TA_UNITS[int(d)] for d in m.group(2)), t)
+    return re.sub(r"\d+", lambda m: tamil_number(int(m.group(0))) if len(m.group(0)) <= 9 else " ".join(_TA_UNITS[int(d)] for d in m.group(0)), t)
+
+
+class MmsTamilEngine:
+    """Offline Tamil voice: Meta's MMS Tamil (VITS, ONNX export, ~109 MB in <models>/tts/mms-tam, licence CC-BY-NC 4.0 -
+    personal use, like the translation model). ~3x faster than real time on the owner's laptop (a 4 s sentence in
+    ~1.3 s); Whisper reads its output back almost word for word. English words inside a Tamil reply (Chrome, GB...)
+    are said by the English voice, so they are not dropped (2026-11-20; no Windows Tamil voice is installed here)."""
+    name = "mms-ta"
+    langs = ("ta",)
+    RATE = 16000
+
+    def __init__(self, folder: Path, english=None):
+        self.folder, self.english = Path(folder), english
+        self._session = self._tokens = None
+        self._lock = threading.Lock()
+
+    def available(self) -> bool:
+        import importlib.util
+
+        return (self.folder / "model.onnx").is_file() and (self.folder / "tokens.txt").is_file() and importlib.util.find_spec("onnxruntime") is not None
+
+    def display(self) -> str:
+        return "MMS Tamil"
+
+    def _load_tokens(self) -> dict:
+        if self._tokens is None:
+            tokens = {}
+            for line in (self.folder / "tokens.txt").read_text(encoding="utf-8").splitlines():
+                ch, _, idx = line.rpartition(" ")
+                if idx.isdigit():
+                    tokens[ch or " "] = int(idx)
+            self._tokens = tokens
+        return self._tokens
+
+    def _load(self):
+        if self._session is None:
+            import onnxruntime as ort
+
+            so = ort.SessionOptions()
+            so.intra_op_num_threads = 4
+            self._session = ort.InferenceSession(str(self.folder / "model.onnx"), so, providers=["CPUExecutionProvider"])
+        return self._session, self._load_tokens()
+
+    def ids(self, text: str) -> list[int]:
+        """Characters -> ids with a blank (0) between them (the model was trained with add_blank)."""
+        import unicodedata
+
+        tokens = self._load_tokens()
+        out = [0]
+        for ch in unicodedata.normalize("NFC", text.lower()):
+            if ch in tokens:
+                out += [tokens[ch], 0]
+        return out
+
+    def _tamil(self, text: str, rate: float):
+        import numpy as np
+
+        ids = self.ids(text)
+        if len(ids) < 3:
+            return np.zeros(0, np.float32)
+        session, _ = self._load()
+        x = np.array([ids], dtype=np.int64)
+        with self._lock:
+            y = session.run(None, {"x": x, "x_length": np.array([x.shape[1]], np.int64), "noise_scale": np.array([0.667], np.float32),
+                                   "length_scale": np.array([1 / max(0.5, min(2.0, rate or 1))], np.float32),
+                                   "noise_scale_w": np.array([0.8], np.float32)})[0]
+        return y.reshape(-1).astype(np.float32)
+
+    def _latin(self, text: str, rate: float):
+        """An English word said by the English voice, resampled to this voice's rate."""
+        import io
+
+        import numpy as np
+
+        if not self.english or not re.search(r"[A-Za-z]", text):
+            return np.zeros(0, np.float32)
+        try:
+            with wave.open(io.BytesIO(self.english.wav(text, "en", rate))) as w:
+                sr, pcm = w.getframerate(), np.frombuffer(w.readframes(w.getnframes()), np.int16).astype(np.float32) / 32768
+        except Exception:  # noqa: BLE001 - better a skipped word than a skipped sentence
+            return np.zeros(0, np.float32)
+        if sr != self.RATE and len(pcm):
+            pcm = np.interp(np.arange(0, len(pcm), sr / self.RATE), np.arange(len(pcm)), pcm).astype(np.float32)
+        return pcm
+
+    def wav(self, text: str, lang: str, rate: float) -> bytes:
+        import numpy as np
+
+        pieces, pause = [], np.zeros(int(self.RATE * 0.12), np.float32)
+        for clause in re.split(r"\s*[,;:]\s*", tamil_speakable(text)):
+            # runs of Tamil and of Latin letters, so each is said by a voice that knows it
+            for run in re.findall(r"[A-Za-z][A-Za-z0-9 .'&+-]*[A-Za-z0-9]|[A-Za-z]|[^A-Za-z]+", clause):
+                audio = self._latin(run, rate) if re.match(r"[A-Za-z]", run) else self._tamil(run.strip(), rate)
+                if len(audio):
+                    pieces.append(audio)
+            pieces.append(pause)
+        samples = np.concatenate(pieces) if pieces else np.zeros(1, np.float32)
+        return _wav_bytes(samples, self.RATE)
+
+
 class WindowsEngine:
     """Windows' own voices (WinRT SpeechSynthesis): instant, but robotic. Used for languages the neural voice does
     not speak (a Tamil voice installed in Windows would be picked up here)."""
@@ -203,13 +349,17 @@ class WindowsEngine:
 
 
 def make_engines(choice: str, models_dir: Path, piper_voice: str = "en_US-lessac-medium", kokoro_voice: str = "af_heart") -> list:
-    """The chosen engine first, then Windows' voices for whatever it cannot speak. Missing models are skipped."""
+    """The chosen engine first, then the Tamil voice, then Windows' voices for whatever they cannot speak. Missing models
+    are skipped."""
     tts = Path(models_dir) / "tts"
     engines = {"piper": PiperEngine(tts / f"{piper_voice}.onnx"),
                "kokoro": KokoroEngine(tts / "kokoro-v1.0.int8.onnx", tts / "voices-v1.0.bin", kokoro_voice),
+               "mms-ta": MmsTamilEngine(tts / "mms-tam"),
                "windows": WindowsEngine()}
-    order = [choice, "windows"] if choice in engines and choice != "windows" else ["windows"]
-    return [engines[n] for n in order if engines[n].available()]
+    order = [choice, "mms-ta", "windows"] if choice in engines and choice not in ("windows", "mms-ta") else ["mms-ta", "windows"]
+    chosen = [engines[n] for n in order if engines[n].available()]
+    engines["mms-ta"].english = next((e for e in chosen if "en" in e.langs), None)  # says the English words in Tamil replies
+    return chosen
 
 
 class Speaker:
@@ -392,17 +542,24 @@ PIPER_URL = "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/l
 KOKORO_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/"
 
 
-def download_voices(dest: Path, kokoro: bool = False, log=print) -> bool:
-    """Fetch the Piper voice (~63 MB) - and Kokoro (~115 MB) when asked - into `dest`; resumes, skips what is there."""
+MMS_TAMIL_URL = "https://huggingface.co/willwade/mms-tts-multilingual-models-onnx/resolve/main/tam/"
+
+
+def download_voices(dest: Path, kokoro: bool = False, tamil: bool = True, log=print) -> bool:
+    """Fetch the Piper voice (~63 MB), the Tamil voice (~109 MB) and - when asked - Kokoro (~115 MB) into `dest`;
+    skips what is there."""
     import httpx
 
     files = [(PIPER_URL + "en_US-lessac-medium.onnx", "en_US-lessac-medium.onnx"), (PIPER_URL + "en_US-lessac-medium.onnx.json", "en_US-lessac-medium.onnx.json")]
+    if tamil:
+        files += [(MMS_TAMIL_URL + "tokens.txt", "mms-tam/tokens.txt"), (MMS_TAMIL_URL + "model.onnx", "mms-tam/model.onnx")]
     if kokoro:
         files += [(KOKORO_URL + "kokoro-v1.0.int8.onnx", "kokoro-v1.0.int8.onnx"), (KOKORO_URL + "voices-v1.0.bin", "voices-v1.0.bin")]
     dest.mkdir(parents=True, exist_ok=True)
     ok = True
     for url, name in files:
         path = dest / name
+        path.parent.mkdir(parents=True, exist_ok=True)
         if path.is_file() and path.stat().st_size > 0:
             continue
         try:
