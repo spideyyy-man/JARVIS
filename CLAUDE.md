@@ -162,6 +162,25 @@ Since 2026-11-19 (Edge's online recogniser failed on the laptop with "Speech rec
   - Fake-microphone checks (real listener): "Jarvis" + a real Tamil recording in one breath -> heard; "Jarvis", pause,
     Tamil -> heard; Tamil follow-up -> heard; English unchanged. Not checked: the owner's own Tamil speech, and how the
     Tamil voice sounds to them.
+- **Hearing fixes from the owner's real session** (2026-11-20 evening; "it can't understand what I'm speaking"):
+  - The owner mostly spoke Tamil and JARVIS forced English: follow-ups after an English turn and "Jarvis, ..." requests
+    skipped the language check, and base.en is sometimes *confidently* wrong on everyday Tamil (-0.27). Now the language
+    is checked on every request (base, ~0.3-1 s); the conversation's language only breaks a near-tie (`TIE`, share
+    0.35-0.65). base identified the owner's Tamil at 0.80-0.91.
+  - Tamil is written by Whisper small trained on Tamil (vasista22/whisper-tamil-small, IIT Madras, Apache-2.0; int8
+    CTranslate2 copy `ukta-app/whisper-tamil-ct2`, `~/.jarvis/models/whisper-ta/ukta`, checksum-verified;
+    `JARVIS_STT_TAMIL_MODEL`, `listen.download_tamil_model`, setup.ps1). 2.0% character errors on the 6 Tamil clips vs
+    9.9% for plain small; on the owner's recordings it writes spoken Tamil ("உனக்கு மண்டையில பிரச்சனையா" where JARVIS heard
+    "Monday, look at this"). It is over-confident (unclear limit -0.4) and writes English speech as Tamil-script English
+    at -0.12..-0.42, so with it the Tamil second opinion for unsure English is off (`TA_TRAINED_SURE = None`).
+  - Echo: the speaker counted as idle while the next sentence was still being synthesised, so the follow-up window
+    opened mid-reply and the microphone took JARVIS's next sentence as the request ("I can't provide money..." came back
+    12 s later). `Speaker` now counts sentences until they have played (`_pending`); and anything heard that matches what
+    JARVIS said in the last minute is ignored (`is_echo`).
+  - "Can you talk in Tamil?" was heard as "dock in the mill": added to `VOCABULARY`.
+  - Replay of the owner's 22 recordings since 19:34 (`scratchpad/replay_new.py`): Tamil now comes out as Tamil, "talk in
+    Tamil" right twice. The CPU was overloaded (an unknown elevated python, PID 37240, using ~1 core since 2026-11-19), so
+    transcription took 10-125 s per request during the test.
 - **Floating icon** (`overlay.py`, tkinter, its own `pythonw` process started by the desktop app with
   `--parent PID`): a 46 px always-on-top circle, coloured by state; hover (or click to pin) shows a panel from
   `GET /api/overlay` - now/heard/last exchange, approvals with Approve/Deny, activity (`EventBus.activity`,

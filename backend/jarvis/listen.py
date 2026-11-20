@@ -45,6 +45,11 @@ HEAD_SECONDS = 1.6  # the start of a segment checked alone for "Jarvis" (0.48 s 
 # Unsure English that the language check gave at least this much Tamil gets a Tamil second opinion, kept only when the
 # Tamil model is this sure (real Tamil: -0.09..-0.3 mostly; no English recording forced into Tamil scored above -0.39).
 TA_SECOND_OPINION, TA_SURE = 0.2, -0.35
+# The Tamil-trained model is far surer of itself (right Tamil -0.01..-0.2; a garbled 12 s recording -0.49), so it has its
+# own "unclear" limit - and its confidence cannot tell Tamil from English: it wrote the owner's English as Tamil-script
+# English at -0.12..-0.42 ("Can you talk in Tamil" -> கேன்யூ டாக்கின் தமிழ்). With it, the language check alone decides.
+TA_TRAINED_UNCLEAR_BELOW, TA_TRAINED_SURE = -0.4, None
+TIE = 0.15  # a Tamil share within 0.35..0.65 is too close to call: the conversation's language decides
 # Prompt for the plain-"Jarvis" check: naming the look-alikes lets the model tell them apart. Measured on 9 cases
 # (synthetic voices + the owner's real "JARVIS, I want you..." and "Hey JARVIS"): 9/9 with this prompt; 5/9 with no
 # prompt ("Jair is", "Jardus"); a prompt starting "Jarvis," made it write "Jarvis" before "Javascript is fun".
@@ -65,7 +70,8 @@ FAST_TEXT_LANGUAGES = {"en"}
 # Windows' Indian-English voices through a simulated laptop mic: 12.3% word errors without it, 2.3% with it; silence
 # still comes out empty (no invented words).
 VOCABULARY = ("JARVIS, what time is it? Open Notepad, Claude, Chrome, Google, YouTube. Create a file, a folder, on my Desktop, "
-              "Documents, Downloads. index.html, notes.txt, hi.txt. Search the web. Volume, brightness. Remind me. Delete, rename, move.")
+              "Documents, Downloads. index.html, notes.txt, hi.txt. Search the web. Volume, brightness. Remind me. Delete, rename, move. "
+              "Can you talk in Tamil? Weather, timer, alarm.")  # "talk in Tamil" was heard as "dock in the mill" (2026-11-20)
 VAD_START, VAD_STAY = 0.5, 0.35  # speech probability to start talking / to keep counting as talking
 SPEECH_END_VAD = 0.5  # s of non-speech that ends an utterance with the speech detector (0.7 s with loudness only)
 KEEP_SAMPLES = 30  # the last utterances are kept (only on this computer) to tune recognition on the user's real voice
@@ -147,6 +153,48 @@ TA_WAKE = re.compile(r"^[\s,.!?]*(?:(?:hey|hi|ok|okay|ஹே|ஹாய்|ஓக
 TA_WAKE_LOOSE = re.compile(r"^[\s,.!?]*(?:(?:hey|hi|ok|ஹே|ஹாய்|ஓகே)[\s,.!]+)?[ஜJj]\S*[\s,.!?:]*")
 
 
+TAMIL_MODEL_URL = "https://huggingface.co/ukta-app/whisper-tamil-ct2/resolve/main/"  # int8 conversion of vasista22/whisper-tamil-small
+TAMIL_MODEL_FILES = ("config.json", "preprocessor_config.json", "tokenizer.json", "vocabulary.json", "model.bin")
+
+
+def resolve_tamil_model(models_dir: Path, choice: str) -> str | None:
+    """'tamil-small' -> its folder when installed; a folder path as is; a model size ('small') as is; None if missing."""
+    if not choice:
+        return None
+    if choice == "tamil-small":
+        folder = Path(models_dir) / "whisper-ta" / "ukta"
+        return str(folder) if (folder / "model.bin").is_file() else None
+    if Path(choice).is_dir():
+        return choice
+    return choice if re.fullmatch(r"(?:tiny|base|small|medium|large-v\d)(?:\.en)?", choice) else None
+
+
+def download_tamil_model(models_dir: Path, log=print) -> bool:
+    """Whisper small trained on Tamil (Apache-2.0, ~240 MB) into <models>/whisper-ta/ukta; skips files that are there."""
+    import httpx
+
+    folder = Path(models_dir) / "whisper-ta" / "ukta"
+    folder.mkdir(parents=True, exist_ok=True)
+    ok = True
+    for name in TAMIL_MODEL_FILES:
+        path = folder / name
+        if path.is_file() and path.stat().st_size > 0:
+            continue
+        try:
+            with httpx.stream("GET", TAMIL_MODEL_URL + name, follow_redirects=True, timeout=httpx.Timeout(120, connect=20)) as r:
+                r.raise_for_status()
+                tmp = path.with_suffix(path.suffix + ".part")
+                with open(tmp, "wb") as f:
+                    for chunk in r.iter_bytes(1 << 20):
+                        f.write(chunk)
+                tmp.replace(path)
+            log(f"   {name}: ok")
+        except Exception as e:  # noqa: BLE001
+            ok = False
+            log(f"   {name}: failed ({type(e).__name__})")
+    return ok
+
+
 def strip_tamil_wake(text: str) -> str:
     text = re.sub(r"\s+", " ", text).strip()
     return TA_WAKE.sub("", text, count=1).strip()
@@ -176,8 +224,13 @@ def pick_language(detected: str, probs: dict[str, float], allowed: tuple[str, ..
 class LocalListener:
     def __init__(self, models_dir: Path, on_event: Callable[[str, dict], None], on_utterance: Callable[[str, str, dict], None], *,
                  model_size: str = "small", fast_size: str = "base", english_size: str = "base.en", languages: tuple[str, ...] = ("en", "ta"), wake_threshold: float = 0.5,
-                 threads: int = 0, accurate_idle: float = 15 * 60):
+                 threads: int = 0, accurate_idle: float = 15 * 60, tamil_model: str = ""):
         self.models_dir, self.on_event, self.on_utterance = Path(models_dir), on_event, on_utterance
+        # Tamil text: Whisper small trained on Tamil (IIT Madras) when installed - 2.0% character errors on the Tamil test
+        # clips where plain small made 9.9%, and it writes the owner's spoken Tamil instead of nonsense (2026-11-20)
+        self.tamil_source = resolve_tamil_model(self.models_dir, tamil_model) or ""
+        self.tamil_trained = bool(self.tamil_source) and self.tamil_source != model_size
+        self._tamil = None
         # all cores: measured on the owner's laptop under load, 8 threads took 4-8 s per request where 4 took ~15 s
         self.model_size, self.languages, self.wake_threshold, self.threads = model_size, languages, wake_threshold, threads or min(8, os.cpu_count() or 4)
         # Two models (measured on the owner's laptop, CPU half busy): base hears the language right and writes English
@@ -264,8 +317,9 @@ class LocalListener:
             rest = text[m.end():].strip()
         info = {"model": self.english_size or self.fast_size, "detected": "en", "probability": 1.0, "language": "en",
                 "no_speech": round(no_speech, 2), "logprob": round(logprob, 2), "fast_seconds": 0.0}
-        if rest and logprob < TA_HINT_BELOW and "ta" in self.languages:
-            # "Jarvis, <Tamil request>": the English model is never sure of Tamil - ask which language it was
+        if rest and "ta" in self.languages:
+            # "Jarvis, <request>": always ask which language it was. The English model was confidently wrong on the
+            # owner's everyday Tamil ("I'll be able to kill him like that", -0.27, was Tamil; 2026-11-20).
             try:
                 probs = dict(self._whisper.detect_language(audio)[2] or [])
             except Exception:  # noqa: BLE001 - no language check: treat it as English, as before
@@ -282,16 +336,16 @@ class LocalListener:
 
     def _tamil_text(self, audio) -> tuple[str, dict]:
         """Tamil words of a "Jarvis, ..." segment, without the wake word (written in Tamil or English letters)."""
-        model = self._accurate_model() if self.model_size != self.fast_size else self._whisper
+        model = self._tamil_model() if (self.tamil_trained or self.model_size != self.fast_size) else self._whisper
         segments = list(model.transcribe(audio, language="ta", beam_size=1, vad_filter=True, condition_on_previous_text=False,
                                          without_timestamps=True)[0])
         text = " ".join(x.text.strip() for x in segments).strip()
         no_speech = max((x.no_speech_prob for x in segments), default=1.0)
         logprob = min((x.avg_logprob for x in segments), default=-9.0)
-        info = {"model": self.model_size, "no_speech": round(no_speech, 2), "logprob": round(logprob, 2)}
+        info = {"model": self.tamil_name, "no_speech": round(no_speech, 2), "logprob": round(logprob, 2)}
         if is_noise(text, no_speech, logprob):
             return "", info
-        if logprob < TA_UNCLEAR_BELOW:
+        if logprob < self.ta_unclear_below():
             return "", {**info, "unclear": text}
         stripped = strip_tamil_wake(text)
         if stripped == text:
@@ -332,7 +386,9 @@ class LocalListener:
 
     def status(self) -> dict:
         model = f"whisper-{self.english_size} (English)" if self.english_size else f"whisper-{self.fast_size}"
-        if self.model_size != self.fast_size:
+        if self.tamil_trained:
+            model += " + tamil-small (Tamil)"
+        elif self.model_size != self.fast_size:
             model += f" + {self.model_size} (Tamil)"
         return {"state": self.state, "error": self.error, "model": model, "speech_model_ready": self._whisper_ready.is_set(),
                 "wake_phrase": "Jarvis", "last": self.last}
@@ -386,6 +442,33 @@ class LocalListener:
     def _drop_accurate(self) -> None:
         with self._accurate_lock:
             self._accurate = None
+            self._tamil = None
+
+    def _tamil_model(self):
+        """The model that writes Tamil: the Tamil-trained one when installed, else the bigger multilingual one."""
+        if not self.tamil_trained:
+            return self._accurate_model()
+        with self._accurate_lock:
+            if self._tamil is None:
+                from faster_whisper import WhisperModel
+
+                self._tamil = WhisperModel(self.tamil_source, device="cpu", compute_type="int8", cpu_threads=self.threads)
+            if self._accurate_timer:
+                self._accurate_timer.cancel()
+            self._accurate_timer = threading.Timer(self.accurate_idle, self._drop_accurate)
+            self._accurate_timer.daemon = True
+            self._accurate_timer.start()
+            return self._tamil
+
+    @property
+    def tamil_name(self) -> str:
+        return "tamil-small" if self.tamil_trained else self.model_size
+
+    def ta_unclear_below(self) -> float:
+        return TA_TRAINED_UNCLEAR_BELOW if self.tamil_trained else TA_UNCLEAR_BELOW
+
+    def ta_sure(self) -> float | None:
+        return TA_TRAINED_SURE if self.tamil_trained else TA_SURE
 
     def _run(self) -> None:
         try:
@@ -563,9 +646,9 @@ class LocalListener:
             stream.stop()
             stream.close()
 
-    def transcribe(self, audio, language: str | None = None) -> tuple[str, str, dict]:
-        """(text, language, info) for float32 mono 16 kHz audio. Blocks until the speech model is loaded. With
-        `language` (a follow-up in a conversation: the user is still speaking the same language) detection is skipped."""
+    def transcribe(self, audio, language: str | None = None, prior: str | None = None) -> tuple[str, str, dict]:
+        """(text, language, info) for float32 mono 16 kHz audio. Blocks until the speech model is loaded. `language`
+        forces the language (no check); `prior` (the conversation's language) only breaks a near-tie of the check."""
         self._whisper_ready.wait()
         if self._whisper is None:
             raise RuntimeError(self.error or "speech model not loaded")
@@ -582,11 +665,15 @@ class LocalListener:
             probs = dict(all_probs or [])
             lang = pick_language(detected, probs, self.languages)
             ta_share = probs.get("ta", 0.0) / max(1e-9, probs.get("ta", 0.0) + probs.get("en", 0.0))
+            if prior in self.languages and {"en", "ta"} <= set(self.languages) and abs(ta_share - 0.5) < TIE:
+                lang = prior  # too close to call: the user most likely kept the conversation's language
         detect_s = time.time() - t0
         # 2. English: the English-only model with the words the user says to JARVIS (2.3% word errors, ~1 s);
         #    Tamil: the bigger multilingual model, which writes Tamil properly.
         if lang == "en" and self.english_size:
             model, model_used, extra = self._english_model(), self.english_size, {"initial_prompt": VOCABULARY}
+        elif lang == "ta" and self.tamil_trained:
+            model, model_used, extra = self._tamil_model(), self.tamil_name, {}
         elif lang not in FAST_TEXT_LANGUAGES and self.model_size != self.fast_size:
             model, model_used, extra = self._accurate_model(), self.model_size, {}
         else:
@@ -595,14 +682,14 @@ class LocalListener:
         text = " ".join(s.text.strip() for s in segments)
         no_speech = max((s.no_speech_prob for s in segments), default=1.0)
         logprob = min((s.avg_logprob for s in segments), default=-9.0)
-        if (lang == "en" and logprob < RETRY_BELOW and ta_share >= TA_SECOND_OPINION and "ta" in self.languages
-                and self.model_size != self.fast_size and not is_noise(text, no_speech, logprob)):
+        if (lang == "en" and logprob < RETRY_BELOW and ta_share >= TA_SECOND_OPINION and "ta" in self.languages and self.ta_sure() is not None
+                and (self.tamil_trained or self.model_size != self.fast_size) and not is_noise(text, no_speech, logprob)):
             # unsure English, and the language check was not sure it was English either: it may have been Tamil (the
             # bigger model would otherwise translate it: "இப்போது நேரம் என்ன?" came back as "What is time now?")
-            alt = list(self._accurate_model().transcribe(audio, language="ta", **opts)[0])
+            alt = list(self._tamil_model().transcribe(audio, language="ta", **opts)[0])
             alt_lp = min((x.avg_logprob for x in alt), default=-9.0)
-            if alt and alt_lp >= TA_SURE and alt_lp > logprob + RETRY_MARGIN:
-                segments, logprob, model_used, lang = alt, alt_lp, self.model_size, "ta"
+            if alt and alt_lp >= self.ta_sure() and alt_lp > logprob + RETRY_MARGIN:
+                segments, logprob, model_used, lang = alt, alt_lp, self.tamil_name, "ta"
                 text = " ".join(x.text.strip() for x in alt)
                 no_speech = max((x.no_speech_prob for x in alt), default=1.0)
         if lang == "en" and logprob < RETRY_BELOW and self.model_size not in (self.english_size, self.fast_size):
@@ -614,7 +701,7 @@ class LocalListener:
                 segments, logprob, model_used = alt, alt_lp, self.model_size
                 text = " ".join(x.text.strip() for x in alt)
                 no_speech = max((x.no_speech_prob for x in alt), default=1.0)
-        if lang == "ta" and logprob < TA_UNCLEAR_BELOW and self.english_size and not is_noise(text, no_speech, logprob):
+        if lang == "ta" and logprob < self.ta_unclear_below() and self.english_size and not is_noise(text, no_speech, logprob):
             # unsure Tamil: it may have been English the language check got wrong (accented, noisy) - ask the English model
             alt = list(self._english_model().transcribe(audio, language="en", **opts, initial_prompt=VOCABULARY)[0])
             alt_lp = min((x.avg_logprob for x in alt), default=-9.0)
@@ -627,7 +714,7 @@ class LocalListener:
                     "model": model_used, "fast_seconds": round(detect_s, 1)}
         if is_noise(text, no_speech, logprob):
             return "", lang, info_out
-        if logprob < (UNCLEAR_BELOW if lang == "en" else TA_UNCLEAR_BELOW):
+        if logprob < (UNCLEAR_BELOW if lang == "en" else self.ta_unclear_below()):
             info_out["unclear"] = text  # what it thought it heard, for the log - not acted on
             return "", lang, info_out
         return clean_transcript(text), lang, info_out
@@ -659,10 +746,11 @@ class LocalListener:
 
     def _transcribe(self, audio) -> None:
         try:
-            # A follow-up in English skips the language check (~1 s). In Tamil it is kept: a Tamil speaker often answers
-            # "yes" / "okay" in English, and the check is small next to Tamil transcription itself.
-            hint = self._last_lang if self._trigger == "follow-up" and self._last_lang == "en" else None
-            text, lang, info = self.transcribe(audio) if hint is None else self.transcribe(audio, language=hint)
+            # The language is checked on every request (~0.3-1 s). Skipping it for English follow-ups made the
+            # English model write nonsense for the owner's Tamil ("Monday, look at this" for உனக்கு மண்டையில்
+            # பிரச்சனையா; 2026-11-20). The conversation's language only breaks a near-tie.
+            prior = self._last_lang if self._trigger == "follow-up" else None
+            text, lang, info = self.transcribe(audio, prior=prior) if prior else self.transcribe(audio)
             if text:
                 self._last_lang = lang
         except Exception as e:  # noqa: BLE001
@@ -693,6 +781,24 @@ CONVERSATION_ENDS = re.compile(r"^(?:thanks?|thank you|that'?s all|that is all|n
 # What JARVIS says when it could not make out the request / was too slow, by language
 SORRY = {"en": ("Sorry, I didn't catch that. Please say it again.", "Sorry, I was too slow to catch that. Please say it again."),
          "ta": ("மன்னிக்கவும், சரியாகக் கேட்கவில்லை. மீண்டும் சொல்லுங்கள்.", "மன்னிக்கவும், கேட்பதற்குத் தாமதமாகிவிட்டது. மீண்டும் சொல்லுங்கள்.")}
+
+
+def is_echo(heard: str, recent: list, within: float = 60.0) -> bool:
+    """Is `heard` JARVIS's own words (said in the last `within` s) coming back through the microphone?"""
+    import difflib
+
+    def words(t: str) -> str:
+        return " ".join(re.findall(r"\w+", t.lower()))
+    h = words(heard)
+    if len(h.split()) < 3:
+        return False  # "yes", "okay": too short to tell, and the user says them too
+    now = time.time()
+    said = [words(s) for at, s in recent if now - at <= within]
+    # one sentence, or a stretch across two (the microphone does not stop at JARVIS's sentence ends)
+    for s in said + [f"{a} {b}" for a, b in zip(said, said[1:])]:
+        if s and (h in s or difflib.SequenceMatcher(None, h, s).ratio() >= 0.75):
+            return True
+    return False
 
 
 # -- connection to JARVIS -----------------------------------------------------------------------------------------------
@@ -742,7 +848,7 @@ class VoiceService:
         if self.listener is None:
             s = self.app.settings
             self.listener = LocalListener(s.data_dir / "models", self._event, self._utterance, model_size=s.stt_local_model, fast_size=s.stt_fast_model,
-                                          english_size=s.stt_english_model)
+                                          english_size=s.stt_english_model, tamil_model=s.stt_tamil_model)
             self.listener.keep_samples = self.app.db.get_setting("voice", {}).get("keep_samples", True)
         self.listener.start()
         return True
@@ -807,6 +913,12 @@ class VoiceService:
             self.loop.call_soon_threadsafe(report)
 
     def _utterance(self, text: str, lang: str, info: dict) -> None:
+        if self.speaker and is_echo(text, getattr(self.speaker, "recent", [])):
+            # the microphone heard JARVIS's own reply (speakers, no headset): never act on it
+            if self.listener:
+                self.listener.last["note"] = "my own voice - ignored"
+            self._event("voice.state", {"state": "waiting", "note": "ignored my own voice"})
+            return
         if self.loop and not self.loop.is_closed():
             fut = asyncio.run_coroutine_threadsafe(self.handle(text, lang, info), self.loop)
             self._tasks.add(fut)

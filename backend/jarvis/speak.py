@@ -17,6 +17,7 @@ import queue
 import re
 import tempfile
 import threading
+import time
 import wave
 from pathlib import Path
 from typing import Callable
@@ -374,6 +375,12 @@ class Speaker:
         self.engines = engines if engines is not None else [WindowsEngine()]
         self._thread: threading.Thread | None = None
         self._error = ""
+        # sentences queued and not yet finished playing. "Idle" used to mean "both queues empty", which was also true
+        # while the next sentence was being synthesised: the follow-up window opened mid-reply and the microphone
+        # took JARVIS's next sentence for the user's request (2026-11-20: "I can't provide money..." heard back).
+        self._pending = 0
+        self._pending_lock = threading.Lock()
+        self.recent: list[tuple[float, str]] = []  # (time, words) said lately: what the microphone may hear back
 
     def engine_for(self, lang: str):
         return next((e for e in self.engines if lang in e.langs), None)
@@ -411,13 +418,23 @@ class Speaker:
         if not self.can_speak(lang):
             return False
         self._ensure_thread()
+        self._add_pending(1)
+        self._set(True)
+        now = time.time()
+        self.recent = [(t, w) for t, w in self.recent if now - t < 60][-12:] + [(now, words)]
         self._queue.put((self._gen, lang, words))
         return True
 
+    def _add_pending(self, n: int) -> None:
+        with self._pending_lock:
+            self._pending = max(0, self._pending + n)
+            done = self._pending == 0
+        if done:
+            self._set(False)
+
     def idle(self) -> bool:
         """Nothing queued, being synthesised or playing."""
-        ready = getattr(self, "_ready", None)
-        return not self.speaking and self._queue.empty() and (ready is None or ready.empty())
+        return self._pending == 0
 
     def chime(self) -> None:
         """A short rising two-note tone, played at once: "I heard 'Hey Jarvis', go ahead"."""
@@ -435,6 +452,9 @@ class Speaker:
     def stop(self) -> None:
         """Barge-in: drop everything queued and cut the sentence being spoken."""
         self._gen += 1
+        with self._pending_lock:
+            self._pending = 0
+        self._set(False)
         for q in (self._queue, getattr(self, "_ready", None)):
             try:
                 while q is not None:
@@ -469,11 +489,13 @@ class Speaker:
         while True:
             gen, lang, text = self._queue.get()
             if gen != self._gen:
-                continue
+                continue  # stop() already cleared the count
             try:
                 audio = self._synth_one(text, lang)
             except Exception as e:  # noqa: BLE001 - one bad sentence must not silence the rest
                 self._error = f"{type(e).__name__}: {e}"
+                if gen == self._gen:
+                    self._add_pending(-1)
                 continue
             if gen != self._gen:
                 continue
@@ -496,15 +518,9 @@ class Speaker:
         import winsound
 
         while True:
-            try:
-                gen, path = self._ready.get(timeout=0.3)
-            except queue.Empty:
-                if self._queue.empty():
-                    self._set(False)
-                continue
+            gen, path = self._ready.get()
             try:
                 if gen == self._gen:
-                    self._set(True)
                     winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_NODEFAULT)  # blocks; stop() cuts it
             except Exception as e:  # noqa: BLE001
                 self._error = f"{type(e).__name__}: {e}"
@@ -513,8 +529,8 @@ class Speaker:
                     os.remove(path)
                 except OSError:
                     pass
-            if self._queue.empty() and self._ready.empty():
-                self._set(False)
+            if gen == self._gen:
+                self._add_pending(-1)  # finished: only now may the listener take the next words as the user's
 
 
 def _write_chime() -> str:

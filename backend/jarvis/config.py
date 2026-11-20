@@ -80,7 +80,8 @@ class Settings:
     wake_word: str = "jarvis"
     stt_model: str = "whisper-1"
     listen_on_start: bool = False  # set by the desktop app: run the offline listener (tests and the bare server do not)
-    stt_local_model: str = "small"  # offline listener (listen.py): the model for Tamil text: tiny | base | small | medium
+    stt_local_model: str = "small"  # offline listener (listen.py): the bigger multilingual model (English second opinions)
+    stt_tamil_model: str = "tamil-small"  # offline listener: writes Tamil - "tamil-small" (Whisper small trained on Tamil, IIT Madras), a folder, or a size
     local_tts: str = "piper"  # voice for spoken replies: piper (natural, fast) | kokoro (most natural, slow here) | windows
     piper_voice: str = "en_US-lessac-medium"
     kokoro_voice: str = "af_heart"
@@ -166,6 +167,7 @@ def load_settings(env_file: Path | None = None) -> Settings:
         embedder=env("JARVIS_EMBEDDER", "hashing"),
         stt_model=env("JARVIS_STT_MODEL", "whisper-1"),
         stt_local_model=env("JARVIS_STT_LOCAL_MODEL", "small"),
+        stt_tamil_model=env("JARVIS_STT_TAMIL_MODEL", "tamil-small"),
         stt_fast_model=env("JARVIS_STT_FAST_MODEL", "base"),
         stt_english_model=env("JARVIS_STT_ENGLISH_MODEL", "base.en"),
         local_tts=env("JARVIS_LOCAL_TTS", "piper"), piper_voice=env("JARVIS_PIPER_VOICE", "en_US-lessac-medium"),

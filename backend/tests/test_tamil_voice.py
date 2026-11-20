@@ -212,12 +212,38 @@ def test_unsure_speech_that_does_not_start_with_jarvis_never_reaches_the_tamil_m
     assert tamil.calls == []
 
 
-def test_a_clear_english_one_breath_request_skips_the_tamil_check(tmp_path):
-    detector = Model("", -0.3, {"ta": 0.9})
-    detector.detect_language = lambda audio: (_ for _ in ()).throw(AssertionError("no language check for clear English"))
+def test_a_clear_english_one_breath_request_stays_english(tmp_path):
+    detector = Model("", -0.3, {"en": 0.95, "ta": 0.02})
     tamil = Model("unused", -0.2)
     rest, info = _lst(tmp_path, detector, Model("Jarvis, what time is it?", -0.15), tamil)._verify_wake(np.zeros(16000, "float32"))
     assert rest == "what time is it?" and info["language"] == "en" and tamil.calls == []
+
+
+def test_tamil_after_jarvis_is_found_even_when_the_english_model_is_confidently_wrong(tmp_path):
+    """The owner's Tamil came out of the English model as "I'll be able to kill him like that" at -0.27."""
+    detector = Model("", -0.3, {"ta": 0.88, "en": 0.1})
+    tamil = Model("ஜார்விஸ் அதுவே விளக்கு எல்லாமா இருக்கா?", -0.37)
+    rest, info = _lst(tmp_path, detector, Model("Jarvis, I'll be able to kill him like that.", -0.27), tamil)._verify_wake(np.zeros(16000, "float32"))
+    assert rest == "அதுவே விளக்கு எல்லாமா இருக்கா?" and info["language"] == "ta"
+
+
+def test_tamil_in_an_english_conversation_is_heard_as_tamil(tmp_path):
+    """Follow-ups used to skip the language check after an English turn: the owner's Tamil became
+    "Monday, look at this" (it was உனக்கு மண்டையில் பிரச்சனையா)."""
+    done = []
+    detector = Model("", -0.3, {"ta": 0.95, "en": 0.02})
+    lst = _lst(tmp_path, detector, Model(" Monday, look at this.", -0.85), Model("உனக்கு மண்டையில் பிரச்சனையா", -0.19), done=done)
+    lst._last_lang, lst._trigger = "en", "follow-up"
+    lst._transcribe(np.zeros(16000, "float32"))
+    assert done[0][:2] == ("உனக்கு மண்டையில் பிரச்சனையா", "ta")
+
+
+def test_a_near_tie_keeps_the_conversation_language(tmp_path):
+    done = []
+    lst = _lst(tmp_path, Model("", -0.3, {"ta": 0.45, "en": 0.55}), Model("unused", -0.2), Model("சரி, அதைச் செய்", -0.2), done=done)
+    lst._last_lang, lst._trigger = "ta", "follow-up"
+    lst._transcribe(np.zeros(16000, "float32"))
+    assert done[0][1] == "ta"
 
 
 def test_unclear_tamil_after_jarvis_is_asked_for_again(tmp_path):
@@ -306,3 +332,102 @@ def test_sorry_is_said_in_tamil_when_the_conversation_is_in_tamil(home, tmp_path
     VoiceService(j, speaker=english_only)._event("voice.unclear", {"guess": "x", "language": "ta"})
     assert english_only.said == ["Sorry, I didn't catch that. Please say it again."]  # no Tamil voice: say it in English
     j.db.close()
+
+
+# -- JARVIS must never take its own voice for the user's (2026-11-20: "I can't provide money..." heard back) ----------------
+def test_speaker_is_busy_until_the_last_queued_sentence_has_played():
+    from jarvis.speak import Speaker
+
+    class Engine:
+        name, langs = "fake", ("en",)
+
+        def wav(self, text, lang, rate):
+            return b"RIFF"
+    states = []
+    sp = Speaker(states.append, engines=[Engine()])
+    sp._ensure_thread = lambda: None  # no threads, no sound in a test
+    sp.say("First sentence.")
+    sp.say("Second sentence.")
+    assert not sp.idle() and sp.speaking and states == [True]
+    sp._add_pending(-1)  # the first has played; the second is still being made - the old check called this idle
+    assert not sp.idle() and sp.speaking
+    sp._add_pending(-1)
+    assert sp.idle() and not sp.speaking and states == [True, False]
+    sp.say("Third.")
+    sp.stop()  # barge-in clears everything
+    assert sp.idle() and states[-1] is False
+
+
+def test_jarvis_own_words_heard_back_are_recognised():
+    from jarvis.listen import is_echo
+
+    now = time.time()
+    recent = [(now - 5, "I can't provide money or make financial transactions."), (now - 4, "Let me know if there's something else I can assist you with.")]
+    assert is_echo("I can't provide money or make financial transactions.", recent)
+    assert is_echo("financial transactions. Let me know if there's something else", recent)  # across two sentences
+    assert is_echo("I can't provide money or make financial runs.", recent)  # heard slightly wrong
+    assert not is_echo("Can you give me a thousand rupees?", recent) and not is_echo("yes", recent)
+    assert not is_echo("I can't provide money or make financial transactions.", [(now - 120, recent[0][1])])  # long ago
+
+
+def test_an_echo_is_not_acted_on(home, tmp_path):
+    j = make(home, tmp_path)
+    speaker = FakeSpeaker()
+    speaker.recent = [(time.time(), "I can't provide money or make financial transactions.")]
+    svc = VoiceService(j, speaker=speaker)
+    svc.loop = SimpleNamespace(is_closed=lambda: False, call_soon_threadsafe=lambda f: f())
+    ran = []
+    svc.handle = lambda *a: ran.append(a)
+    svc._utterance("I can't provide money or make financial transactions.", "en", {})
+    assert ran == []
+    j.db.close()
+
+
+# -- the Tamil-trained model (2026-11-20: 2.0% character errors vs 9.9% for plain small on the Tamil clips) ----------------
+def test_tamil_model_choice_resolves_and_falls_back(tmp_path):
+    from jarvis.listen import resolve_tamil_model
+
+    assert resolve_tamil_model(tmp_path, "tamil-small") is None  # not installed: the plain model writes Tamil
+    folder = tmp_path / "whisper-ta" / "ukta"
+    folder.mkdir(parents=True)
+    (folder / "model.bin").write_bytes(b"x")
+    assert resolve_tamil_model(tmp_path, "tamil-small") == str(folder)
+    assert resolve_tamil_model(tmp_path, "small") == "small" and resolve_tamil_model(tmp_path, "rm -rf") is None
+    assert not LocalListener(tmp_path / "none", lambda *a: None, lambda *a: None, tamil_model="tamil-small").tamil_trained
+
+
+def _trained(tmp_path, detector, english, tamil, done=None):
+    folder = tmp_path / "whisper-ta" / "ukta"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "model.bin").write_bytes(b"x")
+    lst = LocalListener(tmp_path, lambda *a: None, (lambda *a: done.append(a)) if done is not None else (lambda *a: None),
+                        model_size="small", fast_size="base", english_size="base.en", tamil_model="tamil-small")
+    lst._whisper, lst._english = detector, english
+    lst._accurate_model = lambda: (_ for _ in ()).throw(AssertionError("plain small is not needed for Tamil text"))
+    lst._tamil_model = lambda: tamil
+    lst.keep_samples = False
+    lst._whisper_ready.set()
+    return lst
+
+
+def test_tamil_text_comes_from_the_tamil_trained_model(tmp_path):
+    lst = _trained(tmp_path, Model("", -0.3, {"ta": 0.9, "en": 0.05}), Model("unused", -1.0), Model("இது பண்ற அப்படி எனக்கு ஆயிரம் போட்டிங்களா", -0.19))
+    text, lang, info = lst.transcribe(np.zeros(16000, "float32"))
+    assert (text, lang, info["model"]) == ("இது பண்ற அப்படி எனக்கு ஆயிரம் போட்டிங்களா", "ta", "tamil-small")
+    assert "tamil-small" in lst.status()["model"]
+
+
+def test_tamil_trained_model_has_its_own_unclear_limit(tmp_path):
+    """It is sure of itself: right Tamil -0.01..-0.2, a garbled 12 s recording -0.49."""
+    lst = _trained(tmp_path, Model("", -0.3, {"ta": 0.9, "en": 0.05}), Model("unused", -1.2), Model("கிரிக்டர்", -0.49))
+    text, lang, info = lst.transcribe(np.zeros(16000, "float32"))
+    assert text == "" and info.get("unclear") == "கிரிக்டர்"
+
+
+def test_tamil_trained_model_never_overrides_the_language_check_on_english(tmp_path):
+    """It wrote the owner's English as Tamil-script English, confidently (கேன்யூ டாக்கின் தமிழ், -0.12)."""
+    tamil = Model("கேஜரி கேக்குதா", -0.13)
+    lst = _trained(tmp_path, Model("", -0.3, {"en": 0.7, "ta": 0.3}), Model(" Keep it up.", -0.7), tamil)
+    lst._accurate_model = lambda: Model("Keep it up.", -0.9)  # the English second opinion may still use plain small
+    text, lang, _ = lst.transcribe(np.zeros(16000, "float32"))
+    assert (text, lang) == ("Keep it up.", "en") and tamil.calls == []
