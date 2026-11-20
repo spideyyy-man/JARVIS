@@ -4,8 +4,9 @@ import { api } from "../api";
 import type { DoctorResult, VoiceSettings } from "../api";
 import { errText, useApi, useStore, voice as voiceEngine } from "../store";
 import { SPEECH_LANGUAGES } from "../wake";
-import { dateTime, setAllPages, useAllPages } from "../util";
+import { dateTime, setAllPages, setCore3D, useAllPages, useCore3D } from "../util";
 import { Loading, Panel, ScreenHead, StatusBadge, Switch } from "../components/Panel";
+import { hasWebGL, useReducedMotion } from "../components/AssistantCore";
 
 function useVoices(): SpeechSynthesisVoice[] {
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
@@ -22,6 +23,9 @@ function useVoices(): SpeechSynthesisVoice[] {
 
 export function SettingsScreen() {
   const allPages = useAllPages();
+  const core3d = useCore3D();
+  const webgl = hasWebGL();
+  const reducedMotion = useReducedMotion();
   const rev = useStore((s) => s.rev.approval + s.rev.tool);
   const settings = useApi(api.settings, []);
   const tools = useApi(api.tools, []);
@@ -80,6 +84,13 @@ export function SettingsScreen() {
           <div className="row between cap-row">
             <div><b style={{ textTransform: "none" }}>Show all pages</b><div className="soft">Off: just the assistant and these settings. On: the full workspace (agents, coding, knowledge, research, automation…) - best with a bigger window.</div></div>
             <Switch checked={allPages} label="Show all pages" onChange={(v) => { setAllPages(v); location.hash = v ? "#/home" : "#/assistant"; }} />
+          </div>
+          <div className="row between cap-row" data-testid="core3d-setting">
+            <div><b style={{ textTransform: "none" }}>3D core</b><div className="soft">
+              An animated 3D core on the assistant screen instead of the flat orb. Drawn by the graphics chip (WebGL) at up to 30 frames a second, and paused while the window is minimised.
+              {!webgl ? " WebGL is not available here, so the flat orb stays." : reducedMotion ? " Reduced motion is on in Windows: the core stays still and only changes colour." : ""}
+            </div></div>
+            <Switch checked={core3d && webgl} label="3D core" disabled={!webgl} onChange={setCore3D} />
           </div>
         </Panel>
         <Panel className="s4 stretch" title="Level 1 · Read" icon={<Eye size={14} />} testid="level-read">

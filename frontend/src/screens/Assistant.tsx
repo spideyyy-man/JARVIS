@@ -1,9 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, Ear, Mic, Plus, SendHorizontal, Square, Volume2, VolumeX } from "lucide-react";
 import { api } from "../api";
 import type { AssistantState } from "../api";
 import { errText, setState, usePendingApprovals, useStore, useVoice, voice } from "../store";
-import { Orb } from "../components/Orb";
+import { AssistantCore } from "../components/AssistantCore";
 import { Markdown } from "../components/Markdown";
 import { ApprovalCard } from "../components/ApprovalCard";
 import { Switch } from "../components/Panel";
@@ -28,8 +28,14 @@ export function Assistant({ listen = false }: { listen?: boolean }) {
   const speakReplies = vs?.speak_replies !== false;
   const lang = vs?.language === "auto" ? "auto" : vs?.language?.startsWith("ta") ? "ta-IN" : "en-IN";
 
-  const state: AssistantState = v.phase === "thinking" ? (server === "executing" ? "executing" : "thinking") : v.phase !== "idle" ? v.phase : server === "error" ? "error" : "idle";
+  // the server's "speaking" counts too: with the offline listener JARVIS says the reply itself after the page went idle
+  const state: AssistantState = v.phase === "thinking" ? (server === "executing" ? "executing" : "thinking") : v.phase !== "idle" ? v.phase : server === "error" || server === "speaking" ? server : "idle";
   const busy = v.phase === "thinking" || v.phase === "speaking";
+  const timers = useStore((s) => s.timers);
+  const nextTimer = useMemo(() => {
+    const t = timers.filter((x) => x.kind === "timer" && x.seconds).sort((a, b) => a.due - b.due)[0];
+    return t ? { due: t.due, seconds: t.seconds as number } : null;
+  }, [timers]);
 
   // Opened by the hotkey/tray while no window existed (#/assistant/listen): start listening once, then drop the flag.
   useEffect(() => {
@@ -59,7 +65,7 @@ export function Assistant({ listen = false }: { listen?: boolean }) {
   return (
     <div className="asst" data-testid="assistant" data-phase={v.phase}>
       <section className="asst-stage" data-testid="voice-stage">
-        <Orb state={state} size="md" level={getLevel} />
+        <AssistantCore state={state} following={v.local && v.localState === "following"} approval={pending.length > 0} timer={nextTimer} level={getLevel} />
         <div className="asst-caption" data-testid="voice-caption">{CAPTION[state]}</div>
         <div className="asst-chips">
           <span className={`badge ${v.wakeMode || v.local ? "cyan" : ""}`} data-testid="wake-indicator" data-wake={v.wakeMode || v.local ? "armed" : "off"}>
