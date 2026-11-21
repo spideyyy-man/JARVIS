@@ -1,32 +1,45 @@
 import { useEffect, useState } from "react";
 import type { Schedule } from "./api";
 
-// "Show all pages" (Settings): off = just the assistant and Settings. A per-browser view preference, so local storage.
-const ALL_PAGES = "jarvis.allPages";
-export function getAllPages(): boolean {
-  try {
-    return localStorage.getItem(ALL_PAGES) === "1";
-  } catch {
-    return false;
-  }
+// Per-browser view preferences (Settings), kept in local storage; off by default.
+function localFlag(key: string, event: string) {
+  const get = (): boolean => {
+    try {
+      return localStorage.getItem(key) === "1";
+    } catch {
+      return false;
+    }
+  };
+  const set = (on: boolean): void => {
+    try {
+      localStorage.setItem(key, on ? "1" : "0");
+    } catch {
+      /* storage unavailable: the choice is not kept */
+    }
+    window.dispatchEvent(new Event(event));
+  };
+  const use = (): boolean => {
+    const [on, setOn] = useState(get);
+    useEffect(() => {
+      const sync = () => setOn(get());
+      window.addEventListener(event, sync);
+      return () => window.removeEventListener(event, sync);
+    }, []);
+    return on;
+  };
+  return { get, set, use };
 }
-export function setAllPages(on: boolean): void {
-  try {
-    localStorage.setItem(ALL_PAGES, on ? "1" : "0");
-  } catch {
-    /* storage unavailable: the choice lasts until reload */
-  }
-  window.dispatchEvent(new Event("jarvis-allpages"));
-}
-export function useAllPages(): boolean {
-  const [on, setOn] = useState(getAllPages);
-  useEffect(() => {
-    const sync = () => setOn(getAllPages());
-    window.addEventListener("jarvis-allpages", sync);
-    return () => window.removeEventListener("jarvis-allpages", sync);
-  }, []);
-  return on;
-}
+
+// "Show all pages": off = just the assistant and Settings.
+const allPages = localFlag("jarvis.allPages", "jarvis-allpages");
+export const getAllPages = allPages.get;
+export const setAllPages = allPages.set;
+export const useAllPages = allPages.use;
+
+// "3D core": the Assistant screen's animated WebGL core instead of the 2D orb.
+const core3d = localFlag("jarvis.core3d", "jarvis-core3d");
+export const setCore3D = core3d.set;
+export const useCore3D = core3d.use;
 
 export const pad = (n: number) => String(n).padStart(2, "0");
 export function clock(ts: number): string {

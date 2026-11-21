@@ -205,6 +205,22 @@ Since 2026-11-19 (Edge's online recogniser failed on the laptop with "Speech rec
   It approves only the step's expected tools on paths inside its folder (audit actor `selftest`) and fails a
   step when JARVIS tries anything else. The browser step needs the `browser_control` capability (the panel has
   a button for the user; nothing turns it on by itself). Results: `~/.jarvis/selftest/last.json`.
+- **3D core** (2026-11-21, optional, off by default): Settings > Layout > "3D core" (local storage `jarvis.core3d`)
+  swaps the Assistant screen's 2D orb for a three.js (pinned `0.186.1`, bundled - no CDN) core of our own design:
+  fresnel shell, geodesic lattice, three gyro rings, a particle swarm. idle = slow cyan breathing, listening = aqua
+  ripples, following = green ripples, thinking = violet fast orbit + comets, executing = teal ticking ring,
+  speaking = pulses with the level (synthetic when the server speaks), approval pending = amber sweep, error =
+  red shake, a timer = progress ring (amber under 15%). `components/AssistantCore.tsx` picks 2D or 3D (2D when there is
+  no hardware WebGL - `failIfMajorPerformanceCaveat` - or the context is lost); `components/Core3D.tsx` is a lazy
+  chunk (~545 kB, loaded only when on). The Assistant now also shows the server's "speaking" state (offline-listener
+  replies used to show "Standing by"). Frame rate is the budget: 30 fps active, 15 idle, 10 idle without focus, none
+  while hidden/off-screen; reduced motion = a still picture redrawn on change. Measured in Edge on the laptop
+  (i5-1135G7, Iris Xe; CPU 25-100% busy from other apps; % of one core, all Edge processes of a test window):
+  2D orb 16-19%; 3D idle 7.7% (10 fps) / 9.2% (15 fps); 3D active 18-23% (30 fps); minimised or reduced motion
+  0.1-0.2%; script time per frame 0.3-0.75 ms avg (p95 <= 2.1 ms; first frame ~25-90 ms, shader compile); GPU 3D
+  engine ~1%. Most of the cost is Edge compositing each frame, not our script. `window.__jarvisCore3d`
+  (`stats()`, `reset()`, `preview({state, approval, following, timer})`) is the measurement hook.
+  Not checked on the real JARVIS window (only a test Edge window against a throw-away instance) or by the owner's eye.
 
 ## Windows results (2026-11-17)
 
