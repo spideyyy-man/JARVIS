@@ -195,6 +195,23 @@ Since 2026-11-19 (Edge's online recogniser failed on the laptop with "Speech rec
     Rejected: tiny.en for the check (fast but 16/22), the phone-based zh-en spotter (7-9/17).
   - English: beam 5 for base.en (`ENGLISH_BEAM`; 2.8% -> 2.3% WER on test clips, ~8% slower); more words in `VOCABULARY`.
   - `docs/TECHNICAL_SUMMARY.md`: models, sizes, storage, capabilities (~100 lines).
+- **Voice agent reliability + 3D icon** (2026-11-21; "I call Jarvis but no response"):
+  - Only 1 of the owner's calls that day reached JARVIS, and its reply took 64 s (1.4 GB free RAM). Live counters showed
+    the loop keeping up (0 s behind, 0 dropped) and loud, frequent speech (mic level ~2000-3000) that woke nothing.
+  - Voice log `~/.jarvis/voice-log.jsonl` (local, ~0.5 MB cap): every keyword hit (acted/ignored and why), wake, speech
+    that woke nothing (length, level, hey_jarvis score), second-chance result, heard text with timings. `status()` now has
+    `talking` and `stats` (frames, dropped, behind_s, mic_level, keyword_hits/ignored, speech_unanswered).
+  - Missed-call samples: short unanswered speech (<= 3 s) kept in `~/.jarvis/wake-samples` (last 40; only with
+    `keep_samples`), to see why a call was missed. Analyse these before changing the spotter's settings.
+  - Second chance: a short separate utterance (<= `SECOND_CHANCE_MAX` 2.5 s, after a pause, not while JARVIS talks) that
+    the spotter did not take is checked by base.en in a background thread (`_second_chance_worker`, one at a time; the
+    loop never waits); "Jarvis" there wakes JARVIS ~1-5 s late (`self._late`). The speech models are shared under
+    `_model_lock`. Fake-mic run with hey_jarvis off: Heera and Ravi (spotter misses) woke via the second chance, David via
+    the spotter, "Javascript is fun" ignored.
+  - "One moment." / "ஒரு நிமிடம்." is said when an answer has not started 3 s after a spoken request (`HOLD_ON_AFTER`).
+  - The floating icon is 3D (`orb.py`): a per-pixel lit glass sphere (`_sphere`, numpy, cached per colour), two tilted
+    rings whose back halves pass behind it (`RINGS`, `_draw_rings`), orbiting lights; ring speed by state. 1.4-1.6 ms per
+    warm frame (was 2-5 ms).
 - **Floating icon** (`overlay.py`, tkinter, its own `pythonw` process started by the desktop app with
   `--parent PID`): a 46 px always-on-top circle, coloured by state; hover (or click to pin) shows a panel from
   `GET /api/overlay` - now/heard/last exchange, approvals with Approve/Deny, activity (`EventBus.activity`,

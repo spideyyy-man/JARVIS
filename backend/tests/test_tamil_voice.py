@@ -463,3 +463,65 @@ def test_real_keyword_spotter_catches_jarvis_and_ignores_lookalikes(tmp_path):
         spotter.decode_stream(s)
         hits += bool(spotter.get_result(s))
     assert hits == 0
+
+
+# -- a capable voice agent: second chance, missed-call samples, voice log, "one moment" (2026-11-21) --------------------------
+def test_a_missed_jarvis_gets_a_second_chance_off_the_listening_loop(tmp_path):
+    import threading
+
+    lst = LocalListener(tmp_path / "models", lambda *a: None, lambda *a: None)
+    lst._verify_wake = lambda audio: ("", {"language": "en"})
+    worker = threading.Thread(target=lst._second_chance_worker, daemon=True)
+    worker.start()
+    lst._second.put_nowait(np.zeros(16000, "float32"))
+    for _ in range(50):
+        if lst._late is not None:
+            break
+        time.sleep(0.02)
+    lst._stop.set()
+    assert lst._late == ("", {"language": "en"})
+    log = (tmp_path / "voice-log.jsonl").read_text(encoding="utf-8")
+    assert '"event": "second chance"' in log and '"jarvis": true' in log
+
+
+def test_short_unanswered_speech_is_kept_only_when_samples_are_on(tmp_path):
+    lst = LocalListener(tmp_path / "models", lambda *a: None, lambda *a: None)
+    lst.keep_samples = False
+    lst._keep_wake_sample(np.zeros(8000, "float32"), {"seconds": 0.5})
+    assert not (tmp_path / "wake-samples").exists()
+    lst.keep_samples = True
+    lst._keep_wake_sample(np.zeros(8000, "float32"), {"seconds": 0.5})
+    assert len(list((tmp_path / "wake-samples").glob("*.wav"))) == 1
+
+
+def test_status_reports_what_the_listener_is_doing(tmp_path):
+    st = LocalListener(tmp_path, lambda *a: None, lambda *a: None).status()
+    assert {"frames", "dropped", "behind_s", "keyword_hits", "speech_unanswered"} <= set(st["stats"]) and st["talking"] is False
+
+
+def test_a_slow_answer_is_announced_so_silence_is_never_the_only_reply(home, tmp_path, monkeypatch):
+    import asyncio
+
+    import jarvis.listen as listen
+    from jarvis.llm.base import LLMResponse
+
+    class Slow:
+        name, model = "openai_compat", "local"
+
+        async def complete(self, system, messages, tools, on_text=None, meta=None):
+            await asyncio.sleep(0.3)
+            if on_text:
+                on_text("Paris.")
+            return LLMResponse(text="Paris.", tool_calls=[], provider=self.name, model=self.model)
+    monkeypatch.setattr(listen, "HOLD_ON_AFTER", 0.05)
+    j = _voice_app(home, tmp_path, "unused")
+    from jarvis.llm.base import LLMRouter
+    j.llm = LLMRouter([Slow(), j.offline], backoff=0.01)
+    speaker = FakeSpeaker(langs=("en", "ta"))
+    run(VoiceService(j, speaker=speaker).handle("What is the capital of France?", "en"))
+    assert speaker.said[0] == "One moment." and "Paris." in speaker.said
+    quick = FakeSpeaker()
+    monkeypatch.setattr(listen, "HOLD_ON_AFTER", 5)
+    run(VoiceService(j, speaker=quick).handle("What is the capital of France?", "en"))
+    assert "One moment." not in quick.said  # a quick answer needs no filler
+    j.db.close()

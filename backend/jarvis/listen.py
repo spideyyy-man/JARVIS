@@ -68,6 +68,11 @@ KWS_KEYWORDS = ("\u2581JA R VI S @JARVIS", "\u2581HE Y \u2581JA R VI S @HEY_JARV
 KWS_URL = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/"
            "sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01.tar.bz2")
 KWS_SHA256 = "f170013b4716e41b62b9bfd809687c207cef798ef9bc6534d524e17af9b6561a"
+# Second chance: a short separate utterance the spotter did not take is checked by the English model in a background
+# thread (the listening loop never waits for it), at most one at a time. "Jarvis" there still wakes JARVIS, ~1-3 s late,
+# instead of not at all (2026-11-21: the owner called "Jarvis" and got no response).
+SECOND_CHANCE_MAX = 2.5  # s of speech: longer is conversation, not a call
+WAKE_SAMPLES = 40  # short unanswered utterances kept (this computer only) to see why a call was missed
 WAKE_PREFILTER = 0.03  # any hint of "jarvis" in a speech segment -> confirm with the English model (ordinary speech: 0.00)
 WAKE_WHILE_TALKING = 0.85  # while JARVIS speaks, only a very clear wake word counts (it must not wake itself)
 MIN_WAKE_FRAMES = 4  # 0.32 s: shorter sounds are not "Jarvis"
@@ -303,6 +308,27 @@ class LocalListener:
         self._whisper = None
         self._whisper_ready = threading.Event()
         self._frames: queue.Queue = queue.Queue(maxsize=200)
+        # what the listener is doing, for the voice log and status: why a "Jarvis" was or was not answered
+        self.stats = {"frames": 0, "dropped": 0, "behind_s": 0.0, "max_behind_s": 0.0, "mic_level": 0.0, "keyword_hits": 0,
+                      "keyword_ignored": 0, "wake_peak": 0.0, "speech_unanswered": 0}
+        self.log_path = self.models_dir.parent / "voice-log.jsonl"
+        self._model_lock = threading.RLock()  # the speech models are used by the loop and the second-chance thread
+        self._second: queue.Queue = queue.Queue(maxsize=1)
+        self._late: tuple | None = None  # a "Jarvis" found by the second chance, for the loop to act on
+
+    def log(self, event: str, **data) -> None:
+        """One line per event in <data>/voice-log.jsonl (this computer only; ~0.5 MB, then the older half is dropped)."""
+        try:
+            import json
+
+            line = json.dumps({"t": round(time.time(), 2), "at": time.strftime("%H:%M:%S"), "event": event, **data}, ensure_ascii=False)
+            if self.log_path.exists() and self.log_path.stat().st_size > 512 * 1024:
+                keep = self.log_path.read_text(encoding="utf-8").splitlines()[-1500:]
+                self.log_path.write_text("\n".join(keep) + "\n", encoding="utf-8")
+            with open(self.log_path, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except Exception:  # noqa: BLE001 - logging must never stop listening
+            pass
 
     @staticmethod
     def missing() -> str:
@@ -340,6 +366,51 @@ class LocalListener:
         """Was this short speech segment "Jarvis ..."? (text after the wake word, info) or None. ~1 s with base.en."""
         if not self._whisper_ready.wait(timeout=0.1) or self._whisper is None:
             return None
+        with self._model_lock:
+            return self._verify_wake_locked(audio)
+
+    def _second_chance_worker(self) -> None:
+        while not self._stop.is_set():
+            try:
+                audio = self._second.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            t0 = time.time()
+            try:
+                found = self._verify_wake(audio)
+            except Exception as e:  # noqa: BLE001
+                self.log("second chance failed", error=f"{type(e).__name__}: {e}")
+                continue
+            self.log("second chance", jarvis=found is not None, rest=(found[0][:80] if found else ""), seconds=round(time.time() - t0, 1))
+            if found is not None:
+                self._late = found
+
+    def _keep_wake_sample(self, audio, note: dict) -> None:
+        """Short unanswered utterances in <data>/wake-samples (keep_samples off -> none), the last WAKE_SAMPLES of them."""
+        if not self.keep_samples:
+            return
+        try:
+            import json
+            import wave
+
+            import numpy as np
+
+            folder = self.models_dir.parent / "wake-samples"
+            folder.mkdir(parents=True, exist_ok=True)
+            stem = folder / time.strftime("%Y%m%d-%H%M%S")
+            with wave.open(str(stem) + ".wav", "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(RATE)
+                w.writeframes((np.clip(audio, -1, 1) * 32767).astype(np.int16).tobytes())
+            stem.with_suffix(".json").write_text(json.dumps(note), encoding="utf-8")
+            for old in sorted(folder.glob("*.wav"))[:-WAKE_SAMPLES]:
+                old.unlink(missing_ok=True)
+                old.with_suffix(".json").unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _verify_wake_locked(self, audio) -> tuple[str, dict] | None:
         t0 = time.time()
         model = self._english_model() if self.english_size else self._whisper
         segments = list(model.transcribe(audio, language="en", beam_size=1, vad_filter=True, condition_on_previous_text=False,
@@ -439,7 +510,7 @@ class LocalListener:
             model += f" + {self.model_size} (Tamil)"
         return {"state": self.state, "error": self.error, "model": model, "speech_model_ready": self._whisper_ready.is_set(),
                 "wake_phrase": "Jarvis", "wake_detector": "keyword spotter" if getattr(self, "spotter_ready", False) else "speech check",
-                "last": self.last}
+                "talking": self._jarvis_talking, "stats": dict(self.stats), "last": self.last}
 
     # -- internals ---------------------------------------------------------------------------------------------------
     def _set(self, state: str, **data) -> None:
@@ -550,6 +621,8 @@ class LocalListener:
             wake = Model(wakeword_models=["hey_jarvis"], inference_framework="onnx")
             spotter = self._load_spotter()
             self.spotter_ready = spotter is not None
+            if spotter is not None:
+                threading.Thread(target=self._second_chance_worker, daemon=True, name="jarvis-wake-second-chance").start()
             spot = spotter.create_stream() if spotter else None
             try:  # Silero speech detector (shipped with openWakeWord): tells speech from fans, typing and music
                 from openwakeword.vad import VAD
@@ -566,7 +639,7 @@ class LocalListener:
             try:
                 self._frames.put_nowait(indata[:, 0].copy())
             except queue.Full:  # the processing thread is behind (CPU busy): drop audio rather than lag further
-                pass
+                self.stats["dropped"] += 1
 
         endpoint = Endpointer(end_silence=SPEECH_END_VAD if vad else 0.7)
         speaking = False
@@ -604,6 +677,11 @@ class LocalListener:
                         vad.reset_states()
                     continue
                 rms = float(np.sqrt(np.mean(frame.astype(np.float32) ** 2)))
+                st = self.stats
+                st["frames"] += 1
+                st["behind_s"] = round(self._frames.qsize() * FRAME_S, 2)
+                st["max_behind_s"] = max(st["max_behind_s"], st["behind_s"])
+                st["mic_level"] = round(st["mic_level"] * 0.98 + rms * 0.02, 1)
                 if self.state in ("waiting", "following"):
                     endpoint.learn(rms)
                     score = max(wake.predict(frame).values())
@@ -618,6 +696,9 @@ class LocalListener:
                             if spotter.get_result(spot):
                                 keyword = not talking  # it must not wake itself ("I'm JARVIS, your assistant")
                                 spotter.reset_stream(spot)
+                                st["keyword_hits" if keyword else "keyword_ignored"] += 1
+                                self.log("keyword", acted=keyword, talking=talking, behind_s=st["behind_s"], state=self.state,
+                                         cooldown=now < cooldown_until)
                     pre.append(frame)
                     # Speech segments, for plain "Jarvis" (the ready-made model is trained on "hey jarvis" and scored
                     # plain "Jarvis" anywhere from 0.02 to 1.00 across voices; 2026-11-20).
@@ -644,6 +725,20 @@ class LocalListener:
                         if heard_run >= 2:
                             trigger = "follow-up"
                     if not trigger and spot is not None and seg and (seg_quiet >= SEG_END_FRAMES or len(seg) >= SEG_MAX_FRAMES):
+                        # speech that woke nothing: logged (length, best "hey jarvis" score) to see what a missed call was
+                        speech_s = (len(seg) - SEG_END_FRAMES) * FRAME_S
+                        if self.state == "waiting" and 3 <= len(seg) - SEG_END_FRAMES <= SEG_MAX_FRAMES:
+                            st["speech_unanswered"] += 1
+                            audio = np.concatenate(seg).astype(np.float32) / 32768.0
+                            note = {"seconds": round(speech_s, 2), "hey_jarvis": round(float(seg_score), 2), "talking": talking,
+                                    "after_quiet": seg_after_quiet, "behind_s": st["behind_s"], "level": round(float(np.sqrt(np.mean(audio ** 2))) * 32768)}
+                            second = (not talking and seg_after_quiet and speech_s <= SECOND_CHANCE_MAX and now >= cooldown_until
+                                      and self._second.empty())
+                            if second:
+                                self._second.put_nowait(audio)
+                            self.log("speech", second_chance=second, **note)
+                            if speech_s <= 3.0:
+                                self._keep_wake_sample(audio, note)
                         seg, seg_score, seg_quiet = [], 0.0, 0  # the spotter listens for "Jarvis"; no Whisper check per segment
                     if not trigger and seg and (seg_quiet >= SEG_END_FRAMES or len(seg) >= SEG_MAX_FRAMES):
                         candidate, cand_score = seg, seg_score
@@ -671,6 +766,20 @@ class LocalListener:
                                         self._set("waiting")
                                     continue
                                 trigger = "jarvis"  # just "Jarvis": chime, then listen for the request
+                    late, self._late = self._late, None
+                    if not trigger and late is not None and not talking and now >= cooldown_until:
+                        text, info = late
+                        lang = info.pop("language", "en")
+                        if text:  # "Jarvis, <request>" found by the second chance: that is the request
+                            self._trigger = "jarvis"
+                            self._last_lang = lang
+                            self.on_event("voice.wake", {"trigger": "second chance", "direct": True})
+                            self.log("wake", trigger="second chance", direct=True)
+                            self.last = {"heard": text, "language": lang, "at": time.time(), **info}
+                            self.on_utterance(text, lang, info)
+                            cooldown_until = time.time() + 1.5
+                            continue
+                        trigger = "jarvis"  # just "Jarvis": chime, then listen
                     if self.state == "following" and now > self._follow_until:
                         self._end_follow_up()
                     if trigger:
@@ -698,6 +807,7 @@ class LocalListener:
                         seg, seg_score, seg_quiet, heard_run = [], 0.0, 0, 0
                         skip = CHIME_FRAMES if trigger in ("wake word", "hotkey", "jarvis", "keyword") else 0  # the chime is not speech
                         self._trigger = trigger
+                        self.log("wake", trigger=trigger, hey_jarvis=round(float(score), 2), behind_s=st["behind_s"])
                         self._set("recording", trigger=trigger, score=round(float(score), 2))
                         self.on_event("voice.wake", {"trigger": trigger})
                     continue
@@ -713,6 +823,7 @@ class LocalListener:
                     else:
                         verdict = endpoint.feed(rms)
                     if verdict == "timeout":
+                        self.log("nothing said", trigger=self._trigger)
                         self.last = {"heard": "", "note": "nothing said", "at": time.time()}
                         self._set("waiting", note="nothing said")
                         cooldown_until = time.time() + 1.0
@@ -734,6 +845,10 @@ class LocalListener:
         """(text, language, info) for float32 mono 16 kHz audio. Blocks until the speech model is loaded. `language`
         forces the language (no check); `prior` (the conversation's language) only breaks a near-tie of the check."""
         self._whisper_ready.wait()
+        with self._model_lock:
+            return self._transcribe_locked(audio, language, prior)
+
+    def _transcribe_locked(self, audio, language: str | None = None, prior: str | None = None) -> tuple[str, str, dict]:
         if self._whisper is None:
             raise RuntimeError(self.error or "speech model not loaded")
         t0 = time.time()
@@ -844,6 +959,8 @@ class LocalListener:
             self.on_event("voice.state", {"state": "error", "error": self.error})
             return
         self.last = {"heard": text, "language": lang, "at": time.time(), **info}
+        self.log("heard", text=text[:120], language=lang, unclear=info.get("unclear", "")[:80], seconds=info.get("seconds"),
+                 audio_seconds=info.get("audio_seconds"), model=info.get("model"), logprob=info.get("logprob"))
         self._keep_sample(audio, text, lang, info)
         if text and info["seconds"] > STALE_AFTER:  # the user has long moved on: say so instead of acting on it
             self.last["note"] = f"too slow ({info['seconds']:.0f} s) - not acted on"
@@ -864,6 +981,9 @@ CONVERSATION_ENDS = re.compile(r"^(?:thanks?|thank you|that'?s all|that is all|n
                                # Tamil: thanks, enough, stop, that's all, leave it, bye, okay thanks
                                r"|^(?:சரி\s*)?(?:ரொம்ப\s*)?(?:நன்றி|தேங்க்ஸ்|போதும்|நிறுத்து\S*|அவ்வளவு\s*தான்|அவ்வளவுதான்|விடு|பரவாயில்லை|பை|டாட்டா|போயிட்டு\s*வா)"
                                r"(?:\s*(?:ஜார்விஸ்|jarvis))?[.!]*$", re.I)
+# Said when an answer has not started HOLD_ON_AFTER s after a spoken request (it was heard; the model is thinking)
+HOLD_ON_AFTER = 3.0
+HOLD_ON = {"en": "One moment.", "ta": "ஒரு நிமிடம்."}
 # What JARVIS says when it could not make out the request / was too slow, by language
 SORRY = {"en": ("Sorry, I didn't catch that. Please say it again.", "Sorry, I was too slow to catch that. Please say it again."),
          "ta": ("மன்னிக்கவும், சரியாகக் கேட்கவில்லை. மீண்டும் சொல்லுங்கள்.", "மன்னிக்கவும், கேட்பதற்குத் தாமதமாகிவிட்டது. மீண்டும் சொல்லுங்கள்.")}
@@ -1050,12 +1170,21 @@ class VoiceService:
                     for sentence in split.feed(e.get("text", "")):
                         self.speaker.say(sentence)
 
+        async def hold_on():
+            # The local model can take a minute on the busy laptop (64 s on 2026-11-21): say at once that it was heard,
+            # so silence is never the only answer.
+            await asyncio.sleep(HOLD_ON_AFTER)
+            if not streamed:
+                self.speaker.say(HOLD_ON.get(lang, HOLD_ON["en"]))
+
         follower = asyncio.create_task(follow())
+        holder = asyncio.create_task(hold_on())
         try:
             result = await self.app.chat(text, cid, source="voice")
         finally:
             await asyncio.sleep(0)  # let the follower take the last deltas
             follower.cancel()
+            holder.cancel()
             self.app.bus.unsubscribe(events)
         so_far = "".join(streamed)
         final = result.get("text", "")

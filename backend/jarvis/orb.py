@@ -122,6 +122,102 @@ def _body() -> Image.Image:
     return _BODY["body"]
 
 
+def _sphere(color) -> Image.Image:
+    """A lit 3D glass sphere (2026-11-21: the owner wanted the icon 3D): per-pixel shading from a light at the top
+    left - dark glass, soft diffuse light, a specular glint and a rim light in the state colour. Drawn once per
+    colour (rounded so easing reuses entries), ~15 ms; frames just paste it."""
+    key = ("sphere", tuple(int(v) // 24 * 24 for v in color))
+    if key not in _BODY:
+        import numpy as np
+
+        s, r = SIZE * SS, ORB_R * SS
+        ys, xs = np.mgrid[0:s, 0:s].astype(np.float32)
+        x, y = (xs - s / 2 + 0.5) / r, (ys - s / 2 + 0.5) / r
+        rr = x * x + y * y
+        inside = rr <= 1.0
+        z = np.sqrt(np.clip(1.0 - rr, 0, 1))
+        light = np.array([-0.45, -0.6, 0.66], np.float32)
+        light /= np.linalg.norm(light)
+        diffuse = np.clip(x * light[0] + y * light[1] + z * light[2], 0, 1)
+        half = light + np.array([0, 0, 1], np.float32)
+        half /= np.linalg.norm(half)
+        spec = np.clip(x * half[0] + y * half[1] + z * half[2], 0, 1) ** 40
+        rim = (1 - z) ** 2.6
+        tint = np.array(key[1], np.float32)
+        base = np.array([8, 12, 26], np.float32)
+        rgb = (base[None, None] + diffuse[..., None] * np.array([30, 44, 78], np.float32)
+               + rim[..., None] * tint * 0.85 + spec[..., None] * 255 * 0.85)
+        # a soft edge (1.5 px) so the outline is smooth after downscaling
+        edge = np.clip((1.0 - np.sqrt(rr)) * r / (1.5 * SS), 0, 1)
+        alpha = np.where(inside, edge * 255, 0)
+        arr = np.dstack([np.clip(rgb, 0, 255), alpha]).astype(np.uint8)
+        _BODY[key] = Image.fromarray(arr, "RGBA")
+        if len(_BODY) > 40:
+            _BODY.clear()
+            _BODY[key] = Image.fromarray(arr, "RGBA")
+    return _BODY[key]
+
+
+# Two rings orbiting the sphere in 3D: (radius factor, tilt about x in degrees, tilt about z, spin speed, precession speed)
+RINGS = ((1.42, 72.0, 18.0, 1.0, 0.18), (1.25, -60.0, -28.0, -1.35, -0.12))
+RING_SEGMENTS = 56
+
+
+def _ring_points(t: float, ring: tuple, speed: float):
+    """Points (x, y, depth, along) of a tilted ring, rotated over time; along is 0..1 from its bright head."""
+    radius, tilt_x, tilt_z, spin, precess = ring
+    cx, cz = math.radians(tilt_x), math.radians(tilt_z)
+    ph, pr = t * spin * speed, t * precess * speed
+    out = []
+    for i in range(RING_SEGMENTS + 1):
+        th = 2 * math.pi * i / RING_SEGMENTS
+        x0, y0 = math.cos(th + ph) * radius, math.sin(th + ph) * radius
+        y1, z1 = y0 * math.cos(cx), y0 * math.sin(cx)  # tilt about x
+        x2, y2 = x0 * math.cos(cz) - y1 * math.sin(cz), x0 * math.sin(cz) + y1 * math.cos(cz)  # tilt about z
+        x3, z3 = x2 * math.cos(pr) + z1 * math.sin(pr), -x2 * math.sin(pr) + z1 * math.cos(pr)  # slow precession about y
+        out.append((x3, y2, z3, i / RING_SEGMENTS))
+    return out
+
+
+def _draw_rings(d: ImageDraw.ImageDraw, t: float, col, speed: float, front: bool) -> None:
+    """The rings' halves in front of (front=True) or behind the sphere; brighter towards each ring's head."""
+    s, r = SIZE * SS, ORB_R * SS
+    c = s / 2
+    for ring in RINGS:
+        pts = _ring_points(t, ring, speed)
+        for (xa, ya, za, fa), (xb, yb, zb, _fb) in zip(pts, pts[1:]):
+            depth = (za + zb) / 2
+            if (depth >= 0) != front:
+                continue
+            if not front and (xa * xa + ya * ya) < 1.0:  # behind the sphere: hidden
+                continue
+            head = (1 - fa) ** 1.4  # bright head, fading tail: the spin is visible
+            a = int((70 + 170 * head) * (1.0 if front else 0.45))
+            w = (1.1 + 1.0 * head) * SS * (1.0 if front else 0.75)
+            d.line([(c + xa * r, c + ya * r), (c + xb * r, c + yb * r)], fill=(*col, a), width=max(1, int(w)))
+
+
+def _draw_particles(d: ImageDraw.ImageDraw, t: float, col, speed: float, front: bool) -> None:
+    """Three small lights orbiting at different heights, sized and dimmed by depth."""
+    s, r = SIZE * SS, ORB_R * SS
+    c = s / 2
+    for k, (rad, incl, sp) in enumerate(((1.6, 0.35, 0.9), (1.3, -0.55, -1.2), (1.5, 0.9, 0.7))):
+        a = t * sp * speed + k * 2.1
+        x, z = math.cos(a) * rad, math.sin(a) * rad
+        y = z * math.sin(incl) * 0.6 + math.sin(a * 0.5 + k) * 0.15
+        if (z >= 0) != front or (not front and x * x + y * y < 1.0):
+            continue
+        size = (1.2 + 0.9 * (z / rad + 1) / 2) * SS
+        alpha = int(120 + 120 * (z / rad + 1) / 2)
+        px, py = c + x * r, c + y * r
+        d.ellipse((px - size, py - size, px + size, py + size), fill=(*[min(255, v + 70) for v in col], alpha))
+
+
+def ring_speed(state: str) -> float:
+    return {"thinking": 3.2, "executing": 3.0, "transcribing": 2.6, "speaking": 2.0, "recording": 1.8, "listening": 1.8,
+            "following": 1.3, "loading": 2.0, "offline": 0.0, "error": 0.6}.get(state, 0.7)
+
+
 def render(o: OrbState) -> Image.Image:
     """One frame (RGBA, SIZE x SIZE) for the given state and time."""
     if len(_GLOW) > 300:  # ~25 MB at most; cleared layers are rebuilt on demand in a few frames
@@ -130,6 +226,7 @@ def render(o: OrbState) -> Image.Image:
     col = tuple(int(v) for v in o.color)
     img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
     active = o.state not in ("offline",)
+    speed = ring_speed(o.state)
     # glow: breathing when idle, stronger and quicker when busy
     if active:
         speed, lo, hi = {"recording": (2.2, 0.55, 1.0), "listening": (2.2, 0.55, 1.0), "speaking": (3.0, 0.5, 0.95),
@@ -146,10 +243,15 @@ def render(o: OrbState) -> Image.Image:
             rr = r + (4 + 14 * ph) * SS
             a = int(150 * (1 - ph) ** 1.6)
             d.ellipse((c - rr, c - rr, c + rr, c + rr), outline=(*col, a), width=int(1.6 * SS))
-    img.alpha_composite(_body())
+    # 3D: the back halves of the rings and particles, then the lit sphere, then the front halves
+    _draw_rings(d, t, col, speed, front=False)
+    _draw_particles(d, t, col, speed, front=False)
+    img.alpha_composite(_sphere(col))
     d = ImageDraw.Draw(img)
-    # rim
-    d.ellipse((c - r, c - r, c + r, c + r), outline=(*col, 235 if active else 140), width=int(2.4 * SS))
+    # a thin rim in the state colour keeps the state readable at a glance
+    d.ellipse((c - r, c - r, c + r, c + r), outline=(*col, 150 if active else 90), width=int(1.2 * SS))
+    _draw_rings(d, t, col, speed, front=True)
+    _draw_particles(d, t, col, speed, front=True)
     # thinking / working: a comet arc running round the rim
     if o.state in ("thinking", "executing", "transcribing", "loading"):
         img.alpha_composite(_rotated(_comet(col, inset=4, span=7, n=18, width=2.6), -(t * 300)))
