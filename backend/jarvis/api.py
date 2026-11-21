@@ -157,6 +157,13 @@ def create_app(jarvis: Jarvis | None = None) -> FastAPI:
         ok = j.voice.listen_now()
         return {"ok": ok, **({} if ok else {"reason": j.voice.available() or "the offline listener is not running"})}
 
+    @app.post("/api/voice/enroll")
+    async def voice_enroll(lang: str = "en"):
+        """"Teach JARVIS my voice" (Settings button): the owner says "Jarvis" 10 times after beeps; then it trains."""
+        running = bool(j.voice.listener and j.voice.listener.running())
+        said = j.voice.enroll("ta" if lang == "ta" else "en")
+        return {"ok": running, "message": said}
+
     @app.get("/api/overlay")
     async def overlay():
         """Everything the floating icon shows on hover, in one cheap call (it polls about twice a second)."""

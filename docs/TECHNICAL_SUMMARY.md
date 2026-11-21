@@ -24,7 +24,8 @@
 |---|---|---|---|
 | Thinking, tool use | Qwen3 4B Instruct 2507, q4_K_M, via Ollama as `jarvis-model` (8k context, 8 threads) | 2.5 GB | ~3.7 GB RAM; 1-3 s first word on a quiet CPU, 7-20 s when busy; prompt caching |
 | Fallback model | qwen2.5:3b (`jarvis-model-qwen2.5`) | 1.9 GB | kept to switch back (`ollama cp`) |
-| "Jarvis" wake word | sherpa-onnx keyword spotter, zipformer GigaSpeech 3.3M (int8) | 20 MB | ~0.16 s CPU per s of audio; 6/6 owner's "Jarvis", 0 false wakes in 184 s of their speech |
+| "Jarvis" wake word (personal) | logistic regression on openWakeWord speech embeddings, trained on the owner's own "Jarvis" ("learn my voice") | <1 MB + 176 MB training data | ~0.05 ms per frame; retrains itself from confirmed live calls |
+| "Jarvis" wake word (generic) | sherpa-onnx keyword spotter, zipformer GigaSpeech 3.3M (int8); then a Whisper check of each utterance | 20 MB | spotter missed the owner's live calls (0/2); the Whisper check caught them in ~1 s |
 | "Hey Jarvis" wake word | openWakeWord `hey_jarvis` | ~6 MB | per 80 ms frame |
 | Speech detector | Silero VAD (ships with openWakeWord) | <2 MB | per frame |
 | Language check | Whisper base (faster-whisper, int8) | 142 MB | ~0.3-1 s |

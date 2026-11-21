@@ -233,6 +233,13 @@ export function SettingsScreen() {
                     onBlur={(e) => { if (e.target.value.trim() !== s.proactive.briefing_time) void put({ proactive: { briefing_time: e.target.value.trim() } }, "Briefing time saved."); }} />
                 </label>
                 <div className="row between"><span>Continuous conversation</span><Switch checked={s.voice.continuous} label="Continuous conversation" onChange={(v) => voice({ continuous: v })} /></div>
+                <div className="row between" data-testid="learn-voice">
+                  <span className="soft">Teach JARVIS your voice: say “Jarvis” 10 times after the beeps, so it answers your call at once.</span>
+                  <button type="button" className="btn" data-testid="learn-voice-btn"
+                    onClick={async () => { setErr(""); try { const r = await api.voiceEnroll(); setSaved(r.message); } catch (e) { setErr(errText(e)); } }}>
+                    Learn my voice
+                  </button>
+                </div>
               </div>
             )}
           </Panel>

@@ -224,6 +224,26 @@ Since 2026-11-19 (Edge's online recogniser failed on the laptop with "Speech rec
     into spoken Tamil (உள்ளது→இருக்கு, திறக்கிறேன்→திறக்குறேன், முடியவில்லை→முடியல, X என்று→Xனு). Applied to the rule
     engine's Tamil replies and fast_talk (`offline.tamil_styled`), to NLLB's Tamil (`app._run_via_english`), and the
     voice's own phrases (`SORRY`, `HOLD_ON`, timer messages). "வேணாம்"/"இல்ல" also deny a pending action (`app.DENY`).
+- **Personal wake model** (2026-11-21, `wake_personal.py`): a detector trained on the owner's own "Jarvis".
+  - Features: openWakeWord's speech embeddings (96 per 80 ms; a window = the last 16 frames), already computed for the
+    hey_jarvis model - `wake.preprocessor.get_features(16)` - so scoring costs ~0.05 ms/frame. Logistic regression (numpy).
+  - Training data: the owner's clips (`~/.jarvis/wake-personal/positives`: `enroll-*` and `call-*`), augmented (volume,
+    room noise, shifts); negatives = wake samples the Whisper check labelled not-a-call (`"jarvis": false` in their json),
+    the owner's requests after their first 2 s (requests can START with "Jarvis" - whole requests are not negatives),
+    halves and reversals of the owner's own "Jarvis" (`hard_negatives`; without them a same-voice "Javascript is fun"
+    woke it), and 25 000 windows of openWakeWord's ~11 h general speech/noise features
+    (`~/.jarvis/models/wake-negatives/validation_set_features.npy`, 176 MB, CC-BY-NC-SA, checksum-checked, downloaded at
+    first training). Threshold: above the worst held-out negative + 0.05, at least `MIN_THRESHOLD` 0.8, halfway into the
+    gap below the held-out calls. Training ~40-100 s on the busy laptop (background thread).
+  - Enrolment: "learn my voice" / "train my voice" / "என் குரலைக் கத்துக்கோ" (`app.LEARN_VOICE`, user's own words only),
+    Settings > Voice "Learn my voice" (`POST /api/voice/enroll`). JARVIS says the instructions, beeps after they end
+    (`VoiceService._speaking`), records the next 10 short utterances (0.3-2.5 s; nothing is acted on meanwhile; 120 s limit),
+    says "Halfway", trains, and says when it is done. Trigger `personal` acts like "Hey Jarvis" (chime, keeps the segment).
+  - Self-learning: every "Jarvis" the second chance confirms (short, no request after it) is saved as `call-*`; after 5 new
+    ones the model is retrained quietly (only once enrolled). `status().personal_wake` shows recordings/threshold/report.
+  - Checked: real listener + fake microphone with every other wake path off: 10 enrolment calls recorded, trained in 97 s
+    (threshold 0.889, held-out calls 0.998), "Jarvis" then woke it via `personal`, "Javascript is fun / Travis, come here /
+    The service was nervous" did not. Stand-in voices only: the owner has not enrolled yet.
 - **Floating icon** (`overlay.py`, tkinter, its own `pythonw` process started by the desktop app with
   `--parent PID`): a 46 px always-on-top circle, coloured by state; hover (or click to pin) shows a panel from
   `GET /api/overlay` - now/heard/last exchange, approvals with Approve/Deny, activity (`EventBus.activity`,

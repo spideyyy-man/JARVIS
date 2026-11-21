@@ -30,6 +30,9 @@ AFFIRM = re.compile(r"^\s*(hey\s+)?((jarvis|ஜார்விஸ்)[,\s]+)?(ye
                     r"|சரி|ஆமா|ஆமாம்|சரி,?\s*(செய்|பண்ணு)\S*|செய்|பண்ணு|அனுமதிக்கிறேன்)[\s.!]*$", re.I)  # Tamil: OK / yes / do it
 DENY = re.compile(r"^\s*(hey\s+)?((jarvis|ஜார்விஸ்)[,\s]+)?(no|nope|deny|denied|cancel( it| that)?|don'?t|stop|abort"
                   r"|வேண்டாம்|வேணாம்|இல்லை|இல்ல|ரத்து\s*(செய்|பண்ணு)?\S*)[\s.!]*$", re.I)  # Tamil: don't / no / cancel (written and spoken)
+# "learn my voice" / "train my voice" / "teach you my voice" / என் குரலைக் கத்துக்கோ: record the owner's "Jarvis" for their wake model
+LEARN_VOICE = re.compile(r"\b(?:learn|train|teach\s+(?:you|jarvis))\s+(?:on\s+)?my\s+voice\b|\brecogni[sz]e\s+my\s+voice\b|\bvoice\s+(?:training|enrol+ment)\b"
+                         r"|(?:என்|என்னோட|என்னுடைய)\s*குரல\S*\s*(?:கத்து|கற்று|பழகு|தெரிஞ்சு)", re.I)
 HISTORY_CHAR_BUDGET = 16_000
 LOCAL_HISTORY_CHAR_BUDGET = 5_000  # local models usually run with a small context window
 
@@ -264,6 +267,10 @@ class Jarvis:
                 reply = (f"Approved {len(done)} action(s). I won't ask again for {', '.join(sorted(set(done)))} during this task (30 minutes)." if done else "") + \
                         (f" {', '.join(sorted(set(refused)))} must be approved one at a time - still waiting on that." if refused else "")
                 return self._finish(conversation_id, reply.strip(), {"provider": "policy"})
+        if actor == "chat" and LEARN_VOICE.search(text):
+            # "learn my voice": only the user's own words start a recording session (never a tool or a web page)
+            lang = "ta" if re.search(r"[஀-௿]", text) else "en"
+            return self._finish(conversation_id, self.voice.enroll(lang), {"provider": "policy", "enroll": True})
         if actor == "chat" and (AFFIRM.match(text) or DENY.match(text)):
             pending = self.db.query("SELECT * FROM approvals WHERE status='pending' AND conversation_id=? ORDER BY created", (conversation_id,))
             if len(pending) == 1:

@@ -473,7 +473,7 @@ def test_a_missed_jarvis_gets_a_second_chance_off_the_listening_loop(tmp_path):
     lst._verify_wake = lambda audio: ("", {"language": "en"})
     worker = threading.Thread(target=lst._second_chance_worker, daemon=True)
     worker.start()
-    lst._second.put_nowait(np.zeros(16000, "float32"))
+    lst._second.put_nowait((np.zeros(16000, "float32"), None))
     for _ in range(50):
         if lst._late is not None:
             break
@@ -537,7 +537,7 @@ def test_a_longer_jarvis_request_is_caught_by_its_start(tmp_path):
     lst.transcribe = lambda audio: ("what is the weather in Chennai today?", "en", {"seconds": 1.0})
     worker = threading.Thread(target=lst._second_chance_worker, daemon=True)
     worker.start()
-    lst._second.put_nowait(np.zeros(16000 * 4, "float32"))
+    lst._second.put_nowait((np.zeros(16000 * 4, "float32"), None))
     for _ in range(50):
         if lst._late is not None:
             break
@@ -573,3 +573,87 @@ def test_spoken_no_denies_a_pending_action():
     from jarvis.app import DENY
 
     assert DENY.match("வேணாம்") and DENY.match("வேண்டாம்") and DENY.match("இல்ல")
+
+
+# -- a wake model trained on the owner's own "Jarvis" (2026-11-21) -------------------------------------------------------------
+def _chirp(seconds=0.7, f0=300.0, f1=900.0, level=0.3):
+    t = np.linspace(0, seconds, int(16000 * seconds), endpoint=False)
+    return (level * np.sin(2 * np.pi * (f0 + (f1 - f0) * t / seconds / 2) * t)).astype(np.float32)
+
+
+def test_personal_wake_model_trains_and_tells_its_word_from_other_sound(tmp_path):
+    from jarvis.wake_personal import Featurizer, PersonalWake
+
+    pw = PersonalWake(tmp_path / "wake-personal")
+    rng = np.random.default_rng(0)
+    for i in range(8):  # a stand-in for the owner's "Jarvis": a rising tone with a little noise
+        pw.add_positive(np.concatenate([np.zeros(4000, np.float32), _chirp() + rng.normal(0, 0.01, 11200).astype(np.float32)]), f"enroll{i}")
+    negatives = [rng.normal(0, 0.05, 16000 * 2).astype(np.float32) for _ in range(8)] + [_chirp(f0=1500, f1=600) for _ in range(4)]
+    with pytest.raises(ValueError):
+        PersonalWake(tmp_path / "empty").train(negatives)  # too few recordings
+    report = pw.train(negatives)
+    assert pw.ready() and 0.5 <= report["threshold"] <= 0.99 and (tmp_path / "wake-personal" / "model.npz").exists()
+    feat = Featurizer()
+    best = lambda a: max(pw.score(x.reshape(1, 16, 96)) for x in feat.windows(a))  # noqa: E731
+    assert best(np.concatenate([np.zeros(4000, np.float32), _chirp()])) > best(rng.normal(0, 0.05, 16000 * 2).astype(np.float32))
+    again = PersonalWake(tmp_path / "wake-personal")
+    assert again.load() and again.threshold == pytest.approx(pw.threshold)
+
+
+def test_learn_my_voice_phrases():
+    from jarvis.app import LEARN_VOICE
+
+    for t in ("learn my voice", "Jarvis, train my voice", "teach you my voice", "can you recognise my voice", "என் குரலைக் கத்துக்கோ"):
+        assert LEARN_VOICE.search(t), t
+    for t in ("what is my voice note", "learn python", "my voice is tired"):
+        assert not LEARN_VOICE.search(t), t
+
+
+def test_learn_my_voice_starts_enrolment_and_says_how(home, tmp_path):
+    j = make(home, tmp_path)
+    speaker = FakeSpeaker()
+    j.voice.speaker = speaker
+    started = []
+    j.voice.listener = SimpleNamespace(running=lambda: True, start_enrollment=lambda n: started.append(n), set_talking=lambda on: None, _enroll=None)
+    r = run(j.chat("learn my voice"))
+    assert started == [10] and "Jarvis" in r["text"] and r.get("enroll") and speaker.said and "10 times" in speaker.said[0]
+    j.voice.listener = None
+    assert "isn't running" in run(j.chat("learn my voice"))["text"]  # no listener: says so, records nothing
+    j.db.close()
+
+
+def test_enrolment_beeps_counts_and_reports(home, tmp_path):
+    j = make(home, tmp_path)
+    speaker = FakeSpeaker()
+    svc = VoiceService(j, speaker=speaker)
+    svc.listener = SimpleNamespace(set_talking=lambda on: None, _enroll={"needed": 10, "got": 0, "until": 0})
+    svc._speaking(False)  # the instructions have been said: first beep
+    assert speaker.chimes == 1 and svc.listener._enroll["beeped"]
+    svc._event("voice.enroll", {"done": False, "got": 5, "needed": 10})
+    assert speaker.chimes == 2 and speaker.said[-1] == "Halfway."
+    svc._event("voice.enroll", {"done": True, "got": 10, "needed": 10})
+    svc._event("voice.personal", {"reason": "enrolment", "threshold": 0.9})
+    assert speaker.said[-1].startswith("Done. I've learned your voice")
+    svc._event("voice.personal", {"reason": "new calls", "threshold": 0.9})
+    assert speaker.said[-1].startswith("Done.")  # quiet retraining says nothing new
+    j.db.close()
+
+
+def test_a_confirmed_live_call_becomes_a_training_example(tmp_path):
+    lst = LocalListener(tmp_path / "models", lambda *a: None, lambda *a: None)
+    trained = []
+    lst.train_personal = lambda reason="": trained.append(reason)
+    lst._learn_from_call(np.zeros(12000, "float32"))
+    assert len(lst.personal.positives()) == 1 and trained == []  # not enrolled yet: collect only
+    assert lst.status()["personal_wake"]["recordings"] == 1
+
+
+def test_enrol_endpoint(jarvis):
+    from fastapi.testclient import TestClient
+
+    from jarvis.api import create_app
+
+    with TestClient(create_app(jarvis)) as c:
+        h = {"Authorization": f"Bearer {jarvis.settings.api_token()}"}
+        r = c.post("/api/voice/enroll", headers=h).json()
+        assert r["ok"] is False and "isn't running" in r["message"]  # tests never run the microphone

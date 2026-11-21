@@ -75,6 +75,9 @@ SECOND_CHANCE_MAX = 2.5  # s of speech checked whole; longer utterances are chec
 # On the owner's live calls (2026-11-21) the keyword spotter caught 0/2 at every setting, even where it already woke on
 # their ordinary requests; the second chance caught 2/2 in ~1 s. So every separate utterance gets this check.
 WAKE_SAMPLES = 40  # short unanswered utterances kept (this computer only) to see why a call was missed
+ENROLL_CALLS = 10  # "learn my voice": how many times the owner says "Jarvis"
+ENROLL_TIMEOUT = 120.0  # s for the whole enrolment
+RETRAIN_AFTER = 5  # confirmed live calls collected before the personal model is trained again
 WAKE_PREFILTER = 0.03  # any hint of "jarvis" in a speech segment -> confirm with the English model (ordinary speech: 0.00)
 WAKE_WHILE_TALKING = 0.85  # while JARVIS speaks, only a very clear wake word counts (it must not wake itself)
 MIN_WAKE_FRAMES = 4  # 0.32 s: shorter sounds are not "Jarvis"
@@ -317,6 +320,14 @@ class LocalListener:
         self._model_lock = threading.RLock()  # the speech models are used by the loop and the second-chance thread
         self._second: queue.Queue = queue.Queue(maxsize=1)
         self._late: tuple | None = None  # a "Jarvis" found by the second chance, for the loop to act on
+        # the owner's own wake model (wake_personal.py): enrolment + calls the second chance confirmed
+        from .wake_personal import PersonalWake
+
+        self.personal = PersonalWake(self.models_dir.parent / "wake-personal")
+        self.personal.load()
+        self._enroll: dict | None = None
+        self._training = threading.Lock()
+        self._auto_since_train = 0
 
     def log(self, event: str, **data) -> None:
         """One line per event in <data>/voice-log.jsonl (this computer only; ~0.5 MB, then the older half is dropped)."""
@@ -374,7 +385,7 @@ class LocalListener:
     def _second_chance_worker(self) -> None:
         while not self._stop.is_set():
             try:
-                audio = self._second.get(timeout=0.5)
+                audio, stem = self._second.get(timeout=0.5)
             except queue.Empty:
                 continue
             t0 = time.time()
@@ -391,8 +402,84 @@ class LocalListener:
                 self.log("second chance failed", error=f"{type(e).__name__}: {e}")
                 continue
             self.log("second chance", jarvis=found is not None, rest=(found[0][:80] if found else ""), seconds=round(time.time() - t0, 1))
+            if stem is not None:
+                self._label_wake_sample(stem, found is not None)
             if found is not None:
                 self._late = found
+                if not found[0] and len(audio) <= SECOND_CHANCE_MAX * RATE:
+                    self._learn_from_call(audio)
+
+    def _label_wake_sample(self, stem: Path, jarvis: bool) -> None:
+        try:
+            import json
+
+            path = stem.with_suffix(".json")
+            note = json.loads(path.read_text(encoding="utf-8"))
+            note["jarvis"] = jarvis
+            path.write_text(json.dumps(note), encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _learn_from_call(self, audio) -> None:
+        """A live "Jarvis" the Whisper check confirmed: one more example of the owner's voice. Every RETRAIN_AFTER of them
+        the personal model is trained again in the background (only once the owner has enrolled)."""
+        try:
+            self.personal.add_positive(audio, "call")
+        except Exception:  # noqa: BLE001
+            return
+        self._auto_since_train += 1
+        if self.personal.ready() and self._auto_since_train >= RETRAIN_AFTER:
+            self._auto_since_train = 0
+            threading.Thread(target=self.train_personal, args=("new calls",), daemon=True, name="jarvis-wake-train").start()
+
+    def train_personal(self, reason: str = "enrolment") -> dict:
+        """Train the owner's wake model on their recordings against room speech (wake samples the Whisper check said
+        were not calls) and general speech (downloaded once, ~176 MB). Returns the report (or {"error": ...})."""
+        if not self._training.acquire(blocking=False):
+            return {"error": "already training"}
+        try:
+            import json
+
+            from .wake_personal import GENERAL_FILE, download_general, load_wav
+
+            general_dir = self.models_dir / "wake-negatives"
+            download_general(general_dir, log=lambda m: self.log("training", note=m))
+            negatives = []
+            for wav in sorted((self.models_dir.parent / "wake-samples").glob("*.wav")):
+                try:
+                    note = json.loads(wav.with_suffix(".json").read_text(encoding="utf-8"))
+                except Exception:  # noqa: BLE001
+                    note = {}
+                if note.get("jarvis") is False:  # only what the Whisper check said was not a call
+                    negatives.append(load_wav(wav))
+            # the owner's own voice saying other words: their saved requests after the first 2 s (a request recording can
+            # start with "Jarvis")
+            for wav in sorted((self.models_dir.parent / "voice-samples").glob("*.wav")):
+                try:
+                    a = load_wav(wav)
+                except Exception:  # noqa: BLE001
+                    continue
+                if len(a) > 2.6 * RATE:
+                    negatives.append(a[int(2.0 * RATE):])
+            report = self.personal.train(negatives, general=general_dir / GENERAL_FILE)
+            report["reason"] = reason
+            self.log("personal wake trained", **report)
+            self.on_event("voice.personal", report)
+            return report
+        except Exception as e:  # noqa: BLE001
+            self.log("personal wake training failed", error=f"{type(e).__name__}: {e}")
+            self.on_event("voice.personal", {"error": str(e), "reason": reason})
+            return {"error": str(e)}
+        finally:
+            self._training.release()
+
+    def start_enrollment(self, calls: int = ENROLL_CALLS) -> bool:
+        """"Learn my voice": the next `calls` short utterances are the owner saying "Jarvis" (nothing is acted on meanwhile)."""
+        if not self.running():
+            return False
+        self._enroll = {"needed": calls, "got": 0, "until": time.time() + ENROLL_TIMEOUT}
+        self.log("enrolment started", needed=calls)
+        return True
 
     def _head_is_jarvis(self, audio) -> bool:
         """Does a longer segment start with "Jarvis"? Only its first HEAD_SECONDS are read (cheap)."""
@@ -404,7 +491,7 @@ class LocalListener:
                                          condition_on_previous_text=False, without_timestamps=True, initial_prompt=VERIFY_PROMPT)[0])
         return bool(WAKE_START.match(" ".join(x.text.strip() for x in head).strip()))
 
-    def _keep_wake_sample(self, audio, note: dict) -> None:
+    def _keep_wake_sample(self, audio, note: dict) -> Path | None:
         """Short unanswered utterances in <data>/wake-samples (keep_samples off -> none), the last WAKE_SAMPLES of them."""
         if not self.keep_samples:
             return
@@ -426,8 +513,9 @@ class LocalListener:
             for old in sorted(folder.glob("*.wav"))[:-WAKE_SAMPLES]:
                 old.unlink(missing_ok=True)
                 old.with_suffix(".json").unlink(missing_ok=True)
+            return stem
         except Exception:  # noqa: BLE001
-            pass
+            return None
 
     def _verify_wake_locked(self, audio) -> tuple[str, dict] | None:
         t0 = time.time()
@@ -529,7 +617,10 @@ class LocalListener:
             model += f" + {self.model_size} (Tamil)"
         return {"state": self.state, "error": self.error, "model": model, "speech_model_ready": self._whisper_ready.is_set(),
                 "wake_phrase": "Jarvis", "wake_detector": "keyword spotter" if getattr(self, "spotter_ready", False) else "speech check",
-                "talking": self._jarvis_talking, "stats": dict(self.stats), "last": self.last}
+                "talking": self._jarvis_talking, "stats": dict(self.stats), "last": self.last,
+                "personal_wake": {"ready": self.personal.ready(), "recordings": len(self.personal.positives()),
+                                  "threshold": round(self.personal.threshold, 3) if self.personal.ready() else None,
+                                  "report": self.personal.info, "enrolling": dict(self._enroll) if self._enroll else None}}
 
     # -- internals ---------------------------------------------------------------------------------------------------
     def _set(self, state: str, **data) -> None:
@@ -707,6 +798,10 @@ class LocalListener:
                     prob = vad.predict(frame, frame_size=640) if vad else (1.0 if rms >= endpoint.threshold else 0.0)
                     now = time.time()
                     talking = self._jarvis_talking or now < self._spoke_until  # JARVIS's own voice is in the mic
+                    personal = 0.0
+                    if self.personal.ready():  # the owner's own wake model: ~0.1 ms on features the wake model just made
+                        personal = self.personal.score(wake.preprocessor.get_features(16))
+                        st["personal_peak"] = round(max(st.get("personal_peak", 0.0) * 0.995, personal), 3)
                     keyword = False
                     if spot is not None:
                         spot.accept_waveform(RATE, frame.astype(np.float32) / 32768.0)
@@ -731,6 +826,27 @@ class LocalListener:
                         if seg:
                             seg.append(frame)
                             seg_quiet += 1
+                    if self._enroll is not None:
+                        en = self._enroll
+                        if now > en["until"]:
+                            self._enroll = None
+                            self.log("enrolment timed out", got=en["got"])
+                            self.on_event("voice.enroll", {"done": True, "got": en["got"], "needed": en["needed"], "timeout": True})
+                        elif seg and seg_quiet >= SEG_END_FRAMES:
+                            speech_s = (len(seg) - SEG_END_FRAMES) * FRAME_S
+                            if not talking and 0.3 <= speech_s <= 2.5:
+                                self.personal.add_positive(np.concatenate(seg).astype(np.float32) / 32768.0, "enroll")
+                                en["got"] += 1
+                                self.log("enrolment call", got=en["got"], seconds=round(speech_s, 2))
+                                done = en["got"] >= en["needed"]
+                                self.on_event("voice.enroll", {"done": done, "got": en["got"], "needed": en["needed"]})
+                                if done:
+                                    self._enroll = None
+                                    threading.Thread(target=self.train_personal, args=("enrolment",), daemon=True, name="jarvis-wake-train").start()
+                            seg, seg_score, seg_quiet = [], 0.0, 0
+                        elif seg and len(seg) >= SEG_MAX_FRAMES:
+                            seg, seg_score, seg_quiet = [], 0.0, 0
+                        continue
                     trigger = None
                     if self._listen_now.is_set():
                         trigger = "hotkey"
@@ -738,6 +854,9 @@ class LocalListener:
                         trigger = "wake word"
                     elif keyword and now >= cooldown_until:
                         trigger = "keyword"  # "Jarvis" heard by the keyword spotter: at once, no Whisper check
+                    elif personal >= self.personal.threshold and not talking and now >= cooldown_until:
+                        trigger = "personal"  # the owner's own "Jarvis", by the model trained on their voice
+                        self.log("personal", score=round(personal, 3), threshold=round(self.personal.threshold, 3))
                     elif self.state == "following" and not talking:
                         # conversation mode: the user just keeps talking - no wake word needed
                         heard_run = heard_run + 1 if prob >= FOLLOW_START else 0
@@ -753,11 +872,10 @@ class LocalListener:
                                     "after_quiet": seg_after_quiet, "behind_s": st["behind_s"], "level": round(float(np.sqrt(np.mean(audio ** 2))) * 32768)}
                             # every separate utterance gets the check: short ones whole, longer ones by their start
                             second = not talking and seg_after_quiet and now >= cooldown_until and self._second.empty()
+                            stem = self._keep_wake_sample(audio, {**note, "personal": round(personal, 3)}) if speech_s <= 3.0 else None
                             if second:
-                                self._second.put_nowait(audio)
+                                self._second.put_nowait((audio, stem))
                             self.log("speech", second_chance=second, **note)
-                            if speech_s <= 3.0:
-                                self._keep_wake_sample(audio, note)
                         seg, seg_score, seg_quiet = [], 0.0, 0  # the spotter listens for "Jarvis"; no Whisper check per segment
                     if not trigger and seg and (seg_quiet >= SEG_END_FRAMES or len(seg) >= SEG_MAX_FRAMES):
                         candidate, cand_score = seg, seg_score
@@ -819,12 +937,12 @@ class LocalListener:
                         else:
                             # "hey jarvis what time..." in one go: keep what was already said (the wake phrase is
                             # removed from the text later), but count speech afresh from here
-                            recording = list(seg) if trigger in ("wake word", "keyword") and seg else []
+                            recording = list(seg) if trigger in ("wake word", "keyword", "personal") and seg else []
                             if vad:
                                 vad.reset_states()
                         pre.clear()
                         seg, seg_score, seg_quiet, heard_run = [], 0.0, 0, 0
-                        skip = CHIME_FRAMES if trigger in ("wake word", "hotkey", "jarvis", "keyword") else 0  # the chime is not speech
+                        skip = CHIME_FRAMES if trigger in ("wake word", "hotkey", "jarvis", "keyword", "personal") else 0  # the chime is not speech
                         self._trigger = trigger
                         self.log("wake", trigger=trigger, hey_jarvis=round(float(score), 2), behind_s=st["behind_s"])
                         self._set("recording", trigger=trigger, score=round(float(score), 2))
@@ -969,7 +1087,7 @@ class LocalListener:
             # பிரச்சனையா; 2026-11-20). The conversation's language only breaks a near-tie.
             prior = self._last_lang if self._trigger == "follow-up" else None
             text, lang, info = self.transcribe(audio, prior=prior) if prior else self.transcribe(audio)
-            if text and lang == "ta" and self._trigger in ("keyword", "wake word") and text == strip_tamil_wake(text):
+            if text and lang == "ta" and self._trigger in ("keyword", "wake word", "personal") and text == strip_tamil_wake(text):
                 text = TA_WAKE_LOOSE.sub("", text, count=1).strip() if re.match(r"^\W*[ஜJj]", text) else text
             if text:
                 self._last_lang = lang
@@ -1106,6 +1224,45 @@ class VoiceService:
         self.listener.listen_now()
         return True
 
+    def enroll(self, lang: str = "en") -> str:
+        """"Learn my voice": record the owner saying "Jarvis" ENROLL_CALLS times, then train their wake model. Returns
+        what to say (the instructions), or why it cannot start."""
+        if not (self.listener and self.listener.running()):
+            return ("குரல் கேட்கும் பகுதி இப்போ ஓடல." if lang == "ta" else "My listening isn't running right now, so I can't learn your voice.")
+        self._enroll_lang = lang
+        if self.speaker:
+            self.speaker.stop()
+        self.listener.start_enrollment(ENROLL_CALLS)
+        if lang == "ta":
+            text = f"சரி, உங்க குரலைக் கத்துக்கறேன். ஒவ்வொரு பீப் சத்தத்துக்கும் அப்புறம் \"ஜார்விஸ்\"னு சொல்லுங்க - {ENROLL_CALLS} தடவை."
+        else:
+            text = f"Okay, let's learn your voice. Say \"Jarvis\" the way you normally call me, {ENROLL_CALLS} times - once after each beep."
+        if self.speaker and not self.speaker.say(text):  # said here, typed or spoken; the first beep follows (_speaking)
+            self._speaking(False)
+        return text
+
+    def _enroll_event(self, data: dict) -> None:
+        ta = getattr(self, "_enroll_lang", "en") == "ta"
+        if data.get("timeout"):
+            self.speaker.say("நேரம் ஆயிடுச்சு. அப்புறம் திரும்ப முயற்சி பண்ணலாம்." if ta else
+                             f"Let's stop there - I got {data['got']} of {data['needed']}. Say 'learn my voice' to try again.")
+        elif data.get("done"):
+            self.speaker.say("நன்றி! இப்போ கத்துக்கிட்டு இருக்கேன், ஒரு நிமிஷம்." if ta else "Thanks! Learning your voice now - this takes about a minute.")
+        else:
+            if data["got"] == data["needed"] // 2:
+                self.speaker.say("பாதி முடிஞ்சுது." if ta else "Halfway.")
+            self.speaker.chime()  # the beep: say it again
+
+    def _personal_event(self, data: dict) -> None:
+        ta = getattr(self, "_enroll_lang", "en") == "ta"
+        if data.get("reason") != "enrolment":
+            return  # quiet retraining from new calls
+        if data.get("error"):
+            self.speaker.say("மன்னிச்சுக்கோங்க, கத்துக்க முடியல." if ta else f"Sorry, I couldn't learn your voice: {data['error']}")
+        else:
+            self.speaker.say("முடிஞ்சுது! இனிமே உங்க \"ஜார்விஸ்\" உடனே கேட்கும்." if ta else
+                             "Done. I've learned your voice - say Jarvis any time.")
+
     # called on the listener / speaker threads
     def _event(self, type_: str, data: dict) -> None:
         if type_ == "voice.wake":
@@ -1114,6 +1271,10 @@ class VoiceService:
                 self.speaker.stop()  # "Hey Jarvis" while it talks: stop talking and listen
                 if data.get("trigger") != "follow-up" and not data.get("direct"):
                     self.speaker.chime()  # ...and let the user hear that it is listening (a follow-up is already talking)
+        if type_ == "voice.enroll" and self.speaker:
+            self._enroll_event(data)
+        if type_ == "voice.personal" and self.speaker:
+            self._personal_event(data)
         if type_ in ("voice.unclear", "voice.slow") and self.speaker:
             lang = data.get("language") if self.speaker.can_speak(data.get("language") or "") else "en"
             unclear, slow = SORRY.get(lang, SORRY["en"])
@@ -1126,6 +1287,11 @@ class VoiceService:
     def _speaking(self, on: bool) -> None:
         if self.listener:
             self.listener.set_talking(on)
+            en = getattr(self.listener, "_enroll", None)
+            if not on and en is not None and not en.get("beeped") and self.speaker:
+                en["beeped"] = True  # the instructions have been said: the first beep - say "Jarvis" now
+                en["until"] = time.time() + ENROLL_TIMEOUT
+                self.speaker.chime()
         if not on and self._follow_pending and self.listener:  # the whole reply has been said: listen for the next thing
             self._follow_pending = False
             self.listener.follow_up(FOLLOW_UP_SECONDS)
@@ -1205,6 +1371,8 @@ class VoiceService:
             follower.cancel()
             holder.cancel()
             self.app.bus.unsubscribe(events)
+        if result.get("enroll"):
+            return result  # the instructions were already said by enroll(); the beeps follow
         so_far = "".join(streamed)
         final = result.get("text", "")
         rest = split.rest() + (final[len(so_far):] if final.startswith(so_far) else ("" if so_far else final))
