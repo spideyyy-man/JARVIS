@@ -71,7 +71,9 @@ KWS_SHA256 = "f170013b4716e41b62b9bfd809687c207cef798ef9bc6534d524e17af9b6561a"
 # Second chance: a short separate utterance the spotter did not take is checked by the English model in a background
 # thread (the listening loop never waits for it), at most one at a time. "Jarvis" there still wakes JARVIS, ~1-3 s late,
 # instead of not at all (2026-11-21: the owner called "Jarvis" and got no response).
-SECOND_CHANCE_MAX = 2.5  # s of speech: longer is conversation, not a call
+SECOND_CHANCE_MAX = 2.5  # s of speech checked whole; longer utterances are checked by their first HEAD_SECONDS only
+# On the owner's live calls (2026-11-21) the keyword spotter caught 0/2 at every setting, even where it already woke on
+# their ordinary requests; the second chance caught 2/2 in ~1 s. So every separate utterance gets this check.
 WAKE_SAMPLES = 40  # short unanswered utterances kept (this computer only) to see why a call was missed
 WAKE_PREFILTER = 0.03  # any hint of "jarvis" in a speech segment -> confirm with the English model (ordinary speech: 0.00)
 WAKE_WHILE_TALKING = 0.85  # while JARVIS speaks, only a very clear wake word counts (it must not wake itself)
@@ -377,13 +379,30 @@ class LocalListener:
                 continue
             t0 = time.time()
             try:
-                found = self._verify_wake(audio)
+                if len(audio) <= SECOND_CHANCE_MAX * RATE:
+                    found = self._verify_wake(audio)
+                elif self._head_is_jarvis(audio):
+                    # "Jarvis, <a longer request>": the start said Jarvis - the whole segment is the request
+                    text, lang, info = self.transcribe(audio)
+                    found = (text, {**info, "language": lang})
+                else:
+                    found = None
             except Exception as e:  # noqa: BLE001
                 self.log("second chance failed", error=f"{type(e).__name__}: {e}")
                 continue
             self.log("second chance", jarvis=found is not None, rest=(found[0][:80] if found else ""), seconds=round(time.time() - t0, 1))
             if found is not None:
                 self._late = found
+
+    def _head_is_jarvis(self, audio) -> bool:
+        """Does a longer segment start with "Jarvis"? Only its first HEAD_SECONDS are read (cheap)."""
+        if not self._whisper_ready.wait(timeout=0.1) or self._whisper is None:
+            return False
+        with self._model_lock:
+            model = self._english_model() if self.english_size else self._whisper
+            head = list(model.transcribe(audio[: int(HEAD_SECONDS * RATE)], language="en", beam_size=1, vad_filter=True,
+                                         condition_on_previous_text=False, without_timestamps=True, initial_prompt=VERIFY_PROMPT)[0])
+        return bool(WAKE_START.match(" ".join(x.text.strip() for x in head).strip()))
 
     def _keep_wake_sample(self, audio, note: dict) -> None:
         """Short unanswered utterances in <data>/wake-samples (keep_samples off -> none), the last WAKE_SAMPLES of them."""
@@ -732,8 +751,8 @@ class LocalListener:
                             audio = np.concatenate(seg).astype(np.float32) / 32768.0
                             note = {"seconds": round(speech_s, 2), "hey_jarvis": round(float(seg_score), 2), "talking": talking,
                                     "after_quiet": seg_after_quiet, "behind_s": st["behind_s"], "level": round(float(np.sqrt(np.mean(audio ** 2))) * 32768)}
-                            second = (not talking and seg_after_quiet and speech_s <= SECOND_CHANCE_MAX and now >= cooldown_until
-                                      and self._second.empty())
+                            # every separate utterance gets the check: short ones whole, longer ones by their start
+                            second = not talking and seg_after_quiet and now >= cooldown_until and self._second.empty()
                             if second:
                                 self._second.put_nowait(audio)
                             self.log("speech", second_chance=second, **note)
@@ -983,10 +1002,10 @@ CONVERSATION_ENDS = re.compile(r"^(?:thanks?|thank you|that'?s all|that is all|n
                                r"(?:\s*(?:ஜார்விஸ்|jarvis))?[.!]*$", re.I)
 # Said when an answer has not started HOLD_ON_AFTER s after a spoken request (it was heard; the model is thinking)
 HOLD_ON_AFTER = 3.0
-HOLD_ON = {"en": "One moment.", "ta": "ஒரு நிமிடம்."}
+HOLD_ON = {"en": "One moment.", "ta": "ஒரு நிமிஷம்."}
 # What JARVIS says when it could not make out the request / was too slow, by language
 SORRY = {"en": ("Sorry, I didn't catch that. Please say it again.", "Sorry, I was too slow to catch that. Please say it again."),
-         "ta": ("மன்னிக்கவும், சரியாகக் கேட்கவில்லை. மீண்டும் சொல்லுங்கள்.", "மன்னிக்கவும், கேட்பதற்குத் தாமதமாகிவிட்டது. மீண்டும் சொல்லுங்கள்.")}
+         "ta": ("மன்னிச்சுக்கோங்க, சரியா கேட்கல. திரும்ப சொல்லுங்க.", "மன்னிச்சுக்கோங்க, கேட்க லேட் ஆயிடுச்சு. திரும்ப சொல்லுங்க.")}
 
 
 def is_echo(heard: str, recent: list, within: float = 60.0) -> bool:

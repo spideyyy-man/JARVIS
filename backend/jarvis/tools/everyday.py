@@ -207,8 +207,8 @@ def cancel_timer(ctx: ToolContext, which: str = "") -> dict:
 def due_message(t: dict) -> str:
     if t.get("language") == "ta":
         if t["kind"] == "alarm":
-            return f"இப்போது {ta_clock_text(t['due'])}. அலாரம் நேரம்!" + (f" {t['label']}." if t["label"] else "")
-        return f"நேரம் முடிந்தது! உங்கள் {say_duration_ta(t['seconds'])} டைமர் முடிந்தது."
+            return f"இப்போ {ta_clock_text(t['due'])}. அலாரம் நேரம்!" + (f" {t['label']}." if t["label"] else "")
+        return f"நேரம் ஆச்சு! உங்க {say_duration_ta(t['seconds'])} டைமர் முடிஞ்சுது."
     if t["kind"] == "alarm":
         return f"It's {time.strftime('%I:%M %p', time.localtime(t['due'])).lstrip('0')}" + (f" - {t['label']}." if t["label"] else ". Time to get up!" if time.localtime(t["due"]).tm_hour < 11 else ".")
     return f"Time's up! Your {t['label'] + ' ' if t['label'] else ''}timer for {say_duration(t['seconds'])} is done."

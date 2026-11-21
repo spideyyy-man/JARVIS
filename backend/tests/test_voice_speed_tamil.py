@@ -65,8 +65,8 @@ def test_tamil_rules_never_take_english_requests(phrase):
 @pytest.mark.parametrize("phrase,expect", [
     ("what time is it?", r"^It's \d{1,2}:\d\d [AP]M\.$"), ("Jarvis, what's the time", r"^It's "), ("what day is today", r"^Today is \w+day, "),
     ("hello", r"^Hello"), ("thank you jarvis", r"welcome"), ("who are you?", r"JARVIS"),
-    ("நேரம் என்ன", r"^இப்போது (காலை|மதியம்|மாலை|இரவு) \d{1,2}:\d\d\.$"), ("இப்போ என்ன நேரம்?", r"^இப்போது "), ("மணி என்ன ஆச்சு", r"^இப்போது "),
-    ("இன்னைக்கு என்ன நாள்", r"^இன்று \S+கிழமை, "), ("வணக்கம் ஜார்விஸ்", r"^வணக்கம்"), ("நன்றி", r"^மகிழ்ச்சி"), ("நீ யார்?", r"JARVIS"),
+    ("நேரம் என்ன", r"^இப்போ (காலை|மதியம்|மாலை|இரவு) \d{1,2}:\d\d\.$"), ("இப்போ என்ன நேரம்?", r"^இப்போ "), ("மணி என்ன ஆச்சு", r"^இப்போ "),
+    ("இன்னைக்கு என்ன நாள்", r"^இன்னைக்கு \S+கிழமை, "), ("வணக்கம் ஜார்விஸ்", r"^வணக்கம்"), ("நன்றி", r"^சந்தோஷம்"), ("நீ யார்?", r"JARVIS"),
 ])
 def test_instant_replies(phrase, expect):
     reply = fast_talk(phrase)
@@ -87,9 +87,9 @@ def _after(question, tool, args, result, is_error=False):
 
 def test_tamil_requests_get_tamil_replies():
     assert _after("சத்தத்தை அதிகமாக்கு", "system_control", {"action": "volume_up"}, {"done": "volume_up", "value": 5}) == "சத்தத்தை அதிகரித்தேன்."
-    assert _after("குரோம் திற", "open_application", {"name": "chrome"}, {"opened": "chrome", "launched": ["cmd"], "pid": 1}) == "chrome திறக்கிறேன்."
-    assert _after("நான் என்ன காப்பி பண்ணேன்", "clipboard_read", {}, {"chars": 0, "text": ""}) == "கிளிப்போர்டு காலியாக உள்ளது."
-    assert _after("குரோம் திற", "open_application", {"name": "chrome"}, {"error": "No installed application matches 'chrome'"}, True).startswith("மன்னிக்கவும்")
+    assert _after("குரோம் திற", "open_application", {"name": "chrome"}, {"opened": "chrome", "launched": ["cmd"], "pid": 1}) == "chrome திறக்குறேன்."
+    assert _after("நான் என்ன காப்பி பண்ணேன்", "clipboard_read", {}, {"chars": 0, "text": ""}) == "கிளிப்போர்டு காலியா இருக்கு."
+    assert _after("குரோம் திற", "open_application", {"name": "chrome"}, {"error": "No installed application matches 'chrome'"}, True).startswith("மன்னிச்சுக்கோங்க")
     pending = _after("கணினியை லாக் பண்ணு", "system_control", {"action": "lock_screen"}, {"status": "pending_approval", "approval_id": "ap_1", "preview": "Lock the screen"})
     assert "அனுமதி" in pending and "ap_1" in pending
 

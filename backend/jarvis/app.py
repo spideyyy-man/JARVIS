@@ -16,6 +16,7 @@ from .events import EventBus
 from .listen import VoiceService
 from .knowledge import KnowledgeBase, Memory, make_embedder
 from .llm.base import FORCE_PROVIDER, LLMProvider, LLMRouter
+from .llm import offline as offline_mod
 from .llm.offline import Env, OfflineProvider, fast_talk, match_rules, with_context
 from .security import AuditLog, PathGuard
 from .tools import browser, coding, desktop, everyday, files, images, personal, research, system
@@ -28,7 +29,7 @@ MAX_CONTINUATIONS = 20
 AFFIRM = re.compile(r"^\s*(hey\s+)?((jarvis|ஜார்விஸ்)[,\s]+)?(yes|yep|approve[d]?|go ahead|do it|confirm(ed)?|proceed|yes,? (do it|please|go ahead)"
                     r"|சரி|ஆமா|ஆமாம்|சரி,?\s*(செய்|பண்ணு)\S*|செய்|பண்ணு|அனுமதிக்கிறேன்)[\s.!]*$", re.I)  # Tamil: OK / yes / do it
 DENY = re.compile(r"^\s*(hey\s+)?((jarvis|ஜார்விஸ்)[,\s]+)?(no|nope|deny|denied|cancel( it| that)?|don'?t|stop|abort"
-                  r"|வேண்டாம்|இல்லை|ரத்து\s*(செய்|பண்ணு)?\S*)[\s.!]*$", re.I)  # Tamil: don't / no / cancel
+                  r"|வேண்டாம்|வேணாம்|இல்லை|இல்ல|ரத்து\s*(செய்|பண்ணு)?\S*)[\s.!]*$", re.I)  # Tamil: don't / no / cancel (written and spoken)
 HISTORY_CHAR_BUDGET = 16_000
 LOCAL_HISTORY_CHAR_BUDGET = 5_000  # local models usually run with a small context window
 
@@ -36,6 +37,7 @@ LOCAL_HISTORY_CHAR_BUDGET = 5_000  # local models usually run with a small conte
 class Jarvis:
     def __init__(self, settings: Settings | None = None, providers: list[LLMProvider] | None = None):
         self.settings = settings or load_settings()
+        offline_mod.TAMIL_STYLE = self.settings.tamil_style
         self.model_warm: dict = {}  # last preload of the local model (see _keep_model_warm)
         self.translator = Translator(self.settings.translator_dir or self.settings.data_dir / "models" / "nllb-200-distilled-600M-ct2-int8")
         self.db = Database(self.settings.db_path)
@@ -415,6 +417,8 @@ class Jarvis:
         english_reply = result.text
         try:
             reply = await asyncio.to_thread(self.translator.translate, english_reply, "en", lang)
+            if lang == "ta":
+                reply = offline_mod.tamil_styled(reply)  # the translation model writes formal Tamil; people speak it
         except Exception as e:  # noqa: BLE001 - better an English answer than none
             reply, english_reply = english_reply, english_reply + f"\n\n[translation back failed: {e}]"
         result.text = reply

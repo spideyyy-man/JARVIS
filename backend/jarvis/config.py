@@ -66,6 +66,7 @@ class Settings:
     # Tamil (and other Indian-language) requests to a local model go through English with a translation model
     # (see translate.py). Empty dir = <data_dir>/models/nllb-200-distilled-600M-ct2-int8.
     translate_via_english: bool = True
+    tamil_style: str = "spoken"  # Tamil replies: spoken (how people talk) | formal (written Tamil)
     translator_dir: Path | None = None
     # Files JARVIS may see at all. Reads outside these roots are refused.
     allowed_roots: list[Path] = field(default_factory=list)
@@ -155,6 +156,7 @@ def load_settings(env_file: Path | None = None) -> Settings:
         openai_stream=env("JARVIS_OPENAI_STREAM", "1") != "0",
         openai_max_tokens=int(env("JARVIS_OPENAI_MAX_TOKENS", "1024")),
         translate_via_english=env("JARVIS_TRANSLATE_VIA_ENGLISH", "1") != "0",
+        tamil_style=env("JARVIS_TAMIL_STYLE", "spoken"),
         translator_dir=Path(env("JARVIS_TRANSLATOR_DIR", str(data_dir / "models" / "nllb-200-distilled-600M-ct2-int8"))).expanduser(),
         openai_keep_alive=env("JARVIS_OPENAI_KEEP_ALIVE", "2h" if ":11434" in env("JARVIS_OPENAI_BASE_URL", "") else ""),
         allowed_roots=_paths(env("JARVIS_ALLOWED_ROOTS", str(Path.home()))),

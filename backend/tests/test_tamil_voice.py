@@ -79,25 +79,25 @@ def _after(question, tool, args, result):
 
 
 def test_tamil_everyday_replies_are_in_tamil():
-    assert _after("5 நிமிடம் டைமர் வை", "set_timer", {}, {"seconds": 300, "due": time.time() + 300, "kind": "timer", "label": "", "in": "5 minutes"}) == "சரி, 5 நிமிடம் டைமர் வைத்தேன்."
+    assert _after("5 நிமிடம் டைமர் வை", "set_timer", {}, {"seconds": 300, "due": time.time() + 300, "kind": "timer", "label": "", "in": "5 minutes"}) == "சரி, 5 நிமிடம் டைமர் வச்சேன்."
     w = _after("சென்னையில் வானிலை எப்படி", "weather", {}, {"place": "Chennai", "day": "today", "now": {"temp": 31.2, "sky": "light rain", "feels": 35},
                                                        "low": 26, "high": 33, "rain_chance": 60, "sky": "rain"})
-    assert w == "சென்னை: இப்போது 31°, லேசான மழை. இன்று 26° முதல் 33° வரை, மழைக்கு 60% வாய்ப்பு."
+    assert w == "சென்னை: இப்போ 31°, லேசான மழை. இன்னைக்கு 26° முதல் 33° வரை, மழைக்கு 60% வாய்ப்பு."  # spoken Tamil
     assert _after("25 கூட்டல் 17 எவ்வளவு", "calculate", {}, {"expression": "25+17", "result": "42"}) == "விடை 42."
-    assert _after("ஷாப்பிங் லிஸ்ட்ல பால் சேர்", "list_add", {}, {"list": "shopping", "added": ["பால்"], "items": ["பால்"]}) == "பால் உங்கள் ஷாப்பிங் பட்டியலில் சேர்த்தேன்."
+    assert _after("ஷாப்பிங் லிஸ்ட்ல பால் சேர்", "list_add", {}, {"list": "shopping", "added": ["பால்"], "items": ["பால்"]}) == "பால் உங்க ஷாப்பிங் பட்டியலில சேர்த்தேன்."
     assert _after("டைமரை ரத்து செய்", "cancel_timer", {}, {"cancelled": [], "remaining": 0}).startswith("ரத்து செய்ய")
 
 
 def test_a_timer_set_in_tamil_rings_in_tamil():
-    assert due_message({"kind": "timer", "label": "", "seconds": 300, "due": time.time(), "language": "ta"}) == "நேரம் முடிந்தது! உங்கள் 5 நிமிடம் டைமர் முடிந்தது."
-    assert due_message({"kind": "alarm", "label": "", "due": time.time(), "language": "ta"}).startswith("இப்போது ")
+    assert due_message({"kind": "timer", "label": "", "seconds": 300, "due": time.time(), "language": "ta"}) == "நேரம் ஆச்சு! உங்க 5 நிமிடம் டைமர் முடிஞ்சுது."
+    assert due_message({"kind": "alarm", "label": "", "due": time.time(), "language": "ta"}).startswith("இப்போ ")
     assert due_message({"kind": "timer", "label": "", "seconds": 300, "due": time.time()}).startswith("Time's up!")
 
 
 def test_tamil_everyday_command_end_to_end_is_instant_and_in_tamil(home, tmp_path):
     j = make(home, tmp_path)
     r = run(j.chat("3 நிமிடம் டைமர் வை"))
-    assert r["text"] == "சரி, 3 நிமிடம் டைமர் வைத்தேன்." and j.db.get_setting("timers")[0]["language"] == "ta"
+    assert r["text"] == "சரி, 3 நிமிடம் டைமர் வச்சேன்." and j.db.get_setting("timers")[0]["language"] == "ta"
     j.db.close()
 
 
@@ -327,7 +327,7 @@ def test_sorry_is_said_in_tamil_when_the_conversation_is_in_tamil(home, tmp_path
     svc.listener = FakeListener()
     svc._event("voice.unclear", {"guess": "x", "language": "ta"})
     svc._event("voice.slow", {"text": "x", "seconds": 30, "language": "ta"})
-    assert speaker.said[0].startswith("மன்னிக்கவும், சரியாகக் கேட்கவில்லை") and speaker.said[1].startswith("மன்னிக்கவும்") and svc._follow_pending
+    assert speaker.said[0].startswith("மன்னிச்சுக்கோங்க, சரியா கேட்கல") and speaker.said[1].startswith("மன்னிச்சுக்கோங்க") and svc._follow_pending
     english_only = FakeSpeaker(langs=("en",))
     VoiceService(j, speaker=english_only)._event("voice.unclear", {"guess": "x", "language": "ta"})
     assert english_only.said == ["Sorry, I didn't catch that. Please say it again."]  # no Tamil voice: say it in English
@@ -525,3 +525,51 @@ def test_a_slow_answer_is_announced_so_silence_is_never_the_only_reply(home, tmp
     run(VoiceService(j, speaker=quick).handle("What is the capital of France?", "en"))
     assert "One moment." not in quick.said  # a quick answer needs no filler
     j.db.close()
+
+
+def test_a_longer_jarvis_request_is_caught_by_its_start(tmp_path):
+    """"Jarvis, what is the weather in Chennai today?" (over 2.5 s) - the keyword spotter missed the owner's live calls,
+    so the second chance reads only the start for "Jarvis", then the whole sentence as the request."""
+    import threading
+
+    lst = LocalListener(tmp_path / "models", lambda *a: None, lambda *a: None)
+    lst._head_is_jarvis = lambda audio: True
+    lst.transcribe = lambda audio: ("what is the weather in Chennai today?", "en", {"seconds": 1.0})
+    worker = threading.Thread(target=lst._second_chance_worker, daemon=True)
+    worker.start()
+    lst._second.put_nowait(np.zeros(16000 * 4, "float32"))
+    for _ in range(50):
+        if lst._late is not None:
+            break
+        time.sleep(0.02)
+    lst._stop.set()
+    assert lst._late[0] == "what is the weather in Chennai today?" and lst._late[1]["language"] == "en"
+
+
+# -- spoken Tamil (2026-11-21: the owner asked for "normal Tamil", not formal written Tamil) ---------------------------------
+@pytest.mark.parametrize("written,spoken", [
+    ("உங்கள் ஷாப்பிங் பட்டியல் காலியாக உள்ளது.", "உங்க ஷாப்பிங் பட்டியல் காலியா இருக்கு."),
+    ("சரி, Chrome உங்கள் பிரவுசரில் திறக்கிறேன்.", "சரி, Chrome உங்க பிரவுசரில திறக்குறேன்."),
+    ("மன்னிக்கவும், அதைச் செய்ய முடியவில்லை.", "மன்னிச்சுக்கோங்க, அத செய்ய முடியல."),
+    ("மகிழ்ச்சி! வேறு ஏதாவது வேண்டுமா?", "சந்தோஷம்! வேற ஏதாவது வேணுமா?"),
+    ("இன்று மழை பெய்யுமா என்று பார்க்கிறேன்.", "இன்னைக்கு மழை பெய்யுமான்னு பார்க்குறேன்."),
+    ("மழை பெய்கிறது.", "மழை பெய்யுது."),
+    ("நான் இங்கே இருக்கிறேன்.", "நான் இங்க இருக்கேன்."),
+])
+def test_written_tamil_becomes_spoken_tamil(written, spoken):
+    from jarvis.tamil_style import spoken_tamil
+
+    assert spoken_tamil(written) == spoken
+
+
+def test_spoken_style_leaves_english_numbers_and_code_alone_and_can_be_turned_off():
+    from jarvis.tamil_style import spoken_tamil, styled
+
+    assert spoken_tamil("CPU 40% used. `இருக்கிறது`") == "CPU 40% used. `இருக்கிறது`"
+    assert styled("உள்ளது", "formal") == "உள்ளது" and styled("உள்ளது", "spoken") == "இருக்கு"
+
+
+def test_spoken_no_denies_a_pending_action():
+    from jarvis.app import DENY
+
+    assert DENY.match("வேணாம்") and DENY.match("வேண்டாம்") and DENY.match("இல்ல")

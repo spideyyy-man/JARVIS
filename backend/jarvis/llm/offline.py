@@ -166,6 +166,16 @@ _TAMIL = re.compile(r"[஀-௿]")
 _TA_WAKE = re.compile(r"^\s*(?:(?:hey|ok|ஹே|ஓகே)\s+)?(?:jarvis|ஜார்விஸ்|ஜார்வீஸ்)[\s,.!:]*", re.I)
 
 
+TAMIL_STYLE = "spoken"  # set from settings.tamil_style when JARVIS starts
+
+
+def tamil_styled(text: str) -> str:
+    """Tamil replies the way people talk (the owner: "speak normal Tamil"), unless the setting says formal."""
+    from ..tamil_style import styled
+
+    return styled(text, TAMIL_STYLE)
+
+
 def is_tamil(text: str) -> bool:
     return bool(_TAMIL.search(text or ""))
 
@@ -383,7 +393,8 @@ def fast_talk(text: str) -> str | None:
     t = _TA_WAKE.sub("", strip_context(text)).strip()
     for pattern, reply in FAST_TALK:
         if pattern.search(t):
-            return reply()
+            out = reply()
+            return tamil_styled(out) if is_tamil(out) else out
     return None
 
 
@@ -765,7 +776,8 @@ class OfflineProvider:
                 text = renderer(d, question, turn) if renderer else f"`{call.name}` returned: {str(d)[:600]}"
                 if text:
                     parts.append(text)
-        return LLMResponse(text="\n\n".join(parts) or ("முடிந்தது." if ta else "Done."))
+        text = "\n\n".join(parts) or ("முடிந்தது." if ta else "Done.")
+        return LLMResponse(text=tamil_styled(text) if ta else text)
 
 
 def plan_steps(goal: str, repo: dict | None) -> list[dict]:

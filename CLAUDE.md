@@ -212,6 +212,18 @@ Since 2026-11-19 (Edge's online recogniser failed on the laptop with "Speech rec
   - The floating icon is 3D (`orb.py`): a per-pixel lit glass sphere (`_sphere`, numpy, cached per colour), two tilted
     rings whose back halves pass behind it (`RINGS`, `_draw_rings`), orbiting lights; ring speed by state. 1.4-1.6 ms per
     warm frame (was 2-5 ms).
+- **Wake word on the owner's live voice + spoken Tamil** (2026-11-21):
+  - The owner's live calls were caught 0/2 by the keyword spotter at every setting (even where it already woke on their
+    ordinary requests; spelling variants did not help) and 2/2 by the second chance in ~1 s. The spotter was tuned on
+    recordings from the request recorder; live room audio differs. So every separate utterance now gets the second
+    chance: short ones (<= 2.5 s) checked whole, longer ones by their first `HEAD_SECONDS` (`_head_is_jarvis`), then the
+    whole sentence is transcribed as the request ("Jarvis, <long request>" in one breath). The spotter stays as the
+    instant path. The room has much other speech (TV / family): 34 of 36 saved short utterances were not calls.
+    Lasting fix not built yet: a wake detector trained on the owner's own "Jarvis" (enrolment).
+  - Spoken Tamil (`tamil_style.py`, `JARVIS_TAMIL_STYLE` spoken | formal): word and verb-ending rules turn written Tamil
+    into spoken Tamil (உள்ளது→இருக்கு, திறக்கிறேன்→திறக்குறேன், முடியவில்லை→முடியல, X என்று→Xனு). Applied to the rule
+    engine's Tamil replies and fast_talk (`offline.tamil_styled`), to NLLB's Tamil (`app._run_via_english`), and the
+    voice's own phrases (`SORRY`, `HOLD_ON`, timer messages). "வேணாம்"/"இல்ல" also deny a pending action (`app.DENY`).
 - **Floating icon** (`overlay.py`, tkinter, its own `pythonw` process started by the desktop app with
   `--parent PID`): a 46 px always-on-top circle, coloured by state; hover (or click to pin) shows a panel from
   `GET /api/overlay` - now/heard/last exchange, approvals with Approve/Deny, activity (`EventBus.activity`,
