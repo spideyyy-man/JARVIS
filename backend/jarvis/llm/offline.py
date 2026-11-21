@@ -300,6 +300,7 @@ def _ta_music(text, m, env):
 
 
 TA_EVERYDAY: list[Rule] = [
+    TR("orchestrator", r"(?:ஃபார்ம|பார்ம|ஃபாம|படிவ|form)\S*\s*.{0,15}?(?:ஃபில்|பில்|நிரப்பு|fill)", lambda t, m, e: ("tab_form", {})),
     TR("orchestrator", r"(?:டைமர|அலார|timer|alarm)\S*.{0,25}?(?:ரத்து|கேன்சல்|நிறுத்து|நீக்கு|அணை|ஆஃப்|வேண்டாம்|டெலீட்)",
        lambda t, m, e: ("cancel_timer", {"which": "all" if re.search(r"எல்லா|அனைத்து|all", t) else ("alarm" if re.search(r"அலார", t) else "timer")})),
     TR("orchestrator", r"டைமர|timer", _ta_timer),
@@ -503,6 +504,18 @@ EVERYDAY_RULES = [
     R("orchestrator", r"\b(?:set|create|make)\b.*\balarm\b|\bwake me(?: up)?\s+at\b|\balarm\s+(?:for|at)\b", _alarm),
     R("orchestrator", r"^\s*(?:set|change|update)\s+my\s+(?:home\s+)?(?:city|location|town)\s+to\s+(?P<c>.+?)\s*[.!]?$|^\s*my\s+(?:home\s+)?(?:city|town|location)\s+is\s+(?P<c2>.+?)\s*[.!]?$",
       lambda t, m, e: ("set_home_city", {"city": m.group("c") or m.group("c2")})),
+    # the owner's own browser tab (Connector extension): read the form, then a fill proposal they approve
+    R("orchestrator", r"\b(?:fill|complete)\s+(?:in\s+|out\s+|up\s+)?(?:this|the|that|my|current)?\s*(?:form|application|registration|sign ?up)\b"
+                      r"|^\s*(?:jarvis[,\s]+)?(?:please\s+)?fill\s+(?:it|this)(?:\s+(?:in|out|up))?(?:\s+for me)?\s*[.!]?$|\bauto-?fill\b",
+      lambda t, m, e: ("tab_form", {})),
+    R("orchestrator", r"^\s*(?:jarvis[,\s]+)?(?:remember\s+(?:that\s+)?)?my\s+(?P<k>full name|first name|last name|surname|name|email(?: address| id)?|e-mail|"
+                      r"phone(?: number)?|mobile(?: number)?|whatsapp(?: number)?|date of birth|dob|birthday|gender|address|pin ?code|zip(?: code)?|"
+                      r"district|state|country|nationality|school|college|university|course|degree|branch|department|class|roll number|"
+                      r"register number|registration number|father'?s name|mother'?s name|occupation|company|linkedin|github|website|age)\s+is\s+(?P<v>.+?)\s*[.!]?$",
+      lambda t, m, e: ("set_my_details", {"details": {m.group("k"): m.group("v")}})),
+    R("orchestrator", r"\b(?:what|which)\s+(?:of my\s+)?(?:details|information|info)\s+(?:do you have|have you (?:saved|got|stored))\b"
+                      r"|\b(?:show|list|tell me)\s+(?:me\s+)?my\s+(?:saved\s+)?details\b",
+      lambda t, m, e: ("my_details", {})),
     R("orchestrator", r"\b(?:weather|forecast|temperature outside|how (?:hot|cold) is it(?: outside)?|(?:is it|will it)(?: going to)? (?:rain|snow)|need an umbrella)\b", _weather),
     R("orchestrator", r"^\s*(?:please\s+)?(?:add|put)\s+(?P<items>.+?)\s+(?:to|on|in)\s+(?:my|the)\s+(?P<list>[a-z -]+?)\s*list\s*[.!]?$", _list("list_add")),
     R("orchestrator", r"^\s*(?:what(?:'s| is)\s+(?:on|in)|show(?: me)?|read(?: me| out)?|tell me|open)\s+(?:my|the)\s+(?P<list>[a-z -]+?)\s*list\s*\??$", _list("list_show")),
@@ -752,6 +765,9 @@ class OfflineProvider:
             if r["name"] == "repo_overview" and re.search(r"\bplan\b|\broadmap\b", question, re.I) and "create_plan" not in called_names and "create_plan" in available:
                 goal = _clean(question, r"^.*?\b(plan|roadmap)\b( for| to)?", r"\b(this|my|the|current) (project|repo|repository|codebase)\b")
                 return LLMResponse(tool_calls=[ToolCall(self._id(), "create_plan", {"title": f"Development plan: {Path(d['path']).name}", "steps": plan_steps(goal or "the next milestone", d)})])
+            if r["name"] == "tab_form" and d.get("proposal") and "tab_fill" not in called_names and "tab_fill" in available:
+                values = [{"id": v["id"], "label": v["label"], "value": v["value"]} for v in d["proposal"]]
+                return LLMResponse(tool_calls=[ToolCall(self._id(), "tab_fill", {"values": values})])
             if r["name"] == "web_search" and d.get("results") and "fetch_url" not in called_names and "fetch_url" in available:
                 return LLMResponse(tool_calls=[ToolCall(self._id(), "fetch_url", {"url": x["url"], "max_chars": 3000}) for x in d["results"][:2]])
 
@@ -766,6 +782,10 @@ class OfflineProvider:
             elif isinstance(d, dict) and d.get("status") == "pending_approval" and ta:
                 parts.append(f"இந்தச் செயல் உங்கள் கணினியில் மாற்றம் செய்யும், அதனால் உங்கள் அனுமதிக்காகக் காத்திருக்கிறது:\n\n> {d.get('preview', call.name).splitlines()[0]}\n\n"
                              f"அனுமதிக்க \"சரி\" என்று சொல்லுங்கள்; வேண்டாம் என்றால் \"வேண்டாம்\" (request `{d['approval_id']}`).")
+            elif isinstance(d, dict) and d.get("status") == "pending_approval" and call.name == "tab_fill":
+                lines = d.get("preview", "").splitlines()
+                parts.append(lines[0] + "\n" + "\n".join(lines[1:]) + "\n\nSay \"yes\" to fill them, or \"no\" to leave the form as it is "
+                             f"(request `{d['approval_id']}`). I won't press Submit.")
             elif isinstance(d, dict) and d.get("status") == "pending_approval":
                 parts.append(f"I've prepared this action, but it changes your system, so it's waiting for your approval:\n\n> {d.get('preview', call.name).splitlines()[0]}\n\n"
                              f"Approve or deny it on screen, or just say \"approve\" (request `{d['approval_id']}`).")
@@ -981,6 +1001,21 @@ def _and(items: list) -> str:
     return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1] if items else ""
 
 
+def _r_tab_form(d) -> str:
+    if not d["fields"]:
+        return f"I couldn't find a form to fill on \u201c{d['title'] or d['url']}\u201d."
+    head = f"The form on \u201c{d['title'] or d['url']}\u201d has {d['fields']} field(s)."
+    if not d["proposal"]:
+        head += " None of your saved details fit it yet - tell me, for example \"my email is ...\", and I'll remember them."
+    else:
+        head += f" I can fill {len(d['proposal'])} from your details."
+    if d.get("missing"):
+        head += f" I don't know: {_and(d['missing'][:8])}."
+    if d.get("sensitive_skipped"):
+        head += f" I'll leave {_and(d['sensitive_skipped'][:4])} to you."
+    return head
+
+
 def _r_timers(d, q, t):
     if not d["timers"]:
         return "You have no timers or alarms."
@@ -1163,6 +1198,16 @@ RENDERERS: dict[str, Callable] = {
     "list_remove": lambda d, q, t: (f"Removed {_and(d['removed'])} from your {d['list']} list." if d["removed"] else f"That wasn't on your {d['list']} list."),
     "list_clear": lambda d, q, t: f"Cleared your {d['list']} list.",
     "play_music": lambda d, q, t: f"Playing {d['playing']} on YouTube in your browser.",
+    "tab_form": lambda d, q, t: _r_tab_form(d),
+    "tab_fill": lambda d, q, t: (f"Filled {len(d['filled'])} field(s)" + (f"; couldn't fill {_and([x.get('label', '?') for x in d['skipped']])}" if d["skipped"] else "")
+                                 + ". Check them, then press Submit yourself when you're happy."),
+    "tab_read": lambda d, q, t: f"**{d['title']}** ({d['url']})\n\n{' '.join(d['text'].split())[:700]}",
+    "tab_click": lambda d, q, t: f"Clicked \u201c{d.get('clicked', '')}\u201d.",
+    "tab_scroll": lambda d, q, t: "Scrolled.",
+    "set_my_details": lambda d, q, t: ((f"Got it - I'll use your {_and(list(d['saved']))} when I fill forms." if d["saved"] else "")
+                                       + (f" I don't store {_and(d['refused'])}." if d["refused"] else "")).strip(),
+    "my_details": lambda d, q, t: ("Your saved details: " + "; ".join(f"{k}: {v}" for k, v in d["details"].items()) + "."
+                                   if d["details"] else "I haven't saved any of your details yet. Tell me, for example \"my email is ...\"."),
     "remember": lambda d, q, t: f"I'll remember that: \"{d['content']}\".",
     "recall": lambda d, q, t: ("Here's what I have:\n" + "\n".join(f"- {m['content']}" for m in d["memories"])) if d["memories"] else "I don't have anything stored about that.",
     "kb_ingest": lambda d, q, t: (f"Indexed {d.get('indexed')} document(s) into the '{d.get('space')}' space ({d.get('new_or_updated')} new or updated)." if "indexed" in d else f"\"{d['title']}\" is {d['status']}" + (f" ({d['chunks']} passages, space '{d['space']}')." if d.get("chunks") else ".")),

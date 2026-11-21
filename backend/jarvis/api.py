@@ -157,6 +157,30 @@ def create_app(jarvis: Jarvis | None = None) -> FastAPI:
         ok = j.voice.listen_now()
         return {"ok": ok, **({} if ok else {"reason": j.voice.available() or "the offline listener is not running"})}
 
+    @app.get("/api/connector")
+    async def connector_status():
+        """The browser extension's state, and the key to paste into it (shown in Settings to the signed-in UI only)."""
+        return {**j.connector.status(), "key": j.settings.connector_key(), "port": j.settings.port}
+
+    @app.get("/api/details")
+    async def get_details():
+        from .tools import tab
+
+        return {"details": tab.details(j), "fields": list(tab.DETAILS)}
+
+    @app.put("/api/details")
+    async def put_details(body: dict):
+        """The user's own edits in Settings (passwords, OTPs, card, bank and ID numbers are refused)."""
+        from .tools import tab
+
+        profile = dict(j.db.get_setting("profile", {}))
+        for key in [k for k in (body.get("details") or {}) if k in tab.DETAILS and not str(body["details"][k]).strip()]:
+            profile.pop(key, None)  # a cleared box forgets that detail
+        j.db.set_setting("profile", profile)
+        keep = {k: v for k, v in (body.get("details") or {}).items() if str(v).strip()}
+        result = tab.set_my_details(ctx(), keep) if keep else {"saved": {}, "refused": []}
+        return {**result, "details": tab.details(j)}
+
     @app.post("/api/voice/enroll")
     async def voice_enroll(lang: str = "en"):
         """"Teach JARVIS my voice" (Settings button): the owner says "Jarvis" 10 times after beeps; then it trains."""
@@ -662,6 +686,30 @@ def create_app(jarvis: Jarvis | None = None) -> FastAPI:
         finally:
             sender.cancel()
             j.bus.unsubscribe(queue)
+
+    @app.websocket("/ws/connector")
+    async def ws_connector(sock: WebSocket):
+        """The JARVIS Connector extension. Only a browser extension (its origin), only with the connector key."""
+        origin = sock.headers.get("origin", "")
+        ok_origin = origin.startswith(("chrome-extension://", "extension://", "moz-extension://"))
+        if (sock.headers.get("host", "").rsplit(":", 1)[0] not in allowed_hosts or not ok_origin
+                or not hmac.compare_digest(sock.query_params.get("key", ""), j.settings.connector_key())):
+            await sock.close(code=4401)
+            return
+        await sock.accept()
+        try:
+            hello = await asyncio.wait_for(sock.receive_json(), 10)
+            j.connector.attach(sock, hello if isinstance(hello, dict) else {})
+            j.bus.emit("connector.changed", **j.connector.status())
+            while True:
+                msg = await sock.receive_json()
+                if isinstance(msg, dict) and msg.get("type") != "ping":
+                    j.connector.deliver(msg)
+        except (WebSocketDisconnect, RuntimeError, asyncio.TimeoutError, ValueError):
+            pass
+        finally:
+            j.connector.detach(sock)
+            j.bus.emit("connector.changed", **j.connector.status())
 
     # -- frontend -------------------------------------------------------------------------------------
     if FRONTEND_DIST.is_dir():

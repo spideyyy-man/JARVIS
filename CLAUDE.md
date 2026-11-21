@@ -244,6 +244,30 @@ Since 2026-11-19 (Edge's online recogniser failed on the laptop with "Speech rec
   - Checked: real listener + fake microphone with every other wake path off: 10 enrolment calls recorded, trained in 97 s
     (threshold 0.889, held-out calls 0.998), "Jarvis" then woke it via `personal`, "Javascript is fun / Travis, come here /
     The service was nervous" did not. Stand-in voices only: the owner has not enrolled yet.
+- **JARVIS Connector: the owner's own browser** (2026-11-22, `extension/`, `connector.py`, `tools/tab.py`, `tests/test_connector.py`):
+  - Chrome 136+ ignores remote debugging on the everyday profile, so JARVIS reaches the owner's signed-in tabs through an
+    MV3 extension (Chrome/Edge, loaded unpacked - steps in `extension/README.md` and Settings > Browser connector). Its
+    service worker keeps a WebSocket to `ws://127.0.0.1:<port>/ws/connector?key=<connector key>` (separate key,
+    `settings.connector_key()`, `~/.jarvis/connector_key`; the socket also requires an extension origin) with a 20 s ping
+    and a 30 s alarm to reconnect. Commands run on the ACTIVE tab only via `chrome.scripting.executeScript` with the
+    self-contained functions in `extension/page.js` (read_page, read_form, fill, click, scroll).
+  - Tools: `tab_read`/`tab_form` (READ, untrusted output), `tab_fill` (CONFIRM, preview lists every field; never trust-
+    listed), `tab_click` (CONFIRM, never granted for a task), `tab_scroll`, `set_my_details`/`my_details`. Owned by the
+    orchestrator; lexical hints for flat mode. Rules: "fill this form"/"autofill"/"இந்த ஃபார்ம் ஃபில் பண்ணு" -> tab_form, chained
+    to tab_fill with the proposal (`offline` chain) - the reply shows every field and waits for "yes"; "my <detail> is X"
+    -> set_my_details; "what details do you have" -> my_details.
+  - Matching (`tab.propose`): autocomplete attribute, else the longest label phrase in `DETAILS` ("first name" beats "name");
+    dates to ISO for date inputs, options picked by text (`pick_option`), first/last name and age derived; filled fields
+    left alone; unknown required fields reported. Details live in the `profile` setting (shared with the weather city).
+  - Never filled or stored: passwords, OTPs, card/CVV/expiry, bank/IFSC/UPI, Aadhaar, PAN, passport, usernames (`tab.SENSITIVE`,
+    mirrored in `page.js`; checked in `_fill_preview`, `set_my_details`, the extension's fill, and `app.auto_memory`, which
+    used to remember "my password is ..."). Never submits: Submit is a separate `tab_click` that always asks.
+  - Fill uses the native value setter + input/change events (React/Angular see it), clicks radios/checkboxes, Google-Forms
+    style ARIA radiogroup/checkbox/listbox, contenteditable; filled fields flash a cyan outline.
+  - Checked for real: Playwright's Chromium with the unpacked extension against a throw-away JARVIS (rule engine) and a test
+    form: connected, "fill this form" in 0.6 s with the full preview, page untouched until "yes", then 9/9 fields right
+    (date, two selects, radio, ARIA radio; framework input events fired), password and card empty, Roll Number reported
+    missing, not submitted. Not checked: the owner's own Chrome/Edge, real Google Forms, sites with iframes or shadow DOM.
 - **Floating icon** (`overlay.py`, tkinter, its own `pythonw` process started by the desktop app with
   `--parent PID`): a 46 px always-on-top circle, coloured by state; hover (or click to pin) shows a panel from
   `GET /api/overlay` - now/heard/last exchange, approvals with Approve/Deny, activity (`EventBus.activity`,

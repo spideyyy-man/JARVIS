@@ -7,6 +7,7 @@ import { SPEECH_LANGUAGES } from "../wake";
 import { dateTime, setAllPages, setCore3D, useAllPages, useCore3D } from "../util";
 import { Loading, Panel, ScreenHead, StatusBadge, Switch } from "../components/Panel";
 import { hasWebGL, useReducedMotion } from "../components/AssistantCore";
+import { BrowserConnector } from "../components/BrowserConnector";
 
 function useVoices(): SpeechSynthesisVoice[] {
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
@@ -243,6 +244,7 @@ export function SettingsScreen() {
               </div>
             )}
           </Panel>
+          <BrowserConnector />
         </div>
 
         <Panel className="s12" title="Approval history" icon={<History size={14} />} testid="approval-history">

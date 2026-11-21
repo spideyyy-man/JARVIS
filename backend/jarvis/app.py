@@ -19,7 +19,8 @@ from .llm.base import FORCE_PROVIDER, LLMProvider, LLMRouter
 from .llm import offline as offline_mod
 from .llm.offline import Env, OfflineProvider, fast_talk, match_rules, with_context
 from .security import AuditLog, PathGuard
-from .tools import browser, coding, desktop, everyday, files, images, personal, research, system
+from .connector import ConnectorHub
+from .tools import browser, coding, desktop, everyday, files, images, personal, research, system, tab
 from .tools.registry import ToolExecutor, ToolRegistry, ToolResult
 from .translate import NLLB, Translator, language_of
 from .voice import build_voice
@@ -54,6 +55,7 @@ class Jarvis:
         self.mail_factory = None  # injectable for tests: (kind, config) -> IMAP/SMTP connection
         self.capture_screen = desktop.capture_screen  # injectable for tests
         self.browser = browser.BrowserSession(self)
+        self.connector = ConnectorHub()  # the JARVIS Connector extension in the owner's own browser
         self.proactive = Proactive(self)
         self.monitor = Monitor(self)
         self.automation = AutomationEngine(self)
@@ -69,6 +71,7 @@ class Jarvis:
         personal.register(self.tools, self)
         browser.register(self.tools, self)
         everyday.register(self.tools)
+        tab.register(self.tools)
         automation_mod.register(self.tools, self)
         agents_mod.register(self.tools, self)
         self.offline = OfflineProvider(Env(home=self.settings.allowed_roots[0], default_project=lambda: self.db.get_setting("default_project", ""),
@@ -357,6 +360,8 @@ class Jarvis:
                 continue
             if not any(p.search(s) for p in self._FACT_PATTERNS) or re.search(r"\bmy (computer|screen|clipboard|downloads?|documents?|desktop|project|repo|code|files?|folder|inbox|email|calendar)\b", s, re.I):
                 continue
+            if tab.SENSITIVE.search(s):
+                continue  # "my password is ..." / OTPs / card, bank, ID numbers are never remembered
             s = re.sub(r"^(by the way|btw|also|oh|and|fyi|just so you know)[,:\s]+", "", s, flags=re.I)
             existing = self.memory.recall(s, k=1, min_sim=0.6)
             if existing:

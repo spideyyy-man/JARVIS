@@ -53,6 +53,8 @@
   system status and processes, clipboard.
 - Screen and desktop control: read the screen (OCR), click and type by the words on screen (off until the user enables it).
 - Browser: its own Edge/Playwright browser to read and act on pages (off until enabled); websites open in the user's browser.
+- Your own browser (JARVIS Connector extension, Chrome/Edge): read the page you are on, "fill this form" from your saved
+  details after you say yes (never passwords/OTPs/card/ID numbers, never submits), click and scroll.
 - Research: web search (DuckDuckGo), fetch pages, a local knowledge base with hybrid retrieval.
 - Coding: repository overview, run tests, git status/commit (always asks), dev task list, plans.
 - Everyday: timers, alarms, weather (Open-Meteo), maths, unit conversion, lists, play music (YouTube search),

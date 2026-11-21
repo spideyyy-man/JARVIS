@@ -119,6 +119,14 @@ class Settings:
     def reports_dir(self) -> Path:
         return self.data_dir / "reports"
 
+    def connector_key(self) -> str:
+        """Key for the JARVIS Connector browser extension: it opens /ws/connector and nothing else."""
+        path = self.data_dir / "connector_key"
+        if not path.exists():
+            path.write_text("jc_" + secrets.token_urlsafe(24))
+            path.chmod(0o600)
+        return path.read_text().strip()
+
     def api_token(self) -> str:
         """Per-install token protecting the local API from other origins/processes."""
         env = os.environ.get("JARVIS_API_TOKEN")
