@@ -56,8 +56,12 @@ export function BrowserConnector() {
             <ol className="soft" style={{ margin: 0, paddingLeft: 18 }}>
               <li>Open <span className="num">edge://extensions</span> (or <span className="num">chrome://extensions</span>) and turn on Developer mode.</li>
               <li>Load unpacked → choose the <span className="num">extension</span> folder inside the JARVIS folder.</li>
-              <li>Click the extension's icon, paste the key below, Save.</li>
+              <li>JARVIS then asks you to approve the browser - on the JARVIS icon (amber) or under Approvals. Approve once.</li>
             </ol>
+            {conn.data.last_attempt && (
+              <p className="soft" data-testid="connector-attempt">Last attempt {conn.data.last_attempt.at}: {conn.data.last_attempt.result}</p>
+            )}
+            <details><summary className="soft">Advanced: connect with a key instead</summary>
             <div className="row" style={{ gap: 6 }}>
               <input className="input grow num" readOnly value={shown ? conn.data.key : "•".repeat(20)} data-testid="connector-key" />
               <button type="button" className="btn" onClick={() => setShown((v) => !v)}>{shown ? "Hide" : "Show"}</button>
@@ -66,6 +70,7 @@ export function BrowserConnector() {
                 {copied ? "Copied" : "Copy"}
               </button>
             </div>
+            </details>
             <button type="button" className="btn" onClick={conn.reload}>Check connection</button>
           </div>
         )}

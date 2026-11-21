@@ -268,6 +268,16 @@ Since 2026-11-19 (Edge's online recogniser failed on the laptop with "Speech rec
     form: connected, "fill this form" in 0.6 s with the full preview, page untouched until "yes", then 9/9 fields right
     (date, two selects, radio, ARIA radio; framework input events fired), password and card empty, Roll Number reported
     missing, not submitted. Not checked: the owner's own Chrome/Edge, real Google Forms, sites with iframes or shadow DOM.
+  - "It did not!" (2026-11-22): the extension never connected (no key pasted / not installed) and the owner's words ("complete
+    the test in my current window", "complete the questions in the browser", "fill my details here") reached no rule. Now:
+    pairing without a key - the extension opens `/ws/connector?pair=1`, JARVIS queues the CONFIRM tool `connector_pair` (actor
+    `connector`, never granted) and says "A browser extension ... wants to connect"; approved -> the socket receives
+    `{"type": "paired", "key"}` and the extension reconnects with it; denied -> `{"type": "denied"}`. A key that stops working
+    (4401) is forgotten and the extension pairs again. Every attempt is recorded (`ConnectorHub.attempts`, shown in Settings).
+    The fill rule takes complete/fill/finish/do/answer + form/details/fields/questions/test/quiz/survey; "can you see my
+    screen" -> screen_read. Tests and quizzes: JARVIS fills the owner's details but does not answer the questions (said in
+    the reply). Browser test repeated with pairing: paired, then 9/9 fields, not submitted. The test extension first tries
+    port 8765 (the real JARVIS): `connector_e2e/run_e2e.py` withdraws any pairing request it leaves there.
 - **Floating icon** (`overlay.py`, tkinter, its own `pythonw` process started by the desktop app with
   `--parent PID`): a 46 px always-on-top circle, coloured by state; hover (or click to pin) shows a panel from
   `GET /api/overlay` - now/heard/last exchange, approvals with Approve/Deny, activity (`EventBus.activity`,

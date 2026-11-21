@@ -692,11 +692,56 @@ def create_app(jarvis: Jarvis | None = None) -> FastAPI:
         """The JARVIS Connector extension. Only a browser extension (its origin), only with the connector key."""
         origin = sock.headers.get("origin", "")
         ok_origin = origin.startswith(("chrome-extension://", "extension://", "moz-extension://"))
-        if (sock.headers.get("host", "").rsplit(":", 1)[0] not in allowed_hosts or not ok_origin
-                or not hmac.compare_digest(sock.query_params.get("key", ""), j.settings.connector_key())):
+        key_ok = hmac.compare_digest(sock.query_params.get("key", ""), j.settings.connector_key())
+        pair = sock.query_params.get("pair") == "1" and not sock.query_params.get("key")
+        if sock.headers.get("host", "").rsplit(":", 1)[0] not in allowed_hosts or not ok_origin or not (key_ok or pair):
+            j.connector.attempt("refused: " + ("not from a browser extension" if not ok_origin else "wrong key - pair again"), origin)
             await sock.close(code=4401)
             return
         await sock.accept()
+        if not key_ok:  # pairing: the user approves this extension once, then it receives the key
+            if j.connector.status()["pairing"]:
+                await sock.send_json({"type": "busy"})
+                await sock.close()
+                return
+            hello = {}
+            try:
+                hello = await asyncio.wait_for(sock.receive_json(), 10)
+            except (WebSocketDisconnect, RuntimeError, asyncio.TimeoutError, ValueError):
+                pass
+            browser = str(hello.get("browser", ""))
+            name = "Edge" if "Edg/" in browser else "Chrome" if "Chrome/" in browser else "your browser"
+            fut = j.connector.pairing_future(origin)
+            j.connector.attempt("pairing - waiting for your approval", origin)
+            res = await j.executor.call("connector_pair", {"extension": origin, "browser": name}, ToolContext(j, agent="user", actor="connector"))
+            if j.voice.speaker and j.voice.listener:
+                j.voice.say_aloud(f"A browser extension in {name} wants to connect. Approve it on the JARVIS icon.")
+            async def decided() -> bool:
+                """Approved (the tool ran) or denied (the approval says so) - whichever comes first."""
+                while True:
+                    if fut.done():
+                        return bool(fut.result())
+                    ap = j.db.one("SELECT status FROM approvals WHERE id=?", (res.approval_id,)) if res.approval_id else None
+                    if ap and ap["status"] in ("denied", "expired"):
+                        return False
+                    await asyncio.sleep(0.5)
+
+            try:
+                allowed = bool(res.ok and await asyncio.wait_for(decided(), 300))
+                await sock.send_json({"type": "paired", "key": j.settings.connector_key()} if allowed else {"type": "denied"})
+                j.connector.attempt("paired" if allowed else "pairing denied", origin)
+            except (asyncio.TimeoutError, WebSocketDisconnect, RuntimeError):
+                j.connector.attempt("pairing not approved in time", origin)
+            finally:
+                j.connector.end_pairing(origin)
+                if res.approval_id:  # a pairing nobody answered is withdrawn
+                    j.db.execute("UPDATE approvals SET status='expired' WHERE id=? AND status='pending'", (res.approval_id,))
+                try:
+                    await sock.close()
+                except RuntimeError:
+                    pass
+            return
+        j.connector.attempt("connected", origin)
         try:
             hello = await asyncio.wait_for(sock.receive_json(), 10)
             j.connector.attach(sock, hello if isinstance(hello, dict) else {})

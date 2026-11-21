@@ -6,6 +6,11 @@ const DEFAULTS = { port: 8765, key: "" };
 let ws = null;
 let backoff = 1000;
 let retry = null;
+let pairingDenied = false;
+
+chrome.runtime.onMessage.addListener((msg) => {  // "Connect again" in the popup
+  if (msg && msg.type === "reconnect") { pairingDenied = false; backoff = 1000; if (ws) ws.close(); connect(); }
+});
 
 async function settings() {
   return { ...DEFAULTS, ...(await chrome.storage.local.get(["port", "key"])) };
@@ -20,20 +25,24 @@ async function setStatus(status) {
 async function connect() {
   if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return;
   const s = await settings();
-  if (!s.key) { await setStatus("no key - paste it from JARVIS Settings"); return; }
+  const pairing = !s.key; // no key yet: ask JARVIS to pair - the user approves it once in JARVIS
   try {
-    ws = new WebSocket(`ws://127.0.0.1:${s.port}/ws/connector?key=${encodeURIComponent(s.key)}`);
+    ws = new WebSocket(pairing ? `ws://127.0.0.1:${s.port}/ws/connector?pair=1`
+                               : `ws://127.0.0.1:${s.port}/ws/connector?key=${encodeURIComponent(s.key)}`);
   } catch (e) {
     await setStatus("cannot connect"); scheduleRetry(); return;
   }
   ws.onopen = async () => {
     backoff = 1000;
+    await setStatus(pairing ? "waiting - approve it on the JARVIS icon or in the JARVIS window" : "connected");
     ws.send(JSON.stringify({ type: "hello", browser: navigator.userAgent, version: chrome.runtime.getManifest().version }));
-    await setStatus("connected");
   };
   ws.onmessage = async (ev) => {
     let msg;
     try { msg = JSON.parse(ev.data); } catch { return; }
+    if (msg && msg.type === "paired" && msg.key) { await chrome.storage.local.set({ key: msg.key }); return; } // reconnects with the key
+    if (msg && msg.type === "denied") { pairingDenied = true; await setStatus("JARVIS said no - click 'Connect again' to ask again"); return; }
+    if (msg && msg.type === "busy") { await setStatus("another browser is pairing - try again in a minute"); return; }
     if (!msg || typeof msg.id === "undefined") return;
     let reply;
     try {
@@ -45,7 +54,13 @@ async function connect() {
   };
   ws.onclose = async (ev) => {
     ws = null;
-    await setStatus(ev.code === 4401 ? "key refused - copy it again from JARVIS Settings" : "JARVIS is not running");
+    if (ev.code === 4401) {  // the saved key is no longer valid: forget it and pair again
+      await chrome.storage.local.remove("key");
+      return;
+    }
+    if (pairingDenied) return;  // asked and refused: wait for the user to click "Connect again"
+    const st = (await chrome.storage.local.get("status")).status || "";
+    if (!st.startsWith("JARVIS said no")) await setStatus("JARVIS is not running (start it, then this connects by itself)");
     scheduleRetry();
   };
   ws.onerror = () => {};
@@ -60,7 +75,7 @@ function scheduleRetry() {
 // an open socket that exchanges messages keeps the service worker alive; the alarm wakes it if it was stopped
 setInterval(() => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "ping" })); }, 20000);
 chrome.alarms.create("jarvis-connect", { periodInMinutes: 0.5 });
-chrome.alarms.onAlarm.addListener(() => connect());
+chrome.alarms.onAlarm.addListener(() => { if (!pairingDenied) connect(); });
 chrome.runtime.onStartup.addListener(() => connect());
 chrome.runtime.onInstalled.addListener(() => connect());
 chrome.storage.onChanged.addListener((changes) => {

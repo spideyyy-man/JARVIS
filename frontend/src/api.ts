@@ -201,7 +201,8 @@ export const api = {
   cancelChat: (id: string) => req<{ cancelled: boolean }>("POST", `/api/chat/${enc(id)}/cancel`),
   voiceListen: () => req<{ ok: boolean; reason?: string }>("POST", "/api/voice/listen"),
   voiceEnroll: () => req<{ ok: boolean; message: string }>("POST", "/api/voice/enroll"),
-  connector: () => req<{ connected: boolean; browser: string; version: string; key: string; port: number }>("GET", "/api/connector"),
+  connector: () => req<{ connected: boolean; browser: string; version: string; key: string; port: number; pairing: boolean;
+                         last_attempt: { at: string; result: string; origin: string } | null }>("GET", "/api/connector"),
   details: () => req<{ details: Record<string, string>; fields: string[] }>("GET", "/api/details"),
   putDetails: (details: Record<string, string>) =>
     req<{ details: Record<string, string>; refused: string[] }>("PUT", "/api/details", { details }),

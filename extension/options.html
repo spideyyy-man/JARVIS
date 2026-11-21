@@ -7,23 +7,29 @@
     :root { color-scheme: dark; }
     body { font: 13px/1.45 system-ui, "Segoe UI", sans-serif; background: #0b1120; color: #e2e8f0; margin: 0; padding: 16px; width: 340px; }
     h1 { font-size: 15px; margin: 0 0 4px; color: #22d3ee; }
-    p { color: #94a3b8; margin: 4px 0 12px; }
+    p { color: #94a3b8; margin: 4px 0 10px; }
     label { display: block; font-size: 12px; color: #94a3b8; margin: 10px 0 4px; }
     input { width: 100%; box-sizing: border-box; background: #111a2e; border: 1px solid #1e293b; color: #e2e8f0; border-radius: 8px; padding: 7px 9px; font: inherit; }
-    button { margin-top: 12px; background: #0891b2; color: #fff; border: 0; border-radius: 8px; padding: 7px 14px; font: inherit; cursor: pointer; }
-    #status { margin-top: 12px; padding: 8px 10px; border-radius: 8px; background: #111a2e; }
+    button { margin-top: 10px; background: #0891b2; color: #fff; border: 0; border-radius: 8px; padding: 7px 14px; font: inherit; cursor: pointer; }
+    #status { margin: 10px 0 0; padding: 9px 11px; border-radius: 8px; background: #111a2e; font-weight: 600; }
     .ok { color: #4ade80; } .bad { color: #fbbf24; }
+    details { margin-top: 14px; color: #94a3b8; }
   </style>
 </head>
 <body>
   <h1>JARVIS Connector</h1>
   <p>Lets JARVIS on this computer read the page you are on and fill forms after you approve. It never fills passwords, OTPs, card or ID numbers, and never presses Submit on its own.</p>
-  <label for="key">Connector key (JARVIS &gt; Settings &gt; Browser connector)</label>
-  <input id="key" type="password" autocomplete="off" placeholder="jc_..." />
-  <label for="port">JARVIS port</label>
-  <input id="port" type="number" min="1" max="65535" />
-  <button id="save">Save and connect</button>
   <div id="status">…</div>
+  <button id="again">Connect again</button>
+  <p style="margin-top:12px">First time: JARVIS asks you to approve this browser - on the JARVIS icon (amber) or in the JARVIS window. Then say "Jarvis, fill this form" on any form.</p>
+  <details>
+    <summary>Advanced</summary>
+    <label for="key">Connector key (instead of approving)</label>
+    <input id="key" type="password" autocomplete="off" placeholder="jc_..." />
+    <label for="port">JARVIS port</label>
+    <input id="port" type="number" min="1" max="65535" />
+    <button id="save">Save</button>
+  </details>
   <script src="options.js"></script>
 </body>
 </html>

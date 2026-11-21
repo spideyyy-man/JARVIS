@@ -178,3 +178,77 @@ def test_connector_socket_needs_an_extension_origin_and_the_key(jarvis):
         r = c.put("/api/details", headers=h, json={"details": {"phone": ""}}).json()
         assert "phone" not in r["details"]
         assert c.put("/api/details", headers=h, json={"details": {"password": "x"}}).status_code == 403
+
+
+# -- pairing without copying a key, and the owner's own phrasings (2026-11-22: "it did not!") -------------------------------
+def _pair(jarvis, approve: bool):
+    from fastapi.testclient import TestClient
+
+    from jarvis.api import create_app
+
+    with TestClient(create_app(jarvis)) as c:
+        h = {"Authorization": f"Bearer {jarvis.settings.api_token()}"}
+        with c.websocket_connect("/ws/connector?pair=1", headers={"origin": "chrome-extension://abc"}) as ws:
+            ws.send_json({"type": "hello", "browser": "Mozilla/5.0 ... Edg/140.0", "version": "1.0.0"})
+            ap = None
+            for _ in range(100):
+                aps = [a for a in c.get("/api/approvals", headers=h).json() if a["tool"] == "connector_pair"]
+                if aps:
+                    ap = aps[0]
+                    break
+            assert ap and "Edge" in ap["preview"] and "each fill still asks you first" in ap["preview"]
+            assert c.post(f"/api/approvals/{ap['id']}/decide", headers=h, json={"approve": approve}).status_code == 200
+            msg = ws.receive_json()
+        return msg, c.get("/api/connector", headers=h).json()
+
+
+def test_an_extension_pairs_once_the_user_approves(jarvis):
+    msg, status = _pair(jarvis, True)
+    assert msg == {"type": "paired", "key": jarvis.settings.connector_key()} and status["last_attempt"]["result"] == "paired"
+
+
+def test_a_denied_pairing_gives_no_key(jarvis):
+    msg, status = _pair(jarvis, False)
+    assert msg == {"type": "denied"} and status["last_attempt"]["result"] == "pairing denied"
+
+
+def test_refused_connections_are_recorded_for_settings(jarvis):
+    from fastapi.testclient import TestClient
+    from starlette.websockets import WebSocketDisconnect
+
+    from jarvis.api import create_app
+
+    with TestClient(create_app(jarvis)) as c:
+        with pytest.raises(WebSocketDisconnect):
+            with c.websocket_connect("/ws/connector?key=old", headers={"origin": "chrome-extension://abc"}) as ws:
+                ws.receive_json()
+        st = c.get("/api/connector", headers={"Authorization": f"Bearer {jarvis.settings.api_token()}"}).json()
+        assert "wrong key" in st["last_attempt"]["result"]
+
+
+@pytest.mark.parametrize("text", ["i want you to complete the test in my current window", "Can you complete the questions in the browser?",
+                                  "fill the details in the browser", "fill up this page", "fill my details here", "do this survey for me"])
+def test_the_owners_own_ways_of_asking_reach_the_form(text):
+    assert match_rules(text, ENV)[1] == ("tab_form", {})
+
+
+@pytest.mark.parametrize("text", ["what is a form factor", "write me a poem", "complete the sentence: the sky is", "what is the capital of France"])
+def test_other_requests_are_left_alone(text):
+    hit = match_rules(text, ENV)
+    assert not hit or hit[1][0] != "tab_form"
+
+
+def test_can_you_see_my_screen_reads_it():
+    assert match_rules("can you see my current screen", ENV)[1] == ("screen_read", {})
+
+
+def test_test_questions_are_not_answered_only_details_filled(home, tmp_path):
+    j = _jarvis_with_browser(home, tmp_path, FORM, [])
+    r = run(j.chat("Can you complete the questions in the browser?"))
+    assert "don't answer the test questions" in r["text"] and "Email address: ravi@example.com" in r["text"]
+    j.db.close()
+
+
+def test_not_connected_says_how_to_connect(jarvis):
+    r = run(jarvis.chat("fill this form"))
+    assert "not connected" in r["text"]

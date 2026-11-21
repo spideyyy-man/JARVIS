@@ -7,8 +7,9 @@ Lets JARVIS on this computer read the page you are on and fill forms in your own
 1. Open `edge://extensions` (Edge) or `chrome://extensions` (Chrome).
 2. Turn on **Developer mode**.
 3. **Load unpacked** → choose this `extension` folder.
-4. Click the extension's icon (pin it from the puzzle-piece menu), paste the key from
-   **JARVIS > Settings > Browser connector**, and press **Save and connect**. It shows "Connected to JARVIS".
+4. JARVIS asks you to approve this browser (the JARVIS icon turns amber; also under Approvals in the JARVIS window).
+   Approve it once - the extension then connects by itself. Its icon shows "Connected to JARVIS".
+   (Advanced: you can paste the key from JARVIS > Settings > Browser connector instead.)
 
 ## Use
 

@@ -25,13 +25,34 @@ class ConnectorHub:
         self._pending: dict[int, asyncio.Future] = {}
         self._ids = itertools.count(1)
         self.connected_at = 0.0
+        self.attempts: list[dict] = []  # the last connection attempts and how they ended (shown in Settings)
+        self._pairing: dict[str, asyncio.Future] = {}  # extension origin -> approved?
 
     def connected(self) -> bool:
         return self._sock is not None
 
     def status(self) -> dict:
         return {"connected": self.connected(), "browser": self.info.get("browser", ""), "version": self.info.get("version", ""),
-                "since": self.connected_at or None}
+                "since": self.connected_at or None, "last_attempt": self.attempts[-1] if self.attempts else None,
+                "pairing": bool(self._pairing)}
+
+    def attempt(self, result: str, origin: str = "") -> None:
+        self.attempts = (self.attempts + [{"at": time.strftime("%H:%M:%S"), "result": result, "origin": origin[:60]}])[-10:]
+
+    def pairing_future(self, origin: str) -> asyncio.Future:
+        fut = asyncio.get_running_loop().create_future()
+        self._pairing[origin] = fut
+        return fut
+
+    def end_pairing(self, origin: str) -> None:
+        self._pairing.pop(origin, None)
+
+    def answer_pairing(self, origin: str, allowed: bool) -> bool:
+        fut = self._pairing.get(origin)
+        if fut is None or fut.done():
+            return False
+        fut.set_result(allowed)
+        return True
 
     def attach(self, sock, hello: dict) -> None:
         """A newer connection replaces an older one (only one browser is driven)."""

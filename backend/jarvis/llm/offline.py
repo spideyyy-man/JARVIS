@@ -505,9 +505,14 @@ EVERYDAY_RULES = [
     R("orchestrator", r"^\s*(?:set|change|update)\s+my\s+(?:home\s+)?(?:city|location|town)\s+to\s+(?P<c>.+?)\s*[.!]?$|^\s*my\s+(?:home\s+)?(?:city|town|location)\s+is\s+(?P<c2>.+?)\s*[.!]?$",
       lambda t, m, e: ("set_home_city", {"city": m.group("c") or m.group("c2")})),
     # the owner's own browser tab (Connector extension): read the form, then a fill proposal they approve
-    R("orchestrator", r"\b(?:fill|complete)\s+(?:in\s+|out\s+|up\s+)?(?:this|the|that|my|current)?\s*(?:form|application|registration|sign ?up)\b"
-                      r"|^\s*(?:jarvis[,\s]+)?(?:please\s+)?fill\s+(?:it|this)(?:\s+(?:in|out|up))?(?:\s+for me)?\s*[.!]?$|\bauto-?fill\b",
+    R("orchestrator", r"\b(?:fill|complete|finish|do|answer)\s+(?:in\s+|out\s+|up\s+)?(?:all\s+)?(?:of\s+)?(?:this|the|that|my|these|those|current)?\s*"
+                      r"(?:form|application|registration|sign ?up|details|fields|questions|test|quiz|survey)s?\b"
+                      r"|^\s*(?:jarvis[,\s]+)?(?:please\s+)?fill\s+(?:it|this|this page|the page|everything)(?:\s+(?:in|out|up))?\b.*$"
+                      r"|^\s*(?:jarvis[,\s]+)?(?:please\s+)?fill\s+(?:up|in|out)\s+(?:this|the)\s+(?:page|form)\b.*$|\bauto-?fill\b"
+                      r"|\bfill\s+(?:up\s+|in\s+)?(?:my\s+)?details\b",
       lambda t, m, e: ("tab_form", {})),
+    R("computer", r"\b(?:can|do)\s+you\s+see\s+(?:my|the|what'?s on my)\s+(?:current\s+)?(?:screen|window|page)\b|\blook at my screen\b",
+      lambda t, m, e: ("screen_read", {})),
     R("orchestrator", r"^\s*(?:jarvis[,\s]+)?(?:remember\s+(?:that\s+)?)?my\s+(?P<k>full name|first name|last name|surname|name|email(?: address| id)?|e-mail|"
                       r"phone(?: number)?|mobile(?: number)?|whatsapp(?: number)?|date of birth|dob|birthday|gender|address|pin ?code|zip(?: code)?|"
                       r"district|state|country|nationality|school|college|university|course|degree|branch|department|class|roll number|"
@@ -1001,7 +1006,13 @@ def _and(items: list) -> str:
     return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1] if items else ""
 
 
-def _r_tab_form(d) -> str:
+def _r_tab_form(d, q: str = "") -> str:
+    note = (" I fill in your details on tests and quizzes, but I don't answer the test questions for you."
+            if re.search(r"\b(?:test|quiz|exam|questions?|answers?)\b", q or "", re.I) else "")
+    return _r_tab_form_body(d) + note
+
+
+def _r_tab_form_body(d) -> str:
     if not d["fields"]:
         return f"I couldn't find a form to fill on \u201c{d['title'] or d['url']}\u201d."
     head = f"The form on \u201c{d['title'] or d['url']}\u201d has {d['fields']} field(s)."
@@ -1198,7 +1209,7 @@ RENDERERS: dict[str, Callable] = {
     "list_remove": lambda d, q, t: (f"Removed {_and(d['removed'])} from your {d['list']} list." if d["removed"] else f"That wasn't on your {d['list']} list."),
     "list_clear": lambda d, q, t: f"Cleared your {d['list']} list.",
     "play_music": lambda d, q, t: f"Playing {d['playing']} on YouTube in your browser.",
-    "tab_form": lambda d, q, t: _r_tab_form(d),
+    "tab_form": lambda d, q, t: _r_tab_form(d, q),
     "tab_fill": lambda d, q, t: (f"Filled {len(d['filled'])} field(s)" + (f"; couldn't fill {_and([x.get('label', '?') for x in d['skipped']])}" if d["skipped"] else "")
                                  + ". Check them, then press Submit yourself when you're happy."),
     "tab_read": lambda d, q, t: f"**{d['title']}** ({d['url']})\n\n{' '.join(d['text'].split())[:700]}",

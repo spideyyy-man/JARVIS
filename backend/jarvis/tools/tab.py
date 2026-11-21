@@ -222,6 +222,13 @@ def my_details(ctx: ToolContext) -> dict:
     return {"details": {SAY[k]: v for k, v in details(ctx.app).items()}}
 
 
+def connector_pair(ctx: ToolContext, extension: str, browser: str = "") -> dict:
+    """Runs only when the user approves: lets this extension (its origin) receive the connector key."""
+    if not ctx.app.connector.answer_pairing(extension, True):
+        raise ValueError("that browser is no longer waiting - click the extension's icon to try again")
+    return {"paired": True, "browser": browser}
+
+
 def register(reg: ToolRegistry) -> None:
     S = {"type": "string"}
     reg.register(Tool("tab_read", "Read the page open in the user's own browser (the active tab): title, address and text.", {}, tab_read,
@@ -239,3 +246,7 @@ def register(reg: ToolRegistry) -> None:
     reg.register(Tool("set_my_details", "Remember the user's details for filling forms, e.g. {\"email\": \"...\", \"phone\": \"...\"}. "
                       "Never passwords, OTPs, card, bank or ID numbers.", {"details": {"type": "object"}}, set_my_details, required=["details"]))
     reg.register(Tool("my_details", "The details JARVIS has saved for filling forms.", {}, my_details))
+    reg.register(Tool("connector_pair", "Internal: a browser extension asks to connect (only the user can approve).",
+                      {"extension": S, "browser": S}, connector_pair, required=["extension"], level=Level.CONFIRM, grantable=False,
+                      preview=lambda a: f"Let the JARVIS Connector extension in {a.get('browser') or 'your browser'} connect to JARVIS. "
+                                        "It can then read the page you are on and fill forms - each fill still asks you first."))
