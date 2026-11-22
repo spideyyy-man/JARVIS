@@ -93,7 +93,8 @@ FAST_TEXT_LANGUAGES = {"en"}
 # still comes out empty (no invented words).
 VOCABULARY = ("JARVIS, what time is it? Open Notepad, Claude, Chrome, Google, YouTube. Create a file, a folder, on my Desktop, "
               "Documents, Downloads. index.html, notes.txt, hi.txt. Search the web. Volume, brightness. Remind me. Delete, rename, move. "
-              "Can you talk in Tamil? Weather, timer, alarm. Maths exam, accountancy, business studies project. Browser control.")
+              "Can you talk in Tamil? Weather, timer, alarm. Maths exam, accountancy, business studies project. Browser control. "
+              "Fill this form. Set up the browser connector.")  # "Fill this form" was heard as "Film this phone" (2026-11-22)
 # "talk in Tamil" was heard as "dock in the mill", "maths exam" as "Maxx exam" (2026-11-20)
 # English is decoded with beam search (5 candidates): 2.8% -> 2.3% word errors on the Indian-English test clips for ~8% more
 # time, and on the owner's recordings "I'm glad to go" -> "I'm not going to let it go", "Ejaris" -> "Hey JARVIS" (2026-11-21)

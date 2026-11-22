@@ -278,6 +278,15 @@ Since 2026-11-19 (Edge's online recogniser failed on the laptop with "Speech rec
     screen" -> screen_read. Tests and quizzes: JARVIS fills the owner's details but does not answer the questions (said in
     the reply). Browser test repeated with pairing: paired, then 9/9 fields, not submitted. The test extension first tries
     port 8765 (the real JARVIS): `connector_e2e/run_e2e.py` withdraws any pairing request it leaves there.
+  - "There is no request and JARVIS said it can't" (2026-11-22): the extension was not installed in any browser profile
+    (no unpacked extension in Edge or the 9 Chrome profiles), and "Fill this form" was heard as "Film this phone". Now
+    "set up the browser connector" / "connect my browser" (`app.SETUP_CONNECTOR`, the user's words only) opens the default
+    browser's extensions page (`connector.default_browser`, registry UserChoice), shows the `extension` folder in Explorer
+    and puts its path on the clipboard (`connector.open_setup`), then says the two clicks left. A tab tool used while not
+    connected answers "Your browser isn't connected to me yet. Say 'set up the browser connector'..." (`NOT_CONNECTED`).
+    "Fill this form. Set up the browser connector." added to `VOCABULARY`; whole-utterance mishearings (film/feel this
+    phone/form) route to tab_form. Checked: the extension loads in the installed Edge 158 (Playwright `channel="msedge"`,
+    throw-away profile) and pairs at once - that test reached the real JARVIS, so withdraw its pairing request afterwards.
 - **Floating icon** (`overlay.py`, tkinter, its own `pythonw` process started by the desktop app with
   `--parent PID`): a 46 px always-on-top circle, coloured by state; hover (or click to pin) shows a panel from
   `GET /api/overlay` - now/heard/last exchange, approvals with Approve/Deny, activity (`EventBus.activity`,

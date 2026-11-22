@@ -32,6 +32,10 @@ AFFIRM = re.compile(r"^\s*(hey\s+)?((jarvis|ஜார்விஸ்)[,\s]+)?(ye
 DENY = re.compile(r"^\s*(hey\s+)?((jarvis|ஜார்விஸ்)[,\s]+)?(no|nope|deny|denied|cancel( it| that)?|don'?t|stop|abort"
                   r"|வேண்டாம்|வேணாம்|இல்லை|இல்ல|ரத்து\s*(செய்|பண்ணு)?\S*)[\s.!]*$", re.I)  # Tamil: don't / no / cancel (written and spoken)
 # "learn my voice" / "train my voice" / "teach you my voice" / என் குரலைக் கத்துக்கோ: record the owner's "Jarvis" for their wake model
+# "set up the browser connector" / "connect my browser" / "install the extension": open what the owner needs to install it
+SETUP_CONNECTOR = re.compile(r"\b(?:set\s*up|install|connect|add|enable|pair)\s+(?:the\s+|my\s+|your\s+)?(?:jarvis\s+)?"
+                             r"(?:browser(?:\s+(?:connector|extension))?|connector|extension)\b"
+                             r"|(?:பிரவுசர|ப்ரவுசர|browser)\S*\s*.{0,12}?(?:கனெக்ட்|இணை|connect)", re.I)
 LEARN_VOICE = re.compile(r"\b(?:learn|train|teach\s+(?:you|jarvis))\s+(?:on\s+)?my\s+voice\b|\brecogni[sz]e\s+my\s+voice\b|\bvoice\s+(?:training|enrol+ment)\b"
                          r"|(?:என்|என்னோட|என்னுடைய)\s*குரல\S*\s*(?:கத்து|கற்று|பழகு|தெரிஞ்சு)", re.I)
 HISTORY_CHAR_BUDGET = 16_000
@@ -270,6 +274,8 @@ class Jarvis:
                 reply = (f"Approved {len(done)} action(s). I won't ask again for {', '.join(sorted(set(done)))} during this task (30 minutes)." if done else "") + \
                         (f" {', '.join(sorted(set(refused)))} must be approved one at a time - still waiting on that." if refused else "")
                 return self._finish(conversation_id, reply.strip(), {"provider": "policy"})
+        if actor == "chat" and SETUP_CONNECTOR.search(text):
+            return self._finish(conversation_id, self.setup_connector(), {"provider": "policy", "connector_setup": True})
         if actor == "chat" and LEARN_VOICE.search(text):
             # "learn my voice": only the user's own words start a recording session (never a tool or a web page)
             lang = "ta" if re.search(r"[஀-௿]", text) else "en"
@@ -347,6 +353,21 @@ class Jarvis:
         r"\bmy name is\s+[A-Z][\w\-]+", r"\bcall me\s+\w+", r"\bI(?:'m| am) (?:a|an)\s+\w+", r"\bI (?:work|am working) (?:at|on|for|as|in)\s+\w+",
         r"\bI (?:really |usually |always |never |mostly )?(?:prefer|like|love|hate|dislike|use|avoid|want you to)\s+\w+", r"\bI (?:always|never|usually)\s+\w+",
         r"\bmy (?:\w+ ){0,2}(?:is|are)\s+\w+", r"\bI live in\s+\w+", r"\bdon'?t (?:ever )?(?:call|use|send|show)\b")]
+
+    def setup_connector(self) -> str:
+        """Open the default browser's extensions page and the extension folder (path on the clipboard), and say the rest."""
+        from .connector import open_setup
+
+        if self.connector.connected():
+            return "Your browser is already connected to me. Open a form and say \"fill this form\"."
+        try:
+            info = open_setup()
+        except Exception as e:  # noqa: BLE001
+            return f"I couldn't open the setup pages ({type(e).__name__}). The extension is in {Path(__file__).resolve().parents[2] / 'extension'}."
+        name = "Edge" if info["browser"] == "edge" else "Chrome"
+        return (f"I've opened {name}'s extensions page and the JARVIS folder, and put the extension folder's path on your clipboard. "
+                f"In {name}: turn on Developer mode, click Load unpacked, paste the path and choose Select folder. "
+                "Then approve the request on my icon - after that, say \"fill this form\" on any form.")
 
     def auto_memory(self, text: str) -> list[str]:
         """Learn durable facts the user states in passing ("I prefer dark mode", "my manager is Priya").

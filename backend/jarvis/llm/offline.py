@@ -509,7 +509,8 @@ EVERYDAY_RULES = [
                       r"(?:form|application|registration|sign ?up|details|fields|questions|test|quiz|survey)s?\b"
                       r"|^\s*(?:jarvis[,\s]+)?(?:please\s+)?fill\s+(?:it|this|this page|the page|everything)(?:\s+(?:in|out|up))?\b.*$"
                       r"|^\s*(?:jarvis[,\s]+)?(?:please\s+)?fill\s+(?:up|in|out)\s+(?:this|the)\s+(?:page|form)\b.*$|\bauto-?fill\b"
-                      r"|\bfill\s+(?:up\s+|in\s+)?(?:my\s+)?details\b",
+                      r"|\bfill\s+(?:up\s+|in\s+)?(?:my\s+)?details\b"
+                      r"|^\s*(?:jarvis[,\s]+)?(?:please\s+)?(?:film|feel|phil|fil)\s+(?:this|the|that)\s+(?:form|forum|phone|foam|farm|from)\s*[.!?]*$",
       lambda t, m, e: ("tab_form", {})),
     R("computer", r"\b(?:can|do)\s+you\s+see\s+(?:my|the|what'?s on my)\s+(?:current\s+)?(?:screen|window|page)\b|\blook at my screen\b",
       lambda t, m, e: ("screen_read", {})),
@@ -835,6 +836,9 @@ def render_error(tool: str, d) -> str:
     err = d.get("error") if isinstance(d, dict) else str(d)
     if tool in ("web_search", "fetch_url", "github_repo_info"):
         return f"I could not complete the web lookup, so I have **no** web findings to report and won't guess. Reason: {err}"
+    if tool.startswith("tab_") and "isn't connected" in str(err):
+        msg = re.sub(r"^\w*Error:\s*", "", str(err)).rstrip(".")
+        return msg[0].upper() + msg[1:] + "."  # plain words: what to say next
     return f"I couldn't complete `{tool}`: {err}"
 
 

@@ -94,7 +94,7 @@ class FakeSock:
 def test_hub_sends_one_command_and_waits_for_its_answer():
     async def go():
         hub = ConnectorHub()
-        with pytest.raises(ConnectorError, match="not connected"):
+        with pytest.raises(ConnectorError, match="isn.t connected"):
             await hub.call("read_page")
         sock = FakeSock(hub, {"read_page": {"title": "Form", "url": "https://x", "text": "hello"}, "fill": lambda a: {"ok": False, "error": "boom"}})
         hub.attach(sock, {"browser": "Edge", "version": "1.0.0"})
@@ -251,4 +251,25 @@ def test_test_questions_are_not_answered_only_details_filled(home, tmp_path):
 
 def test_not_connected_says_how_to_connect(jarvis):
     r = run(jarvis.chat("fill this form"))
-    assert "not connected" in r["text"]
+    assert r["text"].startswith("Your browser isn't connected to me yet") and "set up the browser connector" in r["text"]
+
+
+@pytest.mark.parametrize("heard", ["Film this phone.", "feel this form", "Jarvis, film the phone"])
+def test_misheard_fill_this_form_still_fills(heard):
+    """The owner's "Fill this form" came out of the speech model as "Film this phone" (2026-11-22)."""
+    assert match_rules(heard, ENV)[1] == ("tab_form", {})
+    assert match_rules("film this movie", ENV) is None
+
+
+def test_set_up_the_browser_connector_opens_what_is_needed(jarvis, monkeypatch):
+    import jarvis.connector as connector
+    from jarvis.app import SETUP_CONNECTOR
+
+    opened = []
+    monkeypatch.setattr(connector, "open_setup", lambda: opened.append(1) or {"browser": "edge", "folder": "X", "opened": True})
+    r = run(jarvis.chat("Jarvis, set up the browser connector"))
+    assert opened == [1] and "Edge" in r["text"] and "Load unpacked" in r["text"] and "approve" in r["text"]
+    for t in ("connect my browser", "install the extension", "பிரவுசர கனெக்ட் பண்ணு"):
+        assert SETUP_CONNECTOR.search(t), t
+    for t in ("connect to wifi", "set up a timer", "open the browser"):
+        assert not SETUP_CONNECTOR.search(t), t

@@ -10,10 +10,47 @@ from __future__ import annotations
 import asyncio
 import itertools
 import time
+from pathlib import Path
+
+
+EXTENSION_DIR = Path(__file__).resolve().parents[2] / "extension"
+NOT_CONNECTED = ("your browser isn't connected to me yet. Say \"set up the browser connector\" and I'll open everything you "
+                 "need - it takes about a minute")
 
 
 class ConnectorError(Exception):
     pass
+
+
+def default_browser() -> str:
+    """'edge' or 'chrome' - whichever opens web links on this computer (Windows), else 'edge'."""
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice") as k:
+            prog = winreg.QueryValueEx(k, "ProgId")[0]
+        return "chrome" if prog.lower().startswith("chrome") else "edge"
+    except Exception:  # noqa: BLE001
+        return "edge"
+
+
+def open_setup(extension_dir: Path = EXTENSION_DIR) -> dict:
+    """"Set up the browser connector": open the default browser's extensions page, show the extension folder in Explorer
+    and put its path on the clipboard (for "Load unpacked"). Windows only; started only by the user's own words."""
+    import os
+    import subprocess
+
+    browser = default_browser()
+    if os.name != "nt":
+        return {"browser": browser, "folder": str(extension_dir), "opened": False}
+    flags = 0x08000000  # CREATE_NO_WINDOW
+    page = "edge://extensions" if browser == "edge" else "chrome://extensions"
+    exe = "msedge" if browser == "edge" else "chrome"
+    subprocess.Popen(["cmd", "/c", "start", "", exe, page], creationflags=flags)
+    subprocess.Popen(["explorer", f"/select,{extension_dir}"])
+    subprocess.run(["powershell", "-NoProfile", "-Command", "Set-Clipboard -Value $args[0]", str(extension_dir)],
+                   creationflags=flags, timeout=15, check=False)
+    return {"browser": browser, "folder": str(extension_dir), "opened": True}
 
 
 class ConnectorHub:
@@ -79,8 +116,7 @@ class ConnectorHub:
 
     async def call(self, cmd: str, args: dict | None = None, timeout: float | None = None):
         if self._sock is None:
-            raise ConnectorError("the JARVIS Connector browser extension is not connected - install it and paste the key from "
-                                 "JARVIS Settings > Browser connector")
+            raise ConnectorError(NOT_CONNECTED)
         cid = next(self._ids)
         fut = asyncio.get_running_loop().create_future()
         self._pending[cid] = fut
