@@ -36,6 +36,11 @@ DENY = re.compile(r"^\s*(hey\s+)?((jarvis|ஜார்விஸ்)[,\s]+)?(no|n
 SETUP_CONNECTOR = re.compile(r"\b(?:set\s*up|install|connect|add|enable|pair)\s+(?:the\s+|my\s+|your\s+)?(?:jarvis\s+)?"
                              r"(?:browser(?:\s+(?:connector|extension))?|connector|extension)\b"
                              r"|(?:பிரவுசர|ப்ரவுசர|browser)\S*\s*.{0,12}?(?:கனெக்ட்|இணை|connect)", re.I)
+# "Now do you have my browser settings access?" - the model said no while Chrome was connected (2026-11-22), so questions
+# about reaching the browser are answered from the connector's real state
+BROWSER_ACCESS = re.compile(r"^(?:\W*(?:now|so|ok(?:ay)?|hey|jarvis|and|then)\b)*\W*(?:do|does|did|have|has|can|could|are|is|will)\b"
+                            r"(?=.*\b(?:browser|chrome|edge|tabs?|connector|extension)\b)"
+                            r"(?=.*\b(?:access|connected|connection|control|linked|paired|reach)\b)", re.I)
 LEARN_VOICE = re.compile(r"\b(?:learn|train|teach\s+(?:you|jarvis))\s+(?:on\s+)?my\s+voice\b|\brecogni[sz]e\s+my\s+voice\b|\bvoice\s+(?:training|enrol+ment)\b"
                          r"|(?:என்|என்னோட|என்னுடைய)\s*குரல\S*\s*(?:கத்து|கற்று|பழகு|தெரிஞ்சு)", re.I)
 HISTORY_CHAR_BUDGET = 16_000
@@ -60,6 +65,7 @@ class Jarvis:
         self.capture_screen = desktop.capture_screen  # injectable for tests
         self.browser = browser.BrowserSession(self)
         self.connector = ConnectorHub()  # the JARVIS Connector extension in the owner's own browser
+        self._popup_fills: dict[str, float] = {}  # tab_fill approvals started by the extension popup's button -> when
         self.proactive = Proactive(self)
         self.monitor = Monitor(self)
         self.automation = AutomationEngine(self)
@@ -105,7 +111,8 @@ class Jarvis:
         if want == "anthropic" or (want == "auto" and has_anthropic):
             chain.append(AnthropicProvider(s.anthropic_model, s.anthropic_effort, get_secret("ANTHROPIC_API_KEY")))
         if s.openai_base_url and s.openai_model and want in ("auto", "openai_compat", "anthropic"):
-            compat = OpenAICompatProvider(s.openai_base_url, s.openai_model, get_secret("OPENAI_API_KEY"), stream=s.openai_stream, keep_alive=s.openai_keep_alive, max_tokens=s.openai_max_tokens)
+            compat = OpenAICompatProvider(s.openai_base_url, s.openai_model, get_secret("OPENAI_API_KEY"), stream=s.openai_stream, keep_alive=s.openai_keep_alive, max_tokens=s.openai_max_tokens,
+                                          reasoning=s.openai_reasoning)
             chain.insert(0, compat) if want == "openai_compat" else chain.append(compat)
         chain.append(self.offline)  # always last: graceful degradation
         return chain
@@ -274,6 +281,8 @@ class Jarvis:
                 reply = (f"Approved {len(done)} action(s). I won't ask again for {', '.join(sorted(set(done)))} during this task (30 minutes)." if done else "") + \
                         (f" {', '.join(sorted(set(refused)))} must be approved one at a time - still waiting on that." if refused else "")
                 return self._finish(conversation_id, reply.strip(), {"provider": "policy"})
+        if actor == "chat" and BROWSER_ACCESS.search(text):
+            return self._finish(conversation_id, self.browser_access(), {"provider": "policy", "connector_status": True})
         if actor == "chat" and SETUP_CONNECTOR.search(text):
             return self._finish(conversation_id, self.setup_connector(), {"provider": "policy", "connector_setup": True})
         if actor == "chat" and LEARN_VOICE.search(text):
@@ -354,6 +363,60 @@ class Jarvis:
         r"\bI (?:really |usually |always |never |mostly )?(?:prefer|like|love|hate|dislike|use|avoid|want you to)\s+\w+", r"\bI (?:always|never|usually)\s+\w+",
         r"\bmy (?:\w+ ){0,2}(?:is|are)\s+\w+", r"\bI live in\s+\w+", r"\bdon'?t (?:ever )?(?:call|use|send|show)\b")]
 
+    POPUP_FILL_SECONDS = 600
+
+    POPUP_ASKS = {"fill": "fill this form", "answer": "answer the questions on this page", "summary": "summarise this page"}
+
+    async def popup_fill(self, action: str = "fill") -> dict:
+        """The extension popup's buttons ("Fill this form", "Answer the questions", "Summarise this page"): the same as saying
+        it (nothing is filled yet). Returns JARVIS's reply and the id of a pending fill, which only that popup may approve."""
+        if action not in self.POPUP_ASKS:
+            raise ValueError("unknown request")
+        r = await self.chat(self.POPUP_ASKS[action], source="extension")
+        approval = None
+        for aid in r.get("pending_approvals") or []:
+            ap = self.db.one("SELECT tool, status FROM approvals WHERE id=?", (aid,))
+            if ap and ap["tool"] == "tab_fill" and ap["status"] == "pending":
+                approval = aid
+        if approval:
+            self._popup_fills[approval] = time.time()
+        return {"text": r["text"], "approval": approval}
+
+    async def popup_decide(self, approval: str, approve: bool) -> dict:
+        """"Fill" / "Cancel" in the popup - the user's own click in their browser. Only a tab_fill that the popup's button
+        started in the last 10 minutes can be decided this way; everything else is approved in JARVIS as usual."""
+        from .security import SecurityError
+
+        started = self._popup_fills.pop(str(approval), None)
+        ap = self.db.one("SELECT tool, status FROM approvals WHERE id=?", (str(approval),))
+        if started is None or time.time() - started > self.POPUP_FILL_SECONDS or not ap or ap["tool"] != "tab_fill":
+            raise SecurityError("that fill wasn't started from this button - approve it in JARVIS")
+        ap = await self.executor.decide(str(approval), bool(approve), by="user")
+        if not approve:
+            return {"text": "OK, I left the form as it is.", "filled": 0}
+        if ap["status"] != "executed":
+            return {"text": f"I couldn't fill the form: {str(ap.get('result') or '')[:200]}", "filled": 0}
+        import json
+
+        try:
+            data = json.loads(ap.get("result") or "{}")
+        except ValueError:
+            data = {}
+        n, skipped = len(data.get("filled") or []), len(data.get("skipped") or [])
+        text = f"Filled {n} field{'s' if n != 1 else ''}." + (f" {skipped} could not be filled." if skipped else "")
+        return {"text": text + " Check them, then press Submit yourself.", "filled": n}
+
+    def browser_access(self) -> str:
+        """The honest answer to "do you have access to my browser?"."""
+        if not self.connector.connected():
+            return ("Not yet - your browser isn't connected to me. Say \"set up the browser connector\" and I'll open what's "
+                    "needed.")
+        ua = self.connector.info.get("browser", "")
+        name = "Edge" if "Edg/" in ua else "Chrome" if "Chrome/" in ua else "browser"
+        return (f"Yes - I'm connected to your {name}. I can read the tab you're on and fill forms with your details; every fill "
+                "asks you first, and I never press Submit or fill passwords, OTPs, card or ID numbers. I can't change your "
+                "browser's settings. Open a form and say \"fill this form\".")
+
     def setup_connector(self) -> str:
         """Open the default browser's extensions page and the extension folder (path on the clipboard), and say the rest."""
         from .connector import open_setup
@@ -365,8 +428,11 @@ class Jarvis:
         except Exception as e:  # noqa: BLE001
             return f"I couldn't open the setup pages ({type(e).__name__}). The extension is in {Path(__file__).resolve().parents[2] / 'extension'}."
         name = "Edge" if info["browser"] == "edge" else "Chrome"
-        return (f"I've opened {name}'s extensions page and the JARVIS folder, and put the extension folder's path on your clipboard. "
-                f"In {name}: turn on Developer mode, click Load unpacked, paste the path and choose Select folder. "
+        where = ("put the extension folder's path on your clipboard. In {n}: turn on Developer mode, click Load unpacked, paste the "
+                 "path and choose Select folder." if info.get("copied", True) else
+                 "the extension folder is highlighted there. In {n}: turn on Developer mode, click Load unpacked and choose that "
+                 f"folder ({info['folder']}).").format(n=name)
+        return (f"I've opened {name}'s extensions page and the JARVIS folder, and {where} "
                 "Then approve the request on my icon - after that, say \"fill this form\" on any form.")
 
     def auto_memory(self, text: str) -> list[str]:

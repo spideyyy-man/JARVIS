@@ -14,13 +14,27 @@
     #status { margin: 10px 0 0; padding: 9px 11px; border-radius: 8px; background: #111a2e; font-weight: 600; }
     .ok { color: #4ade80; } .bad { color: #fbbf24; }
     details { margin-top: 14px; color: #94a3b8; }
+    #fill { width: 100%; font-weight: 600; padding: 9px 14px; }
+    #answer { display: none; margin-top: 10px; padding: 10px 12px; border-radius: 8px; background: #111a2e; max-height: 340px; overflow: auto; line-height: 1.5; }
+    #answer p { margin: 0 0 8px; color: #e2e8f0; } #answer b { color: #67e8f9; }
+    #answer ul { margin: 4px 0 8px; padding-left: 18px; } #answer li { margin: 3px 0; }
+    #answer .ans { margin: 0 0 2px 14px; color: #4ade80; font-weight: 600; }
+    #answer .why { margin: 0 0 8px 14px; color: #94a3b8; font-size: 12px; }
+    #decide { display: none; gap: 8px; } #decide button { flex: 1; }
+    button.secondary { background: #1e293b; }
+    .row { display: flex; gap: 8px; } .row button { flex: 1; }
+    button:disabled { opacity: .6; cursor: default; }
   </style>
 </head>
 <body>
   <h1>JARVIS Connector</h1>
   <p>Lets JARVIS on this computer read the page you are on and fill forms after you approve. It never fills passwords, OTPs, card or ID numbers, and never presses Submit on its own.</p>
   <div id="status">…</div>
-  <button id="again">Connect again</button>
+  <button id="fill">Fill this form</button>
+  <div class="row"><button id="answerq" class="secondary">Answer the questions</button><button id="summary" class="secondary">Summarise this page</button></div>
+  <div id="answer"></div>
+  <div id="decide"><button id="yes">Fill</button><button id="no" class="secondary">Cancel</button></div>
+  <button id="again" class="secondary">Connect again</button>
   <p style="margin-top:12px">First time: JARVIS asks you to approve this browser - on the JARVIS icon (amber) or in the JARVIS window. Then say "Jarvis, fill this form" on any form.</p>
   <details>
     <summary>Advanced</summary>

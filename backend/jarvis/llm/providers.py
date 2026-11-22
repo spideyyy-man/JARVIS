@@ -111,7 +111,7 @@ class OpenAICompatProvider:
     name = "openai_compat"
 
     def __init__(self, base_url: str, model: str, api_key: str | None = None, transport: httpx.AsyncBaseTransport | None = None, stream: bool = True,
-                 keep_alive: str = "", max_tokens: int = 0):
+                 keep_alive: str = "", max_tokens: int = 0, reasoning: str = ""):
         self.base_url, self.model, self.api_key, self.transport, self.stream = base_url.rstrip("/"), model, api_key, transport, stream
         # Ollama only: how long the model stays loaded after a request ("2h", "-1"). Unloading means the next request
         # reloads it and re-reads the whole prompt - 20 s or more on a CPU. Other servers ignore the field.
@@ -119,6 +119,8 @@ class OpenAICompatProvider:
         # Cap on one reply's length (0 = server default). A small model sometimes never stops: on the owner's laptop one
         # Tamil answer ran past 15 minutes. JARVIS's answers are meant to be spoken, so a cap costs nothing.
         self.max_tokens = max_tokens
+        # OpenAI-style reasoning_effort ("none" turns a thinking model's hidden reasoning off; Ollama honours it)
+        self.reasoning = reasoning
 
     def _tool_specs(self, tools: list[dict]) -> list[dict]:
         return [{"type": "function", "function": {"name": t["name"], "description": t["description"], "parameters": t["input_schema"]}} for t in tools]
@@ -129,6 +131,8 @@ class OpenAICompatProvider:
         pays for its own new tokens (measured: 1.1 s instead of 21 s for a 900-token prefix). Returns the usage."""
         body: dict = {"model": self.model, "messages": [{"role": "system", "content": system}, {"role": "user", "content": "hi"}],
                       "max_tokens": 1, "stream": False}
+        if self.reasoning:
+            body["reasoning_effort"] = self.reasoning
         if tools:
             body["tools"] = self._tool_specs(tools)
         ka = self.keep_alive if keep_alive is None else keep_alive
@@ -174,6 +178,8 @@ class OpenAICompatProvider:
             body["keep_alive"] = self.keep_alive
         if self.max_tokens:
             body["max_tokens"] = self.max_tokens
+        if self.reasoning:
+            body["reasoning_effort"] = self.reasoning
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         url = f"{self.base_url}/chat/completions"
         try:

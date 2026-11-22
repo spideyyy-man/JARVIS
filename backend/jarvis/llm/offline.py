@@ -504,6 +504,12 @@ EVERYDAY_RULES = [
     R("orchestrator", r"\b(?:set|create|make)\b.*\balarm\b|\bwake me(?: up)?\s+at\b|\balarm\s+(?:for|at)\b", _alarm),
     R("orchestrator", r"^\s*(?:set|change|update)\s+my\s+(?:home\s+)?(?:city|location|town)\s+to\s+(?P<c>.+?)\s*[.!]?$|^\s*my\s+(?:home\s+)?(?:city|town|location)\s+is\s+(?P<c2>.+?)\s*[.!]?$",
       lambda t, m, e: ("set_home_city", {"city": m.group("c") or m.group("c2")})),
+    # the owner's own browser tab: a summary of the page; answers to practice questions (shown, then filled only on "yes")
+    R("orchestrator", r"^(?!.*https?://)(?=.*\b(?:summari[sz]e|summary|sum up|gist|tl;?dr)\b).*\b(?:page|tab|article|site|website|webpage|browser|blog|post)\b"
+                      r"|\bwhat(?:'?s| is)\s+(?:this|the|my)\s+(?:current\s+)?(?:page|tab|article)\s+about\b",
+      lambda t, m, e: ("tab_summary", {})),
+    R("orchestrator", r"\b(?:answer|solve|attempt|do|complete|finish|fill(?:\s+in)?)\b.{0,30}\b(?:questions?|quiz(?:zes)?|tests?|exams?|mcqs?|worksheet|assignment)\b",
+      lambda t, m, e: ("tab_answer", {})),
     # the owner's own browser tab (Connector extension): read the form, then a fill proposal they approve
     R("orchestrator", r"\b(?:fill|complete|finish|do|answer)\s+(?:in\s+|out\s+|up\s+)?(?:all\s+)?(?:of\s+)?(?:this|the|that|my|these|those|current)?\s*"
                       r"(?:form|application|registration|sign ?up|details|fields|questions|test|quiz|survey)s?\b"
@@ -771,8 +777,9 @@ class OfflineProvider:
             if r["name"] == "repo_overview" and re.search(r"\bplan\b|\broadmap\b", question, re.I) and "create_plan" not in called_names and "create_plan" in available:
                 goal = _clean(question, r"^.*?\b(plan|roadmap)\b( for| to)?", r"\b(this|my|the|current) (project|repo|repository|codebase)\b")
                 return LLMResponse(tool_calls=[ToolCall(self._id(), "create_plan", {"title": f"Development plan: {Path(d['path']).name}", "steps": plan_steps(goal or "the next milestone", d)})])
-            if r["name"] == "tab_form" and d.get("proposal") and "tab_fill" not in called_names and "tab_fill" in available:
-                values = [{"id": v["id"], "label": v["label"], "value": v["value"]} for v in d["proposal"]]
+            if r["name"] in ("tab_form", "tab_answer") and d.get("proposal") and "tab_fill" not in called_names and "tab_fill" in available:
+                values = [{"id": v["id"], "label": v["label"], "value": v["value"], **({"note": v["note"]} if "note" in v else {})}
+                          for v in d["proposal"]]
                 return LLMResponse(tool_calls=[ToolCall(self._id(), "tab_fill", {"values": values})])
             if r["name"] == "web_search" and d.get("results") and "fetch_url" not in called_names and "fetch_url" in available:
                 return LLMResponse(tool_calls=[ToolCall(self._id(), "fetch_url", {"url": x["url"], "max_chars": 3000}) for x in d["results"][:2]])
@@ -1011,9 +1018,38 @@ def _and(items: list) -> str:
 
 
 def _r_tab_form(d, q: str = "") -> str:
-    note = (" I fill in your details on tests and quizzes, but I don't answer the test questions for you."
-            if re.search(r"\b(?:test|quiz|exam|questions?|answers?)\b", q or "", re.I) else "")
-    return _r_tab_form_body(d) + note
+    return _r_tab_form_body(d)
+
+
+def _r_tab_answer(d) -> str:
+    name = d["title"] or d["url"]
+    if not d["questions"]:
+        return (f"I couldn't find any questions on “{name}”. If they're on the next page or below, scroll to them "
+                "and ask again." + (f" I can fill {d['details_filled']} of your details." if d.get("details_filled") else ""))
+    lines = [f"**{name}** — {d['questions']} question(s)"]
+    if d.get("problem"):
+        lines.append(f"I can't answer them right now ({d['problem']}).")
+    else:
+        lines.append(f"Suggested answers for {d['answered']} of {d['questions']}. Check them before you submit — I can be wrong.")
+        if d.get("unanswered"):
+            lines.append(f"Not sure about: {_and(d['unanswered'][:5])}.")
+    extra = []
+    if d.get("details_filled"):
+        extra.append(f"{d['details_filled']} of your details")
+    if extra:
+        lines.append(f"I'll also fill {_and(extra)}.")
+    if d.get("missing"):
+        lines.append(f"I don't know: {_and(d['missing'][:6])}.")
+    if d.get("sensitive_skipped"):
+        lines.append(f"I'll leave {_and(d['sensitive_skipped'][:4])} to you.")
+    return "\n".join(lines)
+
+
+def _r_tab_summary(d) -> str:
+    if not d["summary"]:
+        return f"There's no text to summarise on “{d['title'] or d['url']}”."
+    note = "\n\n(No language model is running, so this is the start of the page, not a summary.)" if d.get("by") == "excerpt" else ""
+    return f"**{d['title'] or d['url']}**\n\n{d['summary']}{note}"
 
 
 def _r_tab_form_body(d) -> str:
@@ -1214,6 +1250,8 @@ RENDERERS: dict[str, Callable] = {
     "list_clear": lambda d, q, t: f"Cleared your {d['list']} list.",
     "play_music": lambda d, q, t: f"Playing {d['playing']} on YouTube in your browser.",
     "tab_form": lambda d, q, t: _r_tab_form(d, q),
+    "tab_answer": lambda d, q, t: _r_tab_answer(d),
+    "tab_summary": lambda d, q, t: _r_tab_summary(d),
     "tab_fill": lambda d, q, t: (f"Filled {len(d['filled'])} field(s)" + (f"; couldn't fill {_and([x.get('label', '?') for x in d['skipped']])}" if d["skipped"] else "")
                                  + ". Check them, then press Submit yourself when you're happy."),
     "tab_read": lambda d, q, t: f"**{d['title']}** ({d['url']})\n\n{' '.join(d['text'].split())[:700]}",

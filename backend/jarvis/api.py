@@ -162,7 +162,16 @@ def create_app(jarvis: Jarvis | None = None) -> FastAPI:
         """The browser extension's state, and the key to paste into it (shown in Settings to the signed-in UI only)."""
         return {**j.connector.status(), "key": j.settings.connector_key(), "port": j.settings.port}
 
-    @app.get("/api/details")
+    @app.get("/api/connector/inspect")
+    async def connector_inspect(probe: str = ""):
+        """Read-only: how the page in the user's browser tab is built (field kinds, frames, web components, the markup
+        around `probe`), to find out why JARVIS misses a page's questions. Same token as the rest of the API."""
+        from .connector import ConnectorError
+
+        try:
+            return {"frames": await j.connector.call("inspect", {"probe": probe[:100]}, timeout=30)}
+        except ConnectorError as e:
+            raise HTTPException(409, str(e)) from None
     async def get_details():
         from .tools import tab
 
@@ -696,6 +705,10 @@ def create_app(jarvis: Jarvis | None = None) -> FastAPI:
         pair = sock.query_params.get("pair") == "1" and not sock.query_params.get("key")
         if sock.headers.get("host", "").rsplit(":", 1)[0] not in allowed_hosts or not ok_origin or not (key_ok or pair):
             j.connector.attempt("refused: " + ("not from a browser extension" if not ok_origin else "wrong key - pair again"), origin)
+            if ok_origin and sock.headers.get("host", "").rsplit(":", 1)[0] in allowed_hosts:
+                # accepted only to deliver the close code: a socket closed before accept reaches the browser as 1006, so the
+                # extension never learned its key was wrong and never paired again (2026-11-22)
+                await sock.accept()
             await sock.close(code=4401)
             return
         await sock.accept()
@@ -746,9 +759,31 @@ def create_app(jarvis: Jarvis | None = None) -> FastAPI:
             hello = await asyncio.wait_for(sock.receive_json(), 10)
             j.connector.attach(sock, hello if isinstance(hello, dict) else {})
             j.bus.emit("connector.changed", **j.connector.status())
+            async def popup(msg: dict) -> None:
+                """The popup's "Fill this form" / "Fill" / "Cancel" buttons (run apart: a fill needs this socket's replies)."""
+                reply = {"type": "popup_result", "rid": msg.get("rid")}
+                try:
+                    if msg.get("action") in j.POPUP_ASKS:
+                        reply.update(ok=True, **await j.popup_fill(str(msg["action"])))
+                    elif msg.get("action") == "decide":
+                        reply.update(ok=True, **await j.popup_decide(str(msg.get("approval", "")), bool(msg.get("approve"))))
+                    else:
+                        raise ValueError("unknown request")
+                except Exception as e:  # noqa: BLE001 - the popup shows it
+                    reply.update(ok=False, text=str(e)[:300])
+                try:
+                    await sock.send_json(reply)
+                except RuntimeError:
+                    pass
+
             while True:
                 msg = await sock.receive_json()
-                if isinstance(msg, dict) and msg.get("type") != "ping":
+                if isinstance(msg, dict) and msg.get("type") == "popup":
+                    j.connector.used(sock)  # the button was pressed in this browser: it is the one to read and fill
+                    asyncio.create_task(popup(msg))
+                elif isinstance(msg, dict) and msg.get("type") == "focus":
+                    j.connector.used(sock)
+                elif isinstance(msg, dict) and msg.get("type") != "ping":
                     j.connector.deliver(msg)
         except (WebSocketDisconnect, RuntimeError, asyncio.TimeoutError, ValueError):
             pass

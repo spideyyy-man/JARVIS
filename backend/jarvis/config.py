@@ -63,6 +63,9 @@ class Settings:
     # Ollama: how long the model stays loaded after a request ("2h"; "-1" = until Ollama stops). JARVIS re-warms it while running.
     openai_keep_alive: str = ""
     openai_max_tokens: int = 1024  # longest reply from a local model, in tokens (0 = no cap)
+    # "none" switches a thinking model's hidden reasoning off (Qwen 3.5 on this laptop: 75 s -> 1.8 s for one answer);
+    # "low"/"medium"/"high" set how much it thinks; "" = the model's own default
+    openai_reasoning: str = ""
     # Tamil (and other Indian-language) requests to a local model go through English with a translation model
     # (see translate.py). Empty dir = <data_dir>/models/nllb-200-distilled-600M-ct2-int8.
     translate_via_english: bool = True
@@ -163,6 +166,7 @@ def load_settings(env_file: Path | None = None) -> Settings:
         llm_timeout=float(env("JARVIS_LLM_TIMEOUT", "300")),
         openai_stream=env("JARVIS_OPENAI_STREAM", "1") != "0",
         openai_max_tokens=int(env("JARVIS_OPENAI_MAX_TOKENS", "1024")),
+        openai_reasoning=env("JARVIS_OPENAI_REASONING", "").strip().lower(),
         translate_via_english=env("JARVIS_TRANSLATE_VIA_ENGLISH", "1") != "0",
         tamil_style=env("JARVIS_TAMIL_STYLE", "spoken"),
         translator_dir=Path(env("JARVIS_TRANSLATOR_DIR", str(data_dir / "models" / "nllb-200-distilled-600M-ct2-int8"))).expanduser(),

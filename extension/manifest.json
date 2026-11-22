@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "JARVIS Connector",
-  "version": "1.0.0",
+  "version": "1.3.3",
   "description": "Lets your own JARVIS (on this computer) read the page you are on and fill forms - only after you approve. Never passwords, OTPs or card numbers.",
   "permissions": ["tabs", "scripting", "storage", "alarms"],
   "host_permissions": ["<all_urls>"],

@@ -68,7 +68,7 @@ AGENTS: dict[str, AgentSpec] = {a.name: a for a in [
               ["delegate", "create_plan", "update_plan", "save_as_workflow", "calendar_events", "calendar_add", "calendar_remove", "email_inbox", "email_read", "email_send", "generate_image", "remember", "recall", "conversation_search", "daily_briefing", "daily_summary", "list_dev_tasks", "add_dev_task", "update_dev_task",
                "set_timer", "set_alarm", "list_timers", "cancel_timer", "weather", "set_home_city", "calculate", "convert_units",
                "list_add", "list_show", "list_remove", "list_clear", "play_music", "open_url",
-               "tab_read", "tab_form", "tab_fill", "tab_click", "tab_scroll", "set_my_details", "my_details"]),
+               "tab_read", "tab_summary", "tab_answer", "tab_form", "tab_fill", "tab_click", "tab_scroll", "set_my_details", "my_details"]),
     AgentSpec("research", "Research Agent", "Web research, technology comparison, GitHub repository evaluation, sourced reports",
               "You are JARVIS's research agent. Search, read the most relevant pages, then write a structured answer. Every factual claim "
               "from the web must cite a URL that you actually retrieved in this task (check with list_sources). If search is unavailable, "
