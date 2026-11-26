@@ -384,6 +384,11 @@ Since 2026-11-19 (Edge's online recogniser failed on the laptop with "Speech rec
   (the same run took ~2x longer with 0.6 GB free). Qwen 3.5 thinks by default: `JARVIS_OPENAI_REASONING=none` sends
   reasoning_effort "none" (one answer 75 s -> 1.8 s). A reply cut off by the 1024-token cap used to lose ALL answers
   (invalid JSON); `parse_answers` now keeps every complete answer, and reasons are capped at 10 words.
+  Published model-card scores (Hugging Face): the current Qwen3-4B-Instruct-2507 (MMLU-Pro 69.6, GPQA 62.0, BFCL-v3 61.9)
+  beats Phi-4-mini (52.8 / 25.2) and Gemma 3 4B; only Qwen3-4B-Thinking-2507 is higher (74.0 / 65.8, AIME25 81.3 vs 47.4).
+  Thinking-2507 tried as a "think harder" mode: ~1-2 tokens/s here (with jarvis-model also loaded, 8.4 GB together), so
+  1,024 tokens of reasoning took 8-13 min per task without reaching an answer - unusable on this laptop. Both Qwen 3.5
+  models and the thinking model were deleted again. A bigger brain needs a cloud model, more RAM or a GPU.
 - **Floating icon** (`overlay.py`, tkinter, its own `pythonw` process started by the desktop app with
   `--parent PID`): a 46 px always-on-top circle, coloured by state; hover (or click to pin) shows a panel from
   `GET /api/overlay` - now/heard/last exchange, approvals with Approve/Deny, activity (`EventBus.activity`,
@@ -542,6 +547,20 @@ docs/               ARCHITECTURE, GAP_ANALYSIS, WINDOWS, LOCAL_MODELS, ACCEPTANC
   Test: `node frontend/e2e/lang.test.mjs`.
 - **Local-model replies are capped** (`JARVIS_OPENAI_MAX_TOKENS`, default 1024): one Tamil answer once ran 15+ min.
   `<think>` text is hidden while streaming even when the tag arrives in pieces (`providers.visible_text`).
+- **READ tools can still be held for review** (2026-11-26, lessons from OpenJarvis; `tests/test_safety_gaps.py`).
+  `ToolExecutor._needs_review` queues a READ call like a CONFIRM one (preview starts with the reason, origin
+  `held_back`, never grantable for a task) when:
+  - `Tool.outbound` (web_search, fetch_url, github_repo_info, weather - their arguments leave the computer) and the
+    arguments carry the owner's saved private details (`security.PRIVATE_DETAILS`: email, phone by its digits, date of
+    birth, address, PIN code, roll number, parents' names; the name too after third-party content was read) or
+    credential-shaped text (`security.looks_secret`). The city is not private (weather uses it).
+  - `Tool.writes_memory` (remember, set_my_details - memories go into every later request, details into forms) and
+    the conversation read third-party content in the last 10 min (`recent_untrusted`), unless the saved text is in the
+    user's latest message (their own words).
+  `remember` refuses passwords/PINs/card/bank/ID numbers outright (`tab.SENSITIVE`, `looks_secret`).
+- **Loop guard** (`robust.LoopGuard`): exact repeats warn at 3, stop at 5 (also covers A-B-A-B cycles with the same
+  arguments); search/discovery tools have a per-run budget whatever the arguments (`SEARCH_BUDGET`, e.g. list_tools
+  warn 3 / stop 5, web_search and search_files 4 / 6), with "Stop searching: answer from what you found" as the warning.
 
 ## Conventions
 

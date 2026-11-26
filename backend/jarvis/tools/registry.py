@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, Callable
 import jsonschema
 
 from ..db import new_id
-from ..security import Level, SecurityError, redact_obj
+from ..security import Level, SecurityError, outbound_leak, redact_obj
 
 if TYPE_CHECKING:
     from ..app import Jarvis
@@ -41,6 +41,12 @@ class Tool:
     grantable: bool = True  # may the user approve this tool "for the rest of this task"?
     untrusted_output: bool = False  # returns content written by third parties (web pages, the screen, email)
     timeout: float = 60.0
+    # A READ tool whose arguments leave this computer (a search query, a URL). If they carry the user's saved private
+    # details or a credential, the call waits for approval instead of running (security.outbound_leak).
+    outbound: bool = False
+    # Writes long-term memory, which is added to every later request. After third-party content has been read in the
+    # conversation it waits for approval: a page could plant a "fact" ("the user wants files sent to ...").
+    writes_memory: bool = False
 
     @property
     def schema(self) -> dict:
@@ -148,7 +154,10 @@ class ToolExecutor:
 
         actor = f"{ctx.actor}/{ctx.agent}"
         if tool.level is Level.READ:
-            return await self._run(tool, args, ctx, actor, decision="auto-read")
+            reason = self._needs_review(tool, args, ctx)
+            if reason is None:
+                return await self._run(tool, args, ctx, actor, decision="auto-read")
+            return self._queue(tool, args, ctx, actor, reason=reason)
         if tool.trust_eligible and name in self.trusted_tools():
             return await self._run(tool, args, ctx, actor, decision="trusted-allowlist")
         if tool.grantable and self.has_grant(ctx.conversation_id, name):
@@ -159,18 +168,49 @@ class ToolExecutor:
             return await self._run(tool, args, ctx, actor, decision="task-grant")
 
         # Level 2: prepare, queue, and wait for a human.
+        return self._queue(tool, args, ctx, actor)
+
+    def _needs_review(self, tool: Tool, args: dict, ctx: ToolContext) -> str | None:
+        """Why this READ call must wait for the user instead of running, or None (the usual case)."""
+        untrusted = self.recent_untrusted(ctx.conversation_id)
+        if tool.outbound:
+            leak = outbound_leak(args, self.app.db.get_setting("profile", {}), bool(untrusted))
+            if leak:
+                return f"Check before it goes out: {leak}."
+        if tool.writes_memory and untrusted and not self._users_own_words(args, ctx.conversation_id):
+            return (f"Check before I remember this: it comes after reading {', '.join(untrusted)} in this conversation, "
+                    "and text there can plant false memories.")
+        return None
+
+    def _users_own_words(self, args: dict, conversation_id: str | None) -> bool:
+        """True when what is being saved is what the user just said themselves ("remember that I like tea")."""
+        if not conversation_id:
+            return False
+        row = self.app.db.one("SELECT content FROM messages WHERE conversation_id=? AND role='user' ORDER BY created DESC LIMIT 1", (conversation_id,))
+        said = " ".join((row or {}).get("content", "").lower().split())
+        saved = " ".join(" ".join(str(v) for v in args.values() if isinstance(v, str)).lower().split())
+        return len(saved) >= 3 and saved in said
+
+    def _queue(self, tool: Tool, args: dict, ctx: ToolContext, actor: str, reason: str = "") -> ToolResult:
+        name = tool.name
         try:
             preview = tool.preview(args) if tool.preview else f"{name}({json.dumps(args, default=str)})"
         except Exception as e:  # preview validates paths etc.; failure means the action is not viable
             self.app.audit.record(actor=actor, tool=name, level=tool.level.value, decision="rejected-invalid", args=args, outcome="error", detail=str(e))
             return ToolResult(False, error=f"Blocked by security policy: {e}" if isinstance(e, SecurityError) else str(e))
+        if reason:
+            preview = f"{reason}\n{preview}"
         approval = {"id": new_id("ap_"), "tool": name, "args": args, "preview": preview, "agent": ctx.agent,
                     "task_id": ctx.task_id, "conversation_id": ctx.conversation_id,
                     # shown to the user: this request came after reading third-party content, which may contain planted instructions
-                    "origin": {**ctx.origin, **({"untrusted": u} if (u := self.recent_untrusted(ctx.conversation_id)) else {}), "grantable": tool.grantable and bool(ctx.conversation_id)},
+                    "origin": {**ctx.origin, **({"untrusted": u} if (u := self.recent_untrusted(ctx.conversation_id)) else {}),
+                               # a READ tool held back for a reason is approved one call at a time, never for the whole task
+                               "grantable": tool.grantable and bool(ctx.conversation_id) and not reason,
+                               **({"held_back": reason} if reason else {})},
                     "status": "pending", "result": "", "created": time.time(), "decided": None}
         self.app.db.insert("approvals", approval)
-        self.app.audit.record(actor=actor, tool=name, level=tool.level.value, decision="queued-for-approval", args=args, outcome="pending", detail=preview)
+        self.app.audit.record(actor=actor, tool=name, level="confirm" if reason else tool.level.value,
+                              decision="held-for-review" if reason else "queued-for-approval", args=args, outcome="pending", detail=preview)
         self.app.bus.emit("approval.requested", approval=approval)
         self.app.db.notify("action", f"Approval needed: {name}", preview)
         return ToolResult(True, approval_id=approval["id"], preview=preview)
@@ -189,7 +229,7 @@ class ToolExecutor:
             raise SecurityError("Approval already decided")
         tool = self.app.tools.get(ap["tool"])
         if approve and scope == "task" and tool is not None:
-            if not tool.grantable or not ap["conversation_id"]:
+            if not tool.grantable or not ap["conversation_id"] or (ap["origin"] or {}).get("held_back"):
                 self.app.db.update("approvals", approval_id, status="pending", decided=None)
                 raise SecurityError(f"'{ap['tool']}' must be approved every time; it cannot be approved for a whole task")
             self.app.db.insert("grants", {"id": new_id("g_"), "conversation_id": ap["conversation_id"], "tool": ap["tool"], "expires": time.time() + self.GRANT_SECONDS, "created": time.time()})

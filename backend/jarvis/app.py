@@ -100,6 +100,10 @@ class Jarvis:
             self.tools.get(name).grantable = False
         for name in ("fetch_url", "web_search", "github_repo_info", "browser_open", "browser_read", "browser_click", "browser_fill", "screen_read", "clipboard_read", "weather"):
             self.tools.get(name).untrusted_output = True
+        for name in ("web_search", "fetch_url", "github_repo_info", "weather"):  # arguments leave the computer
+            self.tools.get(name).outbound = True
+        for name in ("remember", "set_my_details"):  # trusted later: memories go into every request, details into forms
+            self.tools.get(name).writes_memory = True
 
     # -- providers ---------------------------------------------------------------
     def _build_providers(self) -> list[LLMProvider]:

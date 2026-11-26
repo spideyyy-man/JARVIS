@@ -50,6 +50,51 @@ def redact(text: str) -> str:
     return _KV_SECRET.sub(lambda m: f"{m.group(1)}{m.group(2)}{m.group(3)}[REDACTED]", text)
 
 
+def looks_secret(text: str) -> bool:
+    """True when `text` contains something shaped like a key, token, private key or password assignment."""
+    return any(p.search(text) for p in _REDACTIONS) or bool(_KV_SECRET.search(text))
+
+
+# Saved details (the `profile` setting) that must not leave the computer inside a web search, a URL or a repo
+# lookup without the user seeing it first. A name is ordinary in searches, so it only counts once the conversation
+# has read third-party content (a page could have told the model to search for "<name> <phone>").
+PRIVATE_DETAILS = {"email": "email address", "phone": "phone number", "date_of_birth": "date of birth", "address": "address",
+                   "pincode": "PIN code", "roll_number": "roll number", "father_name": "father's name", "mother_name": "mother's name"}
+NAME_DETAILS = {"full_name": "name", "first_name": "name", "last_name": "name"}
+
+
+def _digits(s: str) -> str:
+    return re.sub(r"\D", "", s)
+
+
+def outbound_leak(args: Any, profile: dict, after_untrusted: bool) -> str | None:
+    """Why sending `args` off this computer needs the user's OK, or None. Checks for credential-shaped text and for
+    the user's own saved details (phone numbers by their digits, other details as text)."""
+    text = " ".join(str(v) for v in (args.values() if isinstance(args, dict) else [args]))
+    if looks_secret(text):
+        return "it contains something that looks like a password or key"
+    low, digits = " ".join(text.lower().split()), _digits(text)
+    found = []
+    watched = {**PRIVATE_DETAILS, **(NAME_DETAILS if after_untrusted else {})}
+    for key, label in watched.items():
+        value = " ".join(str(profile.get(key) or "").lower().split())
+        if len(value) < 3:
+            continue
+        if key == "phone":
+            hit = len(_digits(value)) >= 7 and _digits(value)[-7:] in digits
+        elif key in ("date_of_birth", "pincode", "roll_number") and len(_digits(value)) >= 4 and value.replace(" ", "").isascii():
+            hit = value in low or (len(_digits(value)) >= 6 and _digits(value) in digits)
+        elif key == "address":
+            hit = (value[:20] if len(value) > 20 else value) in low
+        else:
+            hit = value in low
+        if hit and label not in found:
+            found.append(label)
+    if found:
+        return f"it would send your {', '.join(found)} off this computer"
+    return None
+
+
 def redact_obj(obj: Any) -> Any:
     if isinstance(obj, str):
         return redact(obj)

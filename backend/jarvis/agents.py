@@ -344,7 +344,7 @@ class AgentRuntime:
                     if verdicts[call.id] == "warn":
                         from .tools.registry import ToolResult
 
-                        return call, ToolResult(False, error="You have already made this exact call several times. Use the result you already have, or try a different approach.")
+                        return call, ToolResult(False, error=guard.reasons.get(call.id, LoopGuard.REPEAT_MSG))
                     used_names.add(call.name)
                     trace.append({"step": step + 1, "tool": call.name, "args": call.args})
                     return call, await app.executor.call(call.name, call.args, ctx)

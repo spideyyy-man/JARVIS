@@ -220,17 +220,43 @@ class StreamFilter:
 
 
 class LoopGuard:
-    """Detects a model repeating the same call. First it is told; if it keeps going, the run stops."""
+    """Detects a model going round in circles. First it is told; if it keeps going, the run stops.
+
+    Two signs: the same call again (exact repeats, which also covers A-B-A-B cycles with the same arguments), and
+    a search/discovery tool called over and over with arguments that keep changing - a small model "looking" for
+    something with reworded queries (list_tools "weather", list_tools "weather tool", ...). The second budget only
+    covers tools whose repeated use means searching, not doing: reading several files or clicking through pages
+    stays allowed."""
+
+    REPEAT_MSG = "You have already made this exact call several times. Use the result you already have, or try a different approach."
+    # tool -> (warn at, stop at) calls in one run, whatever the arguments
+    SEARCH_BUDGET = {"list_tools": (3, 5), "web_search": (4, 6), "recall": (4, 6), "conversation_search": (4, 6),
+                     "kb_search": (4, 6), "search_files": (4, 6), "search_code": (5, 7)}
 
     def __init__(self, warn_at: int = 3, stop_at: int = 5):
         self.counts: dict[str, int] = {}
+        self.per_tool: dict[str, int] = {}
         self.warn_at, self.stop_at = warn_at, stop_at
+        self.reasons: dict[str, str] = {}  # call id -> what to tell the model instead of running it
 
     def check(self, call: ToolCall) -> str:
-        """'' = fine, 'warn' = return an error result instead of running, 'stop' = abort the run."""
+        """'' = fine, 'warn' = return an error result instead of running (see `reasons`), 'stop' = abort the run."""
         key = call.name + json.dumps(call.args, sort_keys=True, default=str)
         self.counts[key] = n = self.counts.get(key, 0) + 1
-        return "stop" if n >= self.stop_at else "warn" if n >= self.warn_at else ""
+        self.per_tool[call.name] = m = self.per_tool.get(call.name, 0) + 1
+        if n >= self.stop_at:
+            return "stop"
+        warn_m, stop_m = self.SEARCH_BUDGET.get(call.name, (None, None))
+        if stop_m and m >= stop_m:
+            return "stop"
+        if n >= self.warn_at:
+            self.reasons[call.id] = self.REPEAT_MSG
+            return "warn"
+        if warn_m and m >= warn_m:
+            self.reasons[call.id] = (f"You have called {call.name} {m - 1} times already in this task. Stop searching: answer from what "
+                                     "you found, or tell the user what you could not find.")
+            return "warn"
+        return ""
 
 
 # Everyday words people use for a capability that its formal description does not contain. The default

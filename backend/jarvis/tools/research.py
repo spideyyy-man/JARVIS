@@ -17,7 +17,7 @@ from bs4 import BeautifulSoup
 
 from ..db import new_id
 from ..knowledge import search_conversations
-from ..security import SecurityError
+from ..security import SecurityError, looks_secret
 from .registry import Tool, ToolContext, ToolRegistry
 
 UA = "Mozilla/5.0 (compatible; JarvisResearch/0.1)"
@@ -190,6 +190,10 @@ def save_note(ctx: ToolContext, title: str, text: str, space: str = "notes") -> 
 
 
 def remember(ctx: ToolContext, content: str, kind: str = "fact") -> dict:
+    from .tab import SENSITIVE  # the same list the form filler and auto-memory refuse
+
+    if looks_secret(content) or SENSITIVE.search(content):
+        raise SecurityError("I don't keep passwords, PINs, card, bank or ID numbers in memory")
     return ctx.app.memory.remember(content, kind)
 
 
