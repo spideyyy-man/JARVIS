@@ -609,6 +609,12 @@ RULES: list[Rule] = [
     R("knowledge", r"\b(search|find)\b.*\b(previous|past|earlier|old)?\s*conversations?\b(?:\s+(?:for|about))?\s*(.*)$|\bdid we (talk|discuss)\w*( about)?\s+(.+)$", lambda t, m, e: ("conversation_search", {"query": (m.group(3) or m.group(6) or t).strip()})),
     R("knowledge", r"\bsave (?:a |this )?note:?\s+(.+)$", lambda t, m, e: ("save_note", {"title": m.group(1)[:50], "text": m.group(1)})),
     # monitoring
+    # before "what's running" (processes): "which projects are running", "how many AIs are working", "what are my agents doing"
+    R("monitoring", r"\b(projects?|agents|ais|a\.i\.s|claude|codex|gemini|antigravity)\b.{0,30}\b(running|working|active|busy|doing)\b(?!\s+(?:the\s+)?tests?\b)"
+      r"|\bhow many (?:ai|ais|agents|claudes?|sessions)\b|\bwhat (?:are|is) (?:my|the) (?:ai|ais|agents)\b|\b(?:running|active|current) projects\b",
+      # "open claude", "close codex", "start the gemini project": commands about an app, not a status question
+      lambda t, m, e: None if re.match(r"^\W*(?:(?:hey\s+)?jarvis\W+)?(?:please\s+)?(?:open|launch|start|close|quit|switch|kill|stop|run)\b", t, re.I)
+      else ("running_projects", {})),
     R("monitoring", r"\b(performance|cpu|ram\b|memory usage|system (health|status|load)|how is my (computer|machine|system|pc|laptop)|running slow)", lambda t, m, e: ("system_stats", {})),
     R("monitoring", r"\bprocess(es)?\b|\bwhat('s| is) running\b", lambda t, m, e: ("list_processes", {"sort_by": "memory" if re.search(r"memory|ram", t, re.I) else "cpu"})),
     R("monitoring", r"\b(disk|storage|free space)\b", _p("disk_usage")),
@@ -1203,6 +1209,7 @@ def _r_weather_ta(d) -> str:
             f"இன்று {deg(d['low'])} முதல் {deg(d['high'])} வரை{rain}.")
 
 RENDERERS: dict[str, Callable] = {
+    "running_projects": lambda d, q, t: d.get("summary") or "No AI agents are running on your projects right now.",
     "calendar_events": _r_calendar,
     "calendar_add": lambda d, q, t: f"Added \"{d['title']}\" on {d['start']} ({d['duration_minutes']} min). I'll remind you shortly before it starts.",
     "calendar_remove": lambda d, q, t: "Removed that event.",

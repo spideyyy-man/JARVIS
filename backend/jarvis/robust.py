@@ -264,6 +264,7 @@ class LoopGuard:
 # With a neural embedder (JARVIS_EMBEDDER=openai:<model>) these matter much less.
 TOOL_HINTS = {
     "system_stats": "computer laptop pc machine slow fast laggy lagging struggling freezing hot fan health speed busy load usage ram",
+    "running_projects": "projects agents ai ais claude codex gemini antigravity sessions working running busy idle doing",
     "list_processes": "apps programs running hogging eating using memory cpu task manager",
     "disk_usage": "space storage full drive free room big large folders",
     "search_files": "find locate where look for file document photo spreadsheet pdf lost missing",

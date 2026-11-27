@@ -225,7 +225,13 @@ def create_app(jarvis: Jarvis | None = None) -> FastAPI:
                 "timers": [{k: t[k] for k in ("id", "kind", "label", "due")} | {"seconds": t.get("seconds")} for t in everyday.timers(j)],
                 "approvals": [{**a, "preview": (a["preview"] or "").strip()[:300]} for a in pending],
                 "activity": list(j.bus.activity)[-14:], "selftest": j.selftest.summary() if j.selftest else last,
-                "capabilities": j.capabilities(), "model": j.llm.current().name, "windows": len(j.bus._subscribers)}
+                "capabilities": j.capabilities(), "model": j.llm.current().name, "windows": len(j.bus._subscribers),
+                "projects": j.workspace.snapshot()}
+
+    @app.get("/api/projects")
+    async def projects():
+        """Projects with AI agents (Claude Code, Codex, Gemini CLI...) working on them, from the background scan."""
+        return j.workspace.snapshot()
 
     @app.get("/api/timers")
     async def timers_list():

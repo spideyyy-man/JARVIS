@@ -99,7 +99,7 @@ AGENTS: dict[str, AgentSpec] = {a.name: a for a in [
               ["create_workflow", "list_workflows", "run_workflow", "workflow_runs", "daily_summary", "list_dev_tasks"]),
     AgentSpec("monitoring", "Monitoring Agent", "System health and performance: CPU, memory, disk, processes, trends",
               "You are JARVIS's monitoring agent. Report measured numbers, name the heaviest processes, and give a short assessment.",
-              ["system_stats", "list_processes", "disk_usage", "metrics_history"]),
+              ["system_stats", "list_processes", "disk_usage", "metrics_history", "running_projects"]),
     AgentSpec("assistant", "Single Assistant (flat mode)", "One agent with every tool; used with slow local models to avoid delegation round-trips",
               "You are JARVIS, a personal voice assistant running on the user's computer. Most replies are spoken aloud.\n"
               "- Conversation, writing (poems, messages, translations) and well-known facts you are sure of: answer directly in "

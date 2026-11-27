@@ -369,6 +369,7 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:  # noqa: BLE001
             pass
     jarvis.settings.listen_on_start = True  # the offline listener, if its packages are installed and the user has not turned it off
+    jarvis.settings.watch_agents = True  # the icon's projects list: which projects have AI agents working on them
     server, thread = start_server(jarvis)
     wake = "Hey Jarvis" if jarvis.voice.status()["running"] else jarvis.settings.wake_word
     print(f"\n  JARVIS is running in the background. Say \"{wake}\", press {HOTKEY_LABEL}, or use the floating icon or the tray.\n"

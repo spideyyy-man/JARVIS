@@ -2,10 +2,11 @@
 
     python -m jarvis.overlay [--parent PID]      (the desktop app starts it; it exits when that process ends)
 
-The circle's colour shows the state (cyan ready, green listening, amber thinking, orange working, blue speaking, red
-error, grey when JARVIS is not reachable).
-- Hover (or click to keep it open): a compact panel that fades in - one status line, the last request and reply,
-  a "Last 5" drop-down, a command box, and Talk / Window.
+The puck's bezel and colour show the state (orb.py: cyan ready, green listening, violet thinking, teal working, blue
+speaking, red error, grey when JARVIS is not reachable).
+- Hover (or click to keep it open): a compact panel that fades in - one status line, the projects AI agents are working
+  on (one dot per AI: filled working, hollow idle), the last request and reply, a "Last 5" drop-down, a command box,
+  and Talk / Window.
 - An action waiting for approval shows by itself, without hovering: a small bar under the circle with what it is,
   a moving progress line, and Allow / Deny.
 Drag the circle to move it; the position is remembered.
@@ -35,11 +36,13 @@ PANEL_W = 300
 BAR_W = 250
 KEY = "#010203"  # transparent colour around the circle
 BG, CARD, FG, MUTED, LINE, ACCENT, AMBER = "#0b1220", "#131c30", "#e2e8f0", "#8b98ad", "#1f2a44", "#22d3ee", "#f59e0b"
-COLORS = {"idle": "#22d3ee", "waiting": "#22d3ee", "listening": "#22c55e", "recording": "#22c55e", "transcribing": "#a3e635",
-          "thinking": "#f59e0b", "executing": "#fb923c", "speaking": "#60a5fa", "error": "#ef4444", "offline": "#64748b", "loading": "#94a3b8", "following": "#4ade80"}
+COLORS = {"idle": "#22d3ee", "waiting": "#22d3ee", "listening": "#34d399", "recording": "#34d399", "transcribing": "#a3e635",  # = orb.COLORS
+          "thinking": "#a78bfa", "executing": "#2dd4bf", "speaking": "#60a5fa", "error": "#f87171", "offline": "#64748b", "loading": "#94a3b8", "following": "#4ade80"}
 LABELS = {"idle": "Ready", "waiting": "Say “Jarvis”", "recording": "Listening…", "transcribing": "Understanding…",
           "thinking": "Thinking…", "executing": "Working…", "speaking": "Speaking", "error": "Something went wrong", "offline": "Not running",
           "loading": "Loading speech model…", "listening": "Listening…", "following": "Listening — just keep talking"}
+PROJECT_ROWS = 4  # projects listed in the panel; the rest are counted ("2 more")
+PIP_W = 64  # room for the per-AI dots
 FONT = ("Segoe UI", 9)
 SMALL = ("Segoe UI", 8)
 BOLD = ("Segoe UI Semibold", 9)
@@ -315,6 +318,27 @@ class Overlay:
         self.meta.pack(fill="x", padx=10)
         self.timer_row = tk.Label(p, text="", font=BOLD, fg=ACCENT, bg=BG, anchor="w")  # live countdowns; hidden when none
 
+        # Projects with AI agents working on them (workspace.py): one row per project, one dot per AI - filled while it
+        # works, hollow while it sits idle.
+        proj = tk.Frame(p, bg=BG)
+        proj.pack(fill="x", padx=10, pady=(8, 0))
+        head2 = tk.Frame(proj, bg=BG)
+        head2.pack(fill="x")
+        tk.Label(head2, text="Projects", font=BOLD, fg=FG, bg=BG, anchor="w").pack(side="left")
+        self.proj_count = tk.Label(head2, text="", font=SMALL, fg=MUTED, bg=BG, anchor="e")
+        self.proj_count.pack(side="right")
+        self.proj_rows = []
+        for _ in range(PROJECT_ROWS):
+            row = tk.Frame(proj, bg=BG)
+            pips = tk.Canvas(row, width=PIP_W, height=14, bg=BG, highlightthickness=0)
+            pips.pack(side="right", pady=(1, 0))
+            name = tk.Label(row, text="", font=FONT, fg=FG, bg=BG, anchor="w")
+            name.pack(side="left")
+            kinds = tk.Label(row, text="", font=SMALL, fg=MUTED, bg=BG, anchor="w")
+            kinds.pack(side="left", padx=(6, 0))
+            self.proj_rows.append((row, name, kinds, pips))
+        self.proj_more = tk.Label(proj, text="", font=SMALL, fg=MUTED, bg=BG, anchor="w")
+
         card = RoundBox(p, PANEL_W - 20, fill=CARD, radius=10, pad=9)
         card.pack(padx=10, pady=(6, 0))
         self.you = tk.Label(card.inner, text="", font=SMALL, fg=MUTED, bg=CARD, anchor="w", justify="left")
@@ -582,6 +606,46 @@ class Overlay:
             self.timer_row.pack_forget()
         self._set_text("timers", self.timer_row, text)
 
+    def _render_projects(self, snap: dict):
+        """One row per project with AIs on it: name, which AIs, and a dot per AI (filled = working, hollow = idle)."""
+        projects = snap.get("projects") or []
+        total, working = snap.get("agents", 0), snap.get("working", 0)
+        count = "No AI agents running" if not projects else (f"{working} of {total} working" if total else "")
+        if snap.get("at") is None:
+            count = "Looking…"
+        self._set_text("proj_count", self.proj_count, count)
+        for i, (row, name, kinds, pips) in enumerate(self.proj_rows):
+            g = projects[i] if i < len(projects) else None
+            if g is None:
+                if row.winfo_manager():
+                    row.pack_forget()
+                continue
+            if not row.winfo_manager():
+                row.pack(fill="x", pady=(3, 0), before=self.proj_more) if self.proj_more.winfo_manager() else row.pack(fill="x", pady=(3, 0))
+            tally: dict[str, int] = {}
+            for a in g["agents"]:
+                tally[a["kind"]] = tally.get(a["kind"], 0) + 1
+            who = ", ".join(f"{n} {k}" if n > 1 else k for k, n in tally.items())
+            self._set_text(f"pname{i}", name, elide(g["name"], 20), fg=FG if g["working"] else MUTED)
+            self._set_text(f"pkind{i}", kinds, elide(who, 24))
+            sig = "".join("1" if a["busy"] else "0" for a in g["agents"])
+            if self._texts.get(f"ppips{i}") != sig:
+                self._texts[f"ppips{i}"] = sig
+                pips.delete("all")
+                for k, busy in enumerate(sig[:6]):
+                    x = PIP_W - 6 - k * 10
+                    if busy == "1":
+                        pips.create_oval(x - 4, 3, x + 4, 11, fill=ACCENT, outline="")
+                    else:
+                        pips.create_oval(x - 3.5, 3.5, x + 3.5, 10.5, outline=MUTED, width=1.4)
+        more = len(projects) - len(self.proj_rows)
+        if more > 0:
+            self._set_text("pmore", self.proj_more, f"{more} more project{'s' if more > 1 else ''}")
+            if not self.proj_more.winfo_manager():
+                self.proj_more.pack(fill="x", pady=(2, 0))
+        elif self.proj_more.winfo_manager():
+            self.proj_more.pack_forget()
+
     def _nearest_timer(self) -> float | None:
         """Fraction of the soonest countdown still to go (for the ring round the orb), or None."""
         running = [t for t in (self.data or {}).get("timers") or [] if t["kind"] == "timer" and t.get("seconds")]
@@ -636,6 +700,7 @@ class Overlay:
             bits.append(elide(last["note"], 40))
         self._set_text("meta", self.meta, " · ".join(bits))
         self._render_timers()
+        self._render_projects(d.get("projects") or {})
         ex = d.get("last") or {}
         self._set_text("you", self.you, "You: " + elide(ex.get("request") or "-", 48))
         self._set_text("reply", self.reply, elide(ex.get("reply") or "-", 170))

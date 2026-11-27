@@ -1,10 +1,14 @@
-"""The floating icon's orb: smooth, anti-aliased frames with a soft glow, shown with per-pixel transparency.
+"""The floating icon: a graphite puck ringed by a bezel of light ticks. The bezel is the whole language of the icon.
 
-The first icon was drawn with Tk's canvas (no anti-aliasing, hard colour-key edge, ~25 fps): the owner found it static
-and jagged (2026-11-20). Now every frame is rendered with Pillow at 2x and scaled down (smooth edges), the glow is a
-real blur, and on Windows the frame is shown through a layered window (UpdateLayeredWindow), so the glow fades into
-whatever is behind it. Colours ease from one state to the next instead of jumping.
+Design (2026-11-27; the owner found the glass planet with orbiting rings "very mid"): one solid, opaque puck with a fine
+light edge and a soft drop shadow, so it reads on dark AND light desktops (the old glow turned into a grey smudge on a
+light one); 36 short ticks round the face carry the state - a single tick travelling slowly while waiting, a ripple while
+listening, comets chasing while thinking, a stepping hand while working, a round equaliser while speaking. A small lit
+core sits in the middle. A timer is a thin bright arc just outside the edge; an action waiting for approval turns the edge
+amber and adds a badge. Colours follow the 3D core of the window (cyan ready, green listening, violet thinking, teal
+working, blue speaking, red error) and ease from one state to the next.
 
+Static layers (shadow, puck, halo, core) are drawn once and cached; a frame draws 36 ticks and downsamples (~1-2 ms).
 `render(state)` is pure (unit-tested); `LayeredWindow` only presents a finished frame.
 """
 from __future__ import annotations
@@ -14,15 +18,18 @@ from dataclasses import dataclass
 
 from PIL import Image, ImageDraw, ImageFilter
 
-SIZE = 72  # window size in px (orb + room for the glow and ripples)
-ORB_R = 21  # orb radius in px
-SS = 3  # supersampling factor (3x: crisper edges than 2x)
+SIZE = 72  # window size in px (puck + room for its shadow, halo and the timer arc)
+ORB_R = 22  # puck radius in px
+SS = 3  # supersampling factor
 
-COLORS = {"idle": (34, 211, 238), "waiting": (34, 211, 238), "listening": (34, 197, 94), "recording": (34, 197, 94),
-          "transcribing": (163, 230, 53), "thinking": (245, 158, 11), "executing": (251, 146, 60), "speaking": (96, 165, 250),
-          "error": (239, 68, 68), "offline": (100, 116, 139), "loading": (148, 163, 184),
+COLORS = {"idle": (34, 211, 238), "waiting": (34, 211, 238), "listening": (52, 211, 153), "recording": (52, 211, 153),
+          "transcribing": (163, 230, 53), "thinking": (167, 139, 250), "executing": (45, 212, 191), "speaking": (96, 165, 250),
+          "error": (248, 113, 113), "offline": (100, 116, 139), "loading": (148, 163, 184),
           "following": (74, 222, 128)}  # conversation mode: listening without the wake word
 AMBER = (245, 158, 11)
+TICKS = 36
+TICK_OUT, TICK_IN = 19.0, 15.6  # tick radii in px (inside the puck's face)
+DIM = (54, 66, 88)  # an unlit tick: barely there, so the lit ones carry the state
 
 
 @dataclass
@@ -31,253 +38,180 @@ class OrbState:
     t: float = 0.0  # seconds, for animation
     color: tuple[float, float, float] = COLORS["waiting"]  # current (eased) colour
     approval: bool = False
-    timer: float | None = None  # fraction of the soonest timer still to go: a thin ring that shrinks as it runs down
+    timer: float | None = None  # fraction of the soonest timer still to go: a thin arc that shrinks as it runs down
 
 
 def ease_color(current, target, k: float = 0.12) -> tuple[float, float, float]:
     return tuple(c + (t - c) * k for c, t in zip(current, target))
 
 
-_GLOW: dict = {}
-_BODY: dict = {}
+_CACHE: dict = {}
 
 
-def _glow(color: tuple[int, int, int]) -> Image.Image:
-    """A soft disc of the state colour, blurred - cached per colour (rounded so easing reuses entries)."""
-    key = tuple(int(c) // 24 * 24 for c in color)
-    if key not in _GLOW:
-        s = SIZE * SS
-        img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
-        d = ImageDraw.Draw(img)
-        r = (ORB_R + 4) * SS  # a tight halo: the wide one made the orb look blurry (2026-11-20)
-        c = s // 2
-        d.ellipse((c - r, c - r, c + r, c + r), fill=(*key, 120))
-        _GLOW[key] = img.filter(ImageFilter.GaussianBlur(3.5 * SS))
-    return _GLOW[key]
+def _q(color) -> tuple[int, int, int]:
+    """Colour rounded so easing between states reuses cached layers."""
+    return tuple(int(c) // 16 * 16 for c in color)
 
 
-def _glow_at(color, k: float) -> Image.Image:
-    """The glow at one of 16 brightness levels (blending every frame cost ~3 ms)."""
-    level = max(0, min(16, round(k * 16)))
-    key = (tuple(int(c) // 24 * 24 for c in color), level)
-    if key not in _GLOW:
-        g = _glow(color)
-        _GLOW[key] = Image.blend(Image.new("RGBA", g.size, (0, 0, 0, 0)), g, level / 16)
-    return _GLOW[key]
-
-
-def _core_glow(color, cr: float, active: bool) -> Image.Image:
-    key = ("core", tuple(int(c) // 24 * 24 for c in color), round(cr), active)
-    if key not in _GLOW:
-        s, c = SIZE * SS, SIZE * SS / 2
-        core = Image.new("RGBA", (s, s), (0, 0, 0, 0))
-        ImageDraw.Draw(core).ellipse((c - cr * 1.9, c - cr * 1.9, c + cr * 1.9, c + cr * 1.9), fill=(*key[1], 60 if active else 25))
-        _GLOW[key] = core.filter(ImageFilter.GaussianBlur(1.5 * SS))
-    return _GLOW[key]
-
-
-def _comet(color, inset: float, span: float, n: int, width: float) -> Image.Image:
-    """An arc that fades from a bright head into a tail, drawn once per colour; frames just rotate it (drawing the
-    arcs every frame cost ~10 ms)."""
-    key = ("comet", tuple(int(v) // 24 * 24 for v in color), inset, span, n, width)
-    if key not in _GLOW:
+def _shadow() -> Image.Image:
+    if "shadow" not in _CACHE:
         s, c, r = SIZE * SS, SIZE * SS / 2, ORB_R * SS
         img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
-        d = ImageDraw.Draw(img)
-        box = (c - r + inset * SS, c - r + inset * SS, c + r - inset * SS, c + r - inset * SS)
-        for i in range(n):
-            a = int(255 * (1 - i / n) ** 1.5)
-            d.arc(box, -i * span - span, -i * span, fill=(*key[1], a), width=int(width * SS))
-        img.info["key"] = key  # rotated copies are cached under the same key
-        _GLOW[key] = img
-    return _GLOW[key]
+        dy = 1.6 * SS
+        ImageDraw.Draw(img).ellipse((c - r, c - r + dy, c + r, c + r + dy), fill=(0, 0, 0, 120))
+        _CACHE["shadow"] = img.filter(ImageFilter.GaussianBlur(2.6 * SS))
+    return _CACHE["shadow"]
 
 
-def _rotated(sprite: Image.Image, angle: float) -> Image.Image:
-    """`sprite` turned by `angle`, from 60 pre-rotated copies (6 degree steps; rotating every frame cost ~3 ms)."""
-    step = int(round((angle % 360) / 6)) % 60
-    key = ("rot", sprite.info.get("key"), step)
-    if key not in _GLOW:
-        _GLOW[key] = sprite.rotate(step * 6, resample=Image.BICUBIC)
-    return _GLOW[key]
-
-
-def _body() -> Image.Image:
-    """The dark glass sphere: a vertical gradient with a faint highlight - drawn once."""
-    if "body" not in _BODY:
-        s, r, c = SIZE * SS, ORB_R * SS, SIZE * SS // 2
-        grad = Image.new("RGBA", (s, s))
-        top, bottom = (24, 36, 64), (6, 10, 22)
-        for y in range(s):
-            f = y / (s - 1)
-            ImageDraw.Draw(grad).line([(0, y), (s, y)], fill=tuple(int(a + (b - a) * f) for a, b in zip(top, bottom)) + (255,))
-        mask = Image.new("L", (s, s), 0)
-        ImageDraw.Draw(mask).ellipse((c - r, c - r, c + r, c + r), fill=255)
-        body = Image.new("RGBA", (s, s), (0, 0, 0, 0))
-        body.paste(grad, (0, 0), mask)
-        hl = Image.new("RGBA", (s, s), (0, 0, 0, 0))
-        ImageDraw.Draw(hl).ellipse((c - r * 0.6, c - r * 0.85, c + r * 0.6, c - r * 0.15), fill=(255, 255, 255, 28))
-        body.alpha_composite(hl.filter(ImageFilter.GaussianBlur(3 * SS)))
-        _BODY["body"] = body
-    return _BODY["body"]
-
-
-def _sphere(color) -> Image.Image:
-    """A lit 3D glass sphere (2026-11-21: the owner wanted the icon 3D): per-pixel shading from a light at the top
-    left - dark glass, soft diffuse light, a specular glint and a rim light in the state colour. Drawn once per
-    colour (rounded so easing reuses entries), ~15 ms; frames just paste it."""
-    key = ("sphere", tuple(int(v) // 24 * 24 for v in color))
-    if key not in _BODY:
+def _puck() -> Image.Image:
+    """The graphite face: lit from the top left, a darker rim, a fine light edge and a faint bevel highlight."""
+    if "puck" not in _CACHE:
         import numpy as np
 
         s, r = SIZE * SS, ORB_R * SS
         ys, xs = np.mgrid[0:s, 0:s].astype(np.float32)
         x, y = (xs - s / 2 + 0.5) / r, (ys - s / 2 + 0.5) / r
-        rr = x * x + y * y
-        inside = rr <= 1.0
-        z = np.sqrt(np.clip(1.0 - rr, 0, 1))
-        light = np.array([-0.45, -0.6, 0.66], np.float32)
-        light /= np.linalg.norm(light)
-        diffuse = np.clip(x * light[0] + y * light[1] + z * light[2], 0, 1)
-        half = light + np.array([0, 0, 1], np.float32)
-        half /= np.linalg.norm(half)
-        spec = np.clip(x * half[0] + y * half[1] + z * half[2], 0, 1) ** 40
-        rim = (1 - z) ** 2.6
-        tint = np.array(key[1], np.float32)
-        base = np.array([8, 12, 26], np.float32)
-        rgb = (base[None, None] + diffuse[..., None] * np.array([30, 44, 78], np.float32)
-               + rim[..., None] * tint * 0.85 + spec[..., None] * 255 * 0.85)
-        # a soft edge (1.5 px) so the outline is smooth after downscaling
-        edge = np.clip((1.0 - np.sqrt(rr)) * r / (1.5 * SS), 0, 1)
-        alpha = np.where(inside, edge * 255, 0)
-        arr = np.dstack([np.clip(rgb, 0, 255), alpha]).astype(np.uint8)
-        _BODY[key] = Image.fromarray(arr, "RGBA")
-        if len(_BODY) > 40:
-            _BODY.clear()
-            _BODY[key] = Image.fromarray(arr, "RGBA")
-    return _BODY[key]
+        rr = np.sqrt(x * x + y * y)
+        light = np.clip(0.5 - 0.45 * (0.55 * x + 0.85 * y), 0, 1)  # brighter towards the top left
+        rim = np.clip((rr - 0.78) / 0.22, 0, 1) ** 1.5  # darker towards the edge
+        top, bottom = np.array([30, 38, 54], np.float32), np.array([11, 15, 23], np.float32)
+        rgb = bottom + (top - bottom) * light[..., None]
+        rgb = rgb * (1 - 0.35 * rim[..., None])
+        edge = np.clip((1.0 - rr) * r / (1.3 * SS), 0, 1)  # soft anti-aliased outline
+        arr = np.dstack([np.clip(rgb, 0, 255), edge * 255]).astype(np.uint8)
+        img = Image.fromarray(arr, "RGBA")
+        # ImageDraw on an RGBA image REPLACES pixels: a 30%-opaque line would punch a see-through hole in the solid
+        # puck (on a light desktop the ticks showed up whitish). Lines go on their own layer, then are blended on.
+        lines = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+        d = ImageDraw.Draw(lines)
+        c = s / 2
+        # a fine light edge separates the puck from dark desktops
+        d.ellipse((c - r + 0.6 * SS, c - r + 0.6 * SS, c + r - 0.6 * SS, c + r - 0.6 * SS), outline=(203, 213, 225, 70), width=max(1, int(0.9 * SS)))
+        # a bevel catching the light on the upper rim
+        d.arc((c - r + 1.6 * SS, c - r + 1.6 * SS, c + r - 1.6 * SS, c + r - 1.6 * SS), 200, 320, fill=(255, 255, 255, 46), width=max(1, int(1.1 * SS)))
+        img.alpha_composite(lines)
+        _CACHE["puck"] = img
+    return _CACHE["puck"]
 
 
-# Two rings orbiting the sphere in 3D: (radius factor, tilt about x in degrees, tilt about z, spin speed, precession speed)
-RINGS = ((1.42, 72.0, 18.0, 1.0, 0.18), (1.25, -60.0, -28.0, -1.35, -0.12))
-RING_SEGMENTS = 56
+def _halo(color, level: int) -> Image.Image:
+    """A tight coloured glow behind the puck at one of 12 strengths - only while something is happening."""
+    key = ("halo", _q(color), level)
+    if key not in _CACHE:
+        s, c, r = SIZE * SS, SIZE * SS / 2, (ORB_R + 3.5) * SS
+        img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+        ImageDraw.Draw(img).ellipse((c - r, c - r, c + r, c + r), fill=(*_q(color), int(115 * level / 12)))
+        _CACHE[key] = img.filter(ImageFilter.GaussianBlur(3.2 * SS))
+    return _CACHE[key]
 
 
-def _ring_points(t: float, ring: tuple, speed: float):
-    """Points (x, y, depth, along) of a tilted ring, rotated over time; along is 0..1 from its bright head."""
-    radius, tilt_x, tilt_z, spin, precess = ring
-    cx, cz = math.radians(tilt_x), math.radians(tilt_z)
-    ph, pr = t * spin * speed, t * precess * speed
-    out = []
-    for i in range(RING_SEGMENTS + 1):
-        th = 2 * math.pi * i / RING_SEGMENTS
-        x0, y0 = math.cos(th + ph) * radius, math.sin(th + ph) * radius
-        y1, z1 = y0 * math.cos(cx), y0 * math.sin(cx)  # tilt about x
-        x2, y2 = x0 * math.cos(cz) - y1 * math.sin(cz), x0 * math.sin(cz) + y1 * math.cos(cz)  # tilt about z
-        x3, z3 = x2 * math.cos(pr) + z1 * math.sin(pr), -x2 * math.sin(pr) + z1 * math.cos(pr)  # slow precession about y
-        out.append((x3, y2, z3, i / RING_SEGMENTS))
-    return out
+def _core(color, size: int, active: bool) -> Image.Image:
+    """The lit core: a small disc with a soft glow and a brighter centre."""
+    key = ("core", _q(color), size, active)
+    if key not in _CACHE:
+        s, c = SIZE * SS, SIZE * SS / 2
+        cr = size / 4 * SS
+        img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+        col = _q(color)
+        glow = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+        ImageDraw.Draw(glow).ellipse((c - cr * 2.2, c - cr * 2.2, c + cr * 2.2, c + cr * 2.2), fill=(*col, 70 if active else 25))
+        img.alpha_composite(glow.filter(ImageFilter.GaussianBlur(2 * SS)))
+        d = ImageDraw.Draw(img)
+        d.ellipse((c - cr, c - cr, c + cr, c + cr), fill=(*col, 255 if active else 150))
+        hi = tuple(min(255, v + 90) for v in col)
+        d.ellipse((c - cr * 0.45, c - cr * 0.45, c + cr * 0.45, c + cr * 0.45), fill=(*hi, 255 if active else 120))
+        _CACHE[key] = img
+    return _CACHE[key]
 
 
-def _draw_rings(d: ImageDraw.ImageDraw, t: float, col, speed: float, front: bool) -> None:
-    """The rings' halves in front of (front=True) or behind the sphere; brighter towards each ring's head."""
-    s, r = SIZE * SS, ORB_R * SS
-    c = s / 2
-    for ring in RINGS:
-        pts = _ring_points(t, ring, speed)
-        for (xa, ya, za, fa), (xb, yb, zb, _fb) in zip(pts, pts[1:]):
-            depth = (za + zb) / 2
-            if (depth >= 0) != front:
-                continue
-            if not front and (xa * xa + ya * ya) < 1.0:  # behind the sphere: hidden
-                continue
-            head = (1 - fa) ** 1.4  # bright head, fading tail: the spin is visible
-            a = int((70 + 170 * head) * (1.0 if front else 0.45))
-            w = (1.1 + 1.0 * head) * SS * (1.0 if front else 0.75)
-            d.line([(c + xa * r, c + ya * r), (c + xb * r, c + yb * r)], fill=(*col, a), width=max(1, int(w)))
+def _tail(pos: float, i: int, length: float) -> float:
+    """Brightness of tick i behind a head at `pos` (in ticks) moving clockwise, fading over `length` ticks."""
+    behind = (pos - i) % TICKS
+    return max(0.0, 1.0 - behind / length) ** 1.6
 
 
-def _draw_particles(d: ImageDraw.ImageDraw, t: float, col, speed: float, front: bool) -> None:
-    """Three small lights orbiting at different heights, sized and dimmed by depth."""
-    s, r = SIZE * SS, ORB_R * SS
-    c = s / 2
-    for k, (rad, incl, sp) in enumerate(((1.6, 0.35, 0.9), (1.3, -0.55, -1.2), (1.5, 0.9, 0.7))):
-        a = t * sp * speed + k * 2.1
-        x, z = math.cos(a) * rad, math.sin(a) * rad
-        y = z * math.sin(incl) * 0.6 + math.sin(a * 0.5 + k) * 0.15
-        if (z >= 0) != front or (not front and x * x + y * y < 1.0):
-            continue
-        size = (1.2 + 0.9 * (z / rad + 1) / 2) * SS
-        alpha = int(120 + 120 * (z / rad + 1) / 2)
-        px, py = c + x * r, c + y * r
-        d.ellipse((px - size, py - size, px + size, py + size), fill=(*[min(255, v + 70) for v in col], alpha))
-
-
-def ring_speed(state: str) -> float:
-    return {"thinking": 3.2, "executing": 3.0, "transcribing": 2.6, "speaking": 2.0, "recording": 1.8, "listening": 1.8,
-            "following": 1.3, "loading": 2.0, "offline": 0.0, "error": 0.6}.get(state, 0.7)
+def tick_levels(state: str, t: float) -> tuple[list[float], list[float]]:
+    """(brightness 0..1, extra inward length 0..1) for each of the TICKS ticks - the icon's whole animation."""
+    n = TICKS
+    lv, ln = [0.0] * n, [0.0] * n
+    if state in ("waiting", "idle"):
+        head = (t * 0.22 % 1.0) * n  # one tick goes round every ~4.5 s, a calm heartbeat
+        lv = [0.14 + 0.86 * _tail(head, i, 6) for i in range(n)]
+    elif state in ("listening", "recording"):
+        lv = [0.25 + 0.75 * (0.5 + 0.5 * math.sin(2 * math.pi * (2 * i / n - t * 1.3))) ** 2 for i in range(n)]
+        ln = [0.35 * (0.5 + 0.5 * math.sin(2 * math.pi * (2 * i / n - t * 1.3))) for i in range(n)]
+    elif state == "following":
+        lv = [0.18 + 0.6 * (0.5 + 0.5 * math.sin(2 * math.pi * (i / n - t * 0.35))) ** 2 for i in range(n)]
+    elif state in ("thinking", "transcribing", "loading"):
+        comets, speed, length = {"thinking": (3, 0.75, 7), "transcribing": (2, 1.1, 6), "loading": (1, 0.45, 9)}[state]
+        for k in range(comets):
+            head = ((t * speed + k / comets) % 1.0) * n
+            for i in range(n):
+                lv[i] = max(lv[i], _tail(head, i, length))
+        lv = [0.1 + 0.9 * v for v in lv]
+    elif state == "executing":
+        step = int(t * 12) % n  # a hand stepping round, leaving a fading trail: work in progress
+        lv = [0.12 + 0.88 * (1.0 if i == step else 0.6 * _tail(step, i, 10)) for i in range(n)]
+    elif state == "speaking":
+        for i in range(n):
+            a = abs(math.sin(t * 8.5 + i * 0.9) * math.sin(t * 5.1 + i * 0.37) + 0.35 * math.sin(t * 3.3 + i * 1.7))
+            lv[i], ln[i] = 0.3 + 0.7 * min(1.0, a), min(1.0, a)
+    elif state == "error":
+        lv = [0.3 + 0.5 * (0.5 + 0.5 * math.sin(t * 3.2))] * n
+    else:  # offline
+        lv = [0.06] * n
+    return lv, ln
 
 
 def render(o: OrbState) -> Image.Image:
     """One frame (RGBA, SIZE x SIZE) for the given state and time."""
-    if len(_GLOW) > 300:  # ~25 MB at most; cleared layers are rebuilt on demand in a few frames
-        _GLOW.clear()
-    s, c, r, t = SIZE * SS, SIZE * SS / 2, ORB_R * SS, o.t
+    if len(_CACHE) > 400:
+        _CACHE.clear()
+    s, c, R, t = SIZE * SS, SIZE * SS / 2, ORB_R * SS, o.t
     col = tuple(int(v) for v in o.color)
-    img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
     active = o.state not in ("offline",)
-    speed = ring_speed(o.state)
-    # glow: breathing when idle, stronger and quicker when busy
-    if active:
-        speed, lo, hi = {"recording": (2.2, 0.55, 1.0), "listening": (2.2, 0.55, 1.0), "speaking": (3.0, 0.5, 0.95),
-                         "thinking": (1.2, 0.45, 0.8), "executing": (1.4, 0.5, 0.85), "transcribing": (1.6, 0.5, 0.85),
-                         "error": (1.0, 0.4, 0.9), "following": (1.0, 0.3, 0.6)}.get(o.state, (0.55, 0.18, 0.4))
-        k = lo + (hi - lo) * (0.5 + 0.5 * math.sin(t * speed * math.pi))
-        img.alpha_composite(_glow_at(col, k))
-    d = ImageDraw.Draw(img)
-    # ripples while listening; soft waves while speaking
-    if o.state in ("recording", "listening", "speaking", "following"):
-        period = {"speaking": 0.9, "following": 2.2}.get(o.state, 1.3)  # following: slow, calm ripples
-        for i in range(2):
-            ph = ((t / period) + i / 2) % 1.0
-            rr = r + (4 + 14 * ph) * SS
-            a = int(150 * (1 - ph) ** 1.6)
-            d.ellipse((c - rr, c - rr, c + rr, c + rr), outline=(*col, a), width=int(1.6 * SS))
-    # 3D: the back halves of the rings and particles, then the lit sphere, then the front halves
-    _draw_rings(d, t, col, speed, front=False)
-    _draw_particles(d, t, col, speed, front=False)
-    img.alpha_composite(_sphere(col))
-    d = ImageDraw.Draw(img)
-    # a thin rim in the state colour keeps the state readable at a glance
-    d.ellipse((c - r, c - r, c + r, c + r), outline=(*col, 150 if active else 90), width=int(1.2 * SS))
-    _draw_rings(d, t, col, speed, front=True)
-    _draw_particles(d, t, col, speed, front=True)
-    # thinking / working: a comet arc running round the rim
-    if o.state in ("thinking", "executing", "transcribing", "loading"):
-        img.alpha_composite(_rotated(_comet(col, inset=4, span=7, n=18, width=2.6), -(t * 300)))
-        d = ImageDraw.Draw(img)
-    # core: a glowing dot, or voice bars while speaking
-    if o.state == "speaking":
-        for i, phase in enumerate((0.0, 1.7, 3.1)):
-            h = (4 + 7 * (0.5 + 0.5 * math.sin(t * 9 + phase))) * SS
-            x = c + (i - 1) * 5 * SS
-            d.rounded_rectangle((x - 1.5 * SS, c - h, x + 1.5 * SS, c + h), radius=1.5 * SS, fill=(*col, 255))
-    else:
-        pulse = 1 + (0.25 * math.sin(t * 6) if o.state in ("recording", "listening") else 0.06 * math.sin(t * 2))
-        cr = 5.5 * SS * pulse
-        img.alpha_composite(_core_glow(col, cr, active))
-        d = ImageDraw.Draw(img)
-        d.ellipse((c - cr, c - cr, c + cr, c + cr), fill=(*[min(255, v + 60) for v in col], 255 if active else 150))
-    # a running timer: a thin bright ring just outside the rim, shrinking clockwise from the top as time runs out
-    if o.timer is not None:
-        rr = r + 3.2 * SS
-        d.arc((c - rr, c - rr, c + rr, c + rr), -90, -90 + 360 * max(0.004, o.timer), fill=(226, 232, 240, 230), width=int(1.6 * SS))
-    # an action waiting for approval: an amber arc sweeping round the outside, and a badge
-    if o.approval:
-        img.alpha_composite(_rotated(_comet(AMBER, inset=-4, span=6, n=14, width=2.4), t * 220))
-        d = ImageDraw.Draw(img)
-        bx, by, br = c + r * 0.72, c - r * 0.72, 5 * SS
-        d.ellipse((bx - br, by - br, bx + br, by + br), fill=(*AMBER, 255), outline=(10, 14, 26, 255), width=SS)
+    img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+    busy = o.state not in ("waiting", "idle", "offline")
+    if busy or o.approval:  # a halo only while something is happening; at rest the icon is quiet
+        breathe = 0.5 + 0.5 * math.sin(t * (2.4 if o.state in ("recording", "listening", "speaking") else 1.4))
+        level = max(1, min(12, round(3 + 7 * breathe)))
+        img.alpha_composite(_halo(AMBER if o.approval and not busy else col, level))
+    img.alpha_composite(_shadow())
+    img.alpha_composite(_puck())
+    layer = Image.new("RGBA", (s, s), (0, 0, 0, 0))  # lines are blended on, never drawn straight onto the puck (see _puck)
+    d = ImageDraw.Draw(layer)
+    lv, ln = tick_levels(o.state, t)
+    for i in range(TICKS):
+        a = -math.pi / 2 + 2 * math.pi * i / TICKS
+        v = lv[i]
+        ri = (TICK_IN - 2.6 * ln[i]) * SS
+        ro = TICK_OUT * SS
+        lit = tuple(min(255, int(col[k] + (255 - col[k]) * 0.35 * max(0.0, v - 0.7) / 0.3)) for k in range(3))  # hottest ticks go towards white
+        tint = tuple(int(DIM[k] + (lit[k] - DIM[k]) * v) for k in range(3))
+        alpha = int(70 + 185 * v ** 0.8) if active else 70
+        w = (1.15 + 0.85 * v) * SS
+        ca, sa = math.cos(a), math.sin(a)
+        d.line([(c + ca * ri, c + sa * ri), (c + ca * ro, c + sa * ro)], fill=(*tint, alpha), width=max(1, int(w)))
+    img.alpha_composite(layer)
+    # the core: steady while waiting, beating while listening, pulsing gently otherwise
+    pulse = {"recording": 0.18, "listening": 0.18, "following": 0.1}.get(o.state, 0.05)
+    size = int(round(4.4 * 4 * (1 + pulse * math.sin(t * (6 if pulse > 0.1 else 2)))))
+    img.alpha_composite(_core(col, size, active))
+    if o.timer is None and not o.approval:
+        return img.resize((SIZE, SIZE), Image.LANCZOS)
+    layer = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+    d = ImageDraw.Draw(layer)
+    if o.timer is not None:  # countdown: a thin bright arc just outside the edge, shrinking clockwise from the top
+        rr, end = R + 2.4 * SS, -90 + 360 * max(0.004, o.timer)
+        # a dark under-stroke keeps the bright arc visible on a light desktop too
+        d.arc((c - rr, c - rr, c + rr, c + rr), -90, end, fill=(15, 20, 30, 170), width=max(1, int(2.6 * SS)))
+        d.arc((c - rr, c - rr, c + rr, c + rr), -90, end, fill=(236, 240, 245, 245), width=max(1, int(1.4 * SS)))
+    if o.approval:  # something needs the owner: an amber edge that breathes, and a badge at the top right
+        k = 0.55 + 0.45 * (0.5 + 0.5 * math.sin(t * 4))
+        d.ellipse((c - R + 0.6 * SS, c - R + 0.6 * SS, c + R - 0.6 * SS, c + R - 0.6 * SS), outline=(*AMBER, int(255 * k)), width=int(1.4 * SS))
+        bx, by, br = c + R * 0.72, c - R * 0.72, 4.8 * SS
+        d.ellipse((bx - br, by - br, bx + br, by + br), fill=(*AMBER, 255), outline=(15, 20, 30, 255), width=SS)
+    img.alpha_composite(layer)
     return img.resize((SIZE, SIZE), Image.LANCZOS)
 
 

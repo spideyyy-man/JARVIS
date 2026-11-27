@@ -335,7 +335,16 @@ def open_url(ctx: ToolContext, url: str) -> dict:
     return {"opened": target}
 
 
+def running_projects(ctx: ToolContext) -> dict:
+    from ..workspace import describe
+
+    snap = ctx.app.workspace.snapshot()
+    return {**snap, "summary": describe(snap)}
+
+
 def register(reg: ToolRegistry) -> None:
+    reg.register(Tool("running_projects", "Which of the user's projects have AI agents (Claude Code, Codex, Gemini CLI, Antigravity...) "
+                      "running right now, how many per project, and which are working or idle.", {}, running_projects))
     reg.register(Tool("system_stats", "Current CPU, memory, swap, disk, load, uptime, the heaviest processes and a health assessment. Use for any question about computer performance.", {}, system_stats))
     reg.register(Tool("list_processes", "List running processes sorted by cpu or memory.", {
         "sort_by": {"type": "string", "enum": ["cpu", "memory"]}, "limit": {"type": "integer", "minimum": 1, "maximum": 100},

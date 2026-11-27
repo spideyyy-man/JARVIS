@@ -410,6 +410,30 @@ Since 2026-11-19 (Edge's online recogniser failed on the laptop with "Speech rec
   Thinking-2507 tried as a "think harder" mode: ~1-2 tokens/s here (with jarvis-model also loaded, 8.4 GB together), so
   1,024 tokens of reasoning took 8-13 min per task without reaching an answer - unusable on this laptop. Both Qwen 3.5
   models and the thinking model were deleted again. A bigger brain needs a cloud model, more RAM or a GPU.
+- **New icon + running projects** (2026-11-27; the owner: the icon is "very mid", and JARVIS should know which projects
+  are running and how many AIs work on each). Direction set with the frontend-design skill.
+  - Icon (`orb.py`): a solid graphite puck with a fine light edge and a drop shadow (reads on dark AND light desktops -
+    the old glass planet with rings became a grey smudge on light ones) ringed by 36 ticks that carry the state:
+    one tick travelling slowly (waiting), a ripple (listening), violet comets (thinking), a stepping hand (working),
+    a round equaliser (speaking); a lit core in the middle; timer = thin bright arc outside the edge with a dark
+    under-stroke; approval = amber edge + badge. Colours = the 3D core's (cyan / green / violet / teal / blue / red).
+    Lines are drawn on a separate layer and blended: ImageDraw on RGBA replaces pixels, so a 30%-opaque tick punched a
+    see-through hole in the puck (test `test_the_new_icon_is_solid...`). ~1.8-2.3 ms/frame (best of noisy runs on the
+    busy laptop). Previews were checked as contact sheets; not seen live on the owner's screen.
+  - Projects (`workspace.py`, `WorkspaceWatcher`, started only when `settings.watch_agents` - the desktop app sets it, tests
+    never scan the real machine): every 10 s, agent processes (Claude Code CLI / desktop sessions, Codex sandboxes,
+    Gemini CLI, Antigravity's language server, Aider, OpenCode, Cursor agent, Goose, Copilot CLI, Qwen Code - not the app
+    windows or services) -> project = deepest folder the agent or its shells work in, named `<department>/<project>`
+    under the allowed roots, by git repository elsewhere, "Codex task" for Documents\Codex\<date>\<task>; working =
+    its process tree used >= 0.12 s CPU since the last scan. The process table comes from one Toolhelp snapshot
+    (`process_table`): psutil's process_iter took 48 s for 561 processes on the loaded laptop. Command lines are only
+    used to recognise an agent, never stored or returned (the JARVIS window's own command line holds its API token).
+    Blocked folders show as "private folder". JARVIS's own running agents count as a "JARVIS" row.
+  - Hover panel: "Projects" with "N of M working", up to 4 rows (name, which AIs, one dot per AI - filled working,
+    hollow idle), "N more projects". `/api/overlay` has `projects`; `GET /api/projects`; tool `running_projects`
+    (READ, fast path) + rule ("what projects are running", "how many AIs are working", "is claude working"; commands
+    like "open claude" are not taken). Live scan (2026-11-27): Claude Code in EDIT2, Jarvis, linkedin; Antigravity in
+    forge-ai; Gemini CLI in the home folder; a Codex task.
 - **Floating icon** (`overlay.py`, tkinter, its own `pythonw` process started by the desktop app with
   `--parent PID`): a 46 px always-on-top circle, coloured by state; hover (or click to pin) shows a panel from
   `GET /api/overlay` - now/heard/last exchange, approvals with Approve/Deny, activity (`EventBus.activity`,

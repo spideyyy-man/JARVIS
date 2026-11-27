@@ -24,6 +24,7 @@ from .tools import browser, coding, desktop, everyday, files, images, personal, 
 from .tools.registry import ToolExecutor, ToolRegistry, ToolResult
 from .translate import NLLB, Translator, language_of
 from .voice import build_voice
+from .workspace import WorkspaceWatcher
 
 AFFIRM_ALL = re.compile(r"^\s*(hey\s+)?(jarvis[,\s]+)?(approve all|yes to all|approve (them|these|everything)( all)?|approve for (this|the) (whole )?task|always allow( this)?( for (this|the) task)?)[\s.!]*$", re.I)
 MAX_CONTINUATIONS = 20
@@ -89,6 +90,9 @@ class Jarvis:
         self.llm = LLMRouter(providers if providers is not None else self._build_providers(), on_event=self._llm_event, timeout=self.settings.llm_timeout)
         self.stt, self.tts = build_voice(self.settings)
         self.voice = VoiceService(self)  # offline wake word + speech recognition; started by the desktop app
+        # which projects have AI agents (Claude Code, Codex, Gemini CLI...) working on them; scanned in the background
+        self.workspace = WorkspaceWatcher(roots=[str(r) for r in self.settings.allowed_roots], home=str(Path.home()),
+                                          is_private=lambda p: self.guard.is_sensitive(Path(p)), extra=self._own_agents)
         self.selftest = None  # the running/last self-test (selftest.py)
         self._chat_tasks: dict[str, asyncio.Task] = {}
         self._background: set[asyncio.Task] = set()
@@ -149,6 +153,12 @@ class Jarvis:
         if self.settings.listen_on_start:
             self.voice.start(asyncio.get_running_loop())
         self._timer_task = asyncio.create_task(self._timers_loop(), name="jarvis-timers")
+        if self.settings.watch_agents:
+            self.workspace.start()
+
+    def _own_agents(self) -> list[dict]:
+        """JARVIS's own agents while a task runs, shown next to the other AIs (one row: "JARVIS")."""
+        return [{"name": "JARVIS", "kind": f"JARVIS {a.get('agent', 'agent')}"} for a in list(self.agents.active.values())]
 
     async def _timers_loop(self) -> None:
         """Timers and alarms (tools/everyday.py) ring on time: checked twice a second (the reminder loop's 15 s
@@ -203,6 +213,7 @@ class Jarvis:
             if task:
                 task.cancel()
         await asyncio.to_thread(self.voice.stop)
+        self.workspace.stop()
         primary = self.llm.primary
         if getattr(primary, "keep_alive", "") and hasattr(primary, "unload"):
             await primary.unload()  # give the model's memory back when JARVIS quits

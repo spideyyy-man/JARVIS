@@ -84,6 +84,7 @@ class Settings:
     wake_word: str = "jarvis"
     stt_model: str = "whisper-1"
     listen_on_start: bool = False  # set by the desktop app: run the offline listener (tests and the bare server do not)
+    watch_agents: bool = False  # set by the desktop app: scan for AI agents working on projects (workspace.py); tests do not
     stt_local_model: str = "small"  # offline listener (listen.py): the bigger multilingual model (English second opinions)
     stt_tamil_model: str = "tamil-small"  # offline listener: writes Tamil - "tamil-small" (Whisper small trained on Tamil, IIT Madras), a folder, or a size
     local_tts: str = "piper"  # voice for spoken replies: piper (natural, fast) | kokoro (most natural, slow here) | windows
