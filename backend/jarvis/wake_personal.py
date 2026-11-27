@@ -211,6 +211,13 @@ class PersonalWake:
     def positives(self) -> list[Path]:
         return sorted(self.positives_dir.glob("*.wav"))
 
+    def new_calls(self) -> int:
+        """Live calls (call-*.wav) saved after the model file was written."""
+        if not self.model_path.is_file():
+            return 0
+        trained = self.model_path.stat().st_mtime
+        return sum(1 for p in self.positives_dir.glob("call-*.wav") if p.stat().st_mtime > trained)
+
     def train(self, negatives: list[np.ndarray], general: Path | None = None, seed: int = 7) -> dict:
         """Train on the saved positives against `negatives` (room speech, ordinary requests) and, when given, the
         general speech/noise windows in `general`. Saves and loads the model; returns a report. Raises ValueError

@@ -314,7 +314,28 @@ def tray_icon(jarvis: Jarvis, on_quit):
     return pystray.Icon("jarvis", img, "JARVIS", menu)
 
 
+LOG_MAX_BYTES = 2_000_000
+
+
+def console_to_log(log: Path) -> bool:
+    """Started without a console (pythonw: the start-with-Windows launcher, the floating icon's process), Python's
+    stdout/stderr are None and the first library that writes a line - the server's logging setup - crashes the app
+    before it starts, silently. Send both to a log file instead; it also records why a start at sign-in failed.
+    Returns True when it redirected."""
+    if sys.stdout is not None and sys.stderr is not None:
+        return False
+    log.parent.mkdir(parents=True, exist_ok=True)
+    if log.is_file() and log.stat().st_size > LOG_MAX_BYTES:
+        log.replace(log.with_suffix(".log.1"))  # keep one previous file
+    stream = open(log, "a", encoding="utf-8", buffering=1, errors="replace")  # noqa: SIM115 - lives as long as the process
+    stream.write(f"\n--- JARVIS started {time.strftime('%Y-%m-%d %H:%M:%S')} (pid {os.getpid()}) ---\n")
+    sys.stdout = sys.stdout or stream
+    sys.stderr = sys.stderr or stream
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
+    console_to_log(Path.home() / ".jarvis" / "desktop.log")
     ap = argparse.ArgumentParser(prog="jarvis.desktop_app")
     ap.add_argument("--no-window", action="store_true")
     ap.add_argument("--show", action="store_true", help="keep the window open at start instead of minimising it to the taskbar")

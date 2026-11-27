@@ -470,10 +470,10 @@ def test_a_missed_jarvis_gets_a_second_chance_off_the_listening_loop(tmp_path):
     import threading
 
     lst = LocalListener(tmp_path / "models", lambda *a: None, lambda *a: None)
-    lst._verify_wake = lambda audio: ("", {"language": "en"})
+    lst._verify_wake = lambda audio, loose=False: ("", {"language": "en"})
     worker = threading.Thread(target=lst._second_chance_worker, daemon=True)
     worker.start()
-    lst._second.put_nowait((np.zeros(16000, "float32"), None))
+    lst._second.put_nowait((np.zeros(16000, "float32"), None, 0.0))  # (audio, sample, personal score)
     for _ in range(50):
         if lst._late is not None:
             break
@@ -533,11 +533,11 @@ def test_a_longer_jarvis_request_is_caught_by_its_start(tmp_path):
     import threading
 
     lst = LocalListener(tmp_path / "models", lambda *a: None, lambda *a: None)
-    lst._head_is_jarvis = lambda audio: True
+    lst._head_is_jarvis = lambda audio, loose=False: True
     lst.transcribe = lambda audio: ("what is the weather in Chennai today?", "en", {"seconds": 1.0})
     worker = threading.Thread(target=lst._second_chance_worker, daemon=True)
     worker.start()
-    lst._second.put_nowait((np.zeros(16000 * 4, "float32"), None))
+    lst._second.put_nowait((np.zeros(16000 * 4, "float32"), None, 0.0))
     for _ in range(50):
         if lst._late is not None:
             break

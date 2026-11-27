@@ -39,6 +39,27 @@ The doctor's `Model` line matters most: it asks the model to call a tool and rep
 and how long it took. The installer also saves its output to `doctor-report.txt` (git-ignored).
 
 Only one JARVIS may run at a time (port 8765); starting it again just brings the running one's window up.
+
+Starts with Windows since 2026-11-27 (it had not run for 4 days after a reboot): `JARVIS.vbs` in the Startup folder
+(`desktop_app --install-autostart`, run from the project folder so `.env` is found; `--remove-autostart` undoes it)
+runs `pythonw`. Without a console stdout/stderr are None, which crashed the start silently; `console_to_log` now sends
+them to `~/.jarvis/desktop.log` (2 MB, one old copy). Checked by running the .vbs through wscript (server, icon, one
+window, listener hearing the mic); a real sign-in after a reboot has not been seen yet.
+
+Wake word measured on the owner's own recordings (2026-11-27, `tests/test_wake_fixes.py`): 10 enrolled calls, 10 live
+calls the Whisper check had confirmed, 40 short room clips, 30 requests. Live calls caught: personal model at its 0.99
+threshold 4/10 (room speech has a median score of 0.75 and up to 0.986 - it barely separates), Whisper's exact "Jarvis"
+7/10 (it spells the owner's voice "And Jodabis", "Jealous", "Masters"; without the prompt "got it", "Dharis", "Goddess"),
+keyword spotter 0/10, hey_jarvis 1/10. Fix: a segment whose personal peak is >= `PERSONAL_CANDIDATE` 0.85 is a likely
+call - it jumps the second-chance queue (no pause needed before it) and Whisper's spelling only has to sound like Jarvis
+(`sounds_like_jarvis`, difflib >= 0.6 on the first three words). Result on the same clips: 9/10 live calls, 0 false wakes
+on 67 non-calls (3 clips that really start with "Jarvis" caught). Self-confirmed sound-alikes are not saved as training
+examples; wake samples Whisper said "no" to but the personal model scored >= 0.85 are not used as negatives; retraining
+is counted from `call-*` files newer than `model.npz` (`retrain_if_due`, also at start) - the in-memory counter reset on
+every restart, so the 10 calls of 22 Nov never retrained the model. Known risk: a J-name the owner says ("Jagdish") can
+sound alike and wake it when the personal score is also >= 0.85. Not measured live yet.
+With the counting fixed, the restart retrained on all 20 recordings (48 s): threshold 0.99 -> 0.967, worst held-out
+room speech 0.986 -> 0.872, held-out calls 5/5 at 0.99-0.999 (was 2/2 at 0.991-0.995).
 To restart it, use the tray menu's Quit (it also closes the window), or stop the
 `python.exe -m jarvis.desktop_app` processes and the `msedge.exe` processes whose command line contains
 `.jarvis\ui-profile` - never the user's other Edge windows.

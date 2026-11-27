@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import contextlib
+import difflib
 import os
 import queue
 import re
@@ -72,6 +74,25 @@ KWS_SHA256 = "f170013b4716e41b62b9bfd809687c207cef798ef9bc6534d524e17af9b6561a"
 # thread (the listening loop never waits for it), at most one at a time. "Jarvis" there still wakes JARVIS, ~1-3 s late,
 # instead of not at all (2026-11-21: the owner called "Jarvis" and got no response).
 SECOND_CHANCE_MAX = 2.5  # s of speech checked whole; longer utterances are checked by their first HEAD_SECONDS only
+# Personal-model score at which a segment is a likely call: checked first, even right after other speech, and Whisper's
+# spelling only has to sound like "Jarvis". On the owner's recordings (2026-11-27): live calls 9/10 (Whisper's exact
+# "Jarvis" alone 7/10, the personal model's own 0.99 alone 4/10), 0 false wakes on 67 room clips and requests.
+PERSONAL_CANDIDATE = 0.85
+
+
+def sounds_like_jarvis(text: str) -> int | None:
+    """Where a word that sounds like "Jarvis" ends in the first three words of `text`, or None. How Whisper spelled the
+    owner's "Jarvis": Jarrus, Dharis, Darvish, Jodders, "And Jodabis" (two words joined). Only used when the personal
+    model also thinks it was the owner's call - alone, a sound-alike is not enough."""
+    words = list(re.finditer(r"[A-Za-z]+", text))[:3]
+    for i, w in enumerate(words):
+        options = [(w.group().lower(), w.end())]
+        if i + 1 < len(words):
+            options.append((w.group().lower() + words[i + 1].group().lower(), words[i + 1].end()))
+        for word, end in options:
+            if len(word) >= 4 and difflib.SequenceMatcher(None, word, "jarvis").ratio() >= 0.6:
+                return end
+    return None
 # On the owner's live calls (2026-11-21) the keyword spotter caught 0/2 at every setting, even where it already woke on
 # their ordinary requests; the second chance caught 2/2 in ~1 s. So every separate utterance gets this check.
 WAKE_SAMPLES = 40  # short unanswered utterances kept (this computer only) to see why a call was missed
@@ -328,7 +349,6 @@ class LocalListener:
         self.personal.load()
         self._enroll: dict | None = None
         self._training = threading.Lock()
-        self._auto_since_train = 0
 
     def log(self, event: str, **data) -> None:
         """One line per event in <data>/voice-log.jsonl (this computer only; ~0.5 MB, then the older half is dropped)."""
@@ -376,24 +396,25 @@ class LocalListener:
         if not on:
             self._spoke_until = time.time() + 0.6  # the room still echoes for a moment
 
-    def _verify_wake(self, audio) -> tuple[str, dict] | None:
+    def _verify_wake(self, audio, loose: bool = False) -> tuple[str, dict] | None:
         """Was this short speech segment "Jarvis ..."? (text after the wake word, info) or None. ~1 s with base.en."""
         if not self._whisper_ready.wait(timeout=0.1) or self._whisper is None:
             return None
         with self._model_lock:
-            return self._verify_wake_locked(audio)
+            return self._verify_wake_locked(audio, loose)
 
     def _second_chance_worker(self) -> None:
         while not self._stop.is_set():
             try:
-                audio, stem = self._second.get(timeout=0.5)
+                audio, stem, personal = self._second.get(timeout=0.5)
             except queue.Empty:
                 continue
             t0 = time.time()
+            loose = personal >= PERSONAL_CANDIDATE  # the owner's voice model half-recognised it: accept sound-alikes
             try:
                 if len(audio) <= SECOND_CHANCE_MAX * RATE:
-                    found = self._verify_wake(audio)
-                elif self._head_is_jarvis(audio):
+                    found = self._verify_wake(audio, loose)
+                elif self._head_is_jarvis(audio, loose):
                     # "Jarvis, <a longer request>": the start said Jarvis - the whole segment is the request
                     text, lang, info = self.transcribe(audio)
                     found = (text, {**info, "language": lang})
@@ -402,13 +423,14 @@ class LocalListener:
             except Exception as e:  # noqa: BLE001
                 self.log("second chance failed", error=f"{type(e).__name__}: {e}")
                 continue
-            self.log("second chance", jarvis=found is not None, rest=(found[0][:80] if found else ""), seconds=round(time.time() - t0, 1))
+            self.log("second chance", jarvis=found is not None, rest=(found[0][:80] if found else ""), seconds=round(time.time() - t0, 1),
+                     personal=round(personal, 3), matched=(found[1].get("matched", "exact") if found else ""))
             if stem is not None:
                 self._label_wake_sample(stem, found is not None)
             if found is not None:
                 self._late = found
-                if not found[0] and len(audio) <= SECOND_CHANCE_MAX * RATE:
-                    self._learn_from_call(audio)
+                if not found[0] and len(audio) <= SECOND_CHANCE_MAX * RATE and found[1].get("matched", "exact") == "exact":
+                    self._learn_from_call(audio)  # only calls Whisper spelled "Jarvis" itself: the model must not teach itself
 
     def _label_wake_sample(self, stem: Path, jarvis: bool) -> None:
         try:
@@ -428,10 +450,16 @@ class LocalListener:
             self.personal.add_positive(audio, "call")
         except Exception:  # noqa: BLE001
             return
-        self._auto_since_train += 1
-        if self.personal.ready() and self._auto_since_train >= RETRAIN_AFTER:
-            self._auto_since_train = 0
-            threading.Thread(target=self.train_personal, args=("new calls",), daemon=True, name="jarvis-wake-train").start()
+        self.retrain_if_due()
+
+    def retrain_if_due(self) -> bool:
+        """Retrain once RETRAIN_AFTER confirmed calls were saved since the model was trained. Counted from the files, not
+        in memory: the counter used to reset on every restart, so 10 calls saved over several runs (22 Nov) never
+        retrained the model. Also called at start-up."""
+        if not self.personal.ready() or self.personal.new_calls() < RETRAIN_AFTER:
+            return False
+        threading.Thread(target=self.train_personal, args=("new calls",), daemon=True, name="jarvis-wake-train").start()
+        return True
 
     def train_personal(self, reason: str = "enrolment") -> dict:
         """Train the owner's wake model on their recordings against room speech (wake samples the Whisper check said
@@ -451,7 +479,10 @@ class LocalListener:
                     note = json.loads(wav.with_suffix(".json").read_text(encoding="utf-8"))
                 except Exception:  # noqa: BLE001
                     note = {}
-                if note.get("jarvis") is False:  # only what the Whisper check said was not a call
+                # only what the Whisper check said was not a call - and not when the voice model disagreed: Whisper misses
+                # some of the owner's calls ("Jealous", "Masters"), and training on those as negatives taught the model
+                # that the owner's own "Jarvis" is not a call
+                if note.get("jarvis") is False and note.get("personal", 0.0) < PERSONAL_CANDIDATE:
                     negatives.append(load_wav(wav))
             # the owner's own voice saying other words: their saved requests after the first 2 s (a request recording can
             # start with "Jarvis")
@@ -482,7 +513,7 @@ class LocalListener:
         self.log("enrolment started", needed=calls)
         return True
 
-    def _head_is_jarvis(self, audio) -> bool:
+    def _head_is_jarvis(self, audio, loose: bool = False) -> bool:
         """Does a longer segment start with "Jarvis"? Only its first HEAD_SECONDS are read (cheap)."""
         if not self._whisper_ready.wait(timeout=0.1) or self._whisper is None:
             return False
@@ -490,7 +521,8 @@ class LocalListener:
             model = self._english_model() if self.english_size else self._whisper
             head = list(model.transcribe(audio[: int(HEAD_SECONDS * RATE)], language="en", beam_size=1, vad_filter=True,
                                          condition_on_previous_text=False, without_timestamps=True, initial_prompt=VERIFY_PROMPT)[0])
-        return bool(WAKE_START.match(" ".join(x.text.strip() for x in head).strip()))
+        text = " ".join(x.text.strip() for x in head).strip()
+        return bool(WAKE_START.match(text)) or (loose and sounds_like_jarvis(text) is not None)
 
     def _keep_wake_sample(self, audio, note: dict) -> Path | None:
         """Short unanswered utterances in <data>/wake-samples (keep_samples off -> none), the last WAKE_SAMPLES of them."""
@@ -518,7 +550,7 @@ class LocalListener:
         except Exception:  # noqa: BLE001
             return None
 
-    def _verify_wake_locked(self, audio) -> tuple[str, dict] | None:
+    def _verify_wake_locked(self, audio, loose: bool = False) -> tuple[str, dict] | None:
         t0 = time.time()
         model = self._english_model() if self.english_size else self._whisper
         segments = list(model.transcribe(audio, language="en", beam_size=1, vad_filter=True, condition_on_previous_text=False,
@@ -527,6 +559,10 @@ class LocalListener:
         no_speech = max((x.no_speech_prob for x in segments), default=1.0)
         logprob = min((x.avg_logprob for x in segments), default=-9.0)
         m = WAKE_START.match(text)
+        matched = "exact"
+        if not m and loose and (end := sounds_like_jarvis(text)) is not None:
+            # the personal model already thinks this was the owner's "Jarvis": accept how Whisper spells their voice
+            m, matched = re.match(r"^.{%d}" % end, text, re.S), "sound-alike"
         if not m:
             # With a Tamil request after it, the English model may not write "Jarvis" at all ("Jumpers, before this...").
             # When it is unsure of the segment, look at the start alone: only if that is "Jarvis" is the rest checked
@@ -542,7 +578,7 @@ class LocalListener:
         else:
             rest = text[m.end():].strip()
         info = {"model": self.english_size or self.fast_size, "detected": "en", "probability": 1.0, "language": "en",
-                "no_speech": round(no_speech, 2), "logprob": round(logprob, 2), "fast_seconds": 0.0}
+                "no_speech": round(no_speech, 2), "logprob": round(logprob, 2), "fast_seconds": 0.0, "matched": matched}
         if rest and "ta" in self.languages:
             # "Jarvis, <request>": always ask which language it was. The English model was confidently wrong on the
             # owner's everyday Tamil ("I'll be able to kill him like that", -0.27, was Tamil; 2026-11-20).
@@ -763,10 +799,12 @@ class LocalListener:
             return
         self.error = ""
         self._set("waiting")
+        self.retrain_if_due()  # calls saved during earlier runs count too
         recording: list = []
         skip = 0
         cooldown_until = 0.0
         pre: collections.deque = collections.deque(maxlen=PRE_ROLL_FRAMES)  # the moment before a follow-up starts
+        recent_personal: collections.deque = collections.deque(maxlen=SEG_MAX_FRAMES + 2 * SEG_END_FRAMES + PRE_ROLL_FRAMES)
         heard_run = 0  # consecutive speech frames seen during a follow-up window
         seg: list = []  # the current speech segment while waiting (checked for a plain "Jarvis")
         seg_score, seg_quiet, quiet_run, seg_after_quiet, next_verify = 0.0, 0, 99, False, 0.0
@@ -803,6 +841,7 @@ class LocalListener:
                     if self.personal.ready():  # the owner's own wake model: ~0.1 ms on features the wake model just made
                         personal = self.personal.score(wake.preprocessor.get_features(16))
                         st["personal_peak"] = round(max(st.get("personal_peak", 0.0) * 0.995, personal), 3)
+                    recent_personal.append(personal)
                     keyword = False
                     if spot is not None:
                         spot.accept_waveform(RATE, frame.astype(np.float32) / 32768.0)
@@ -872,11 +911,20 @@ class LocalListener:
                             note = {"seconds": round(speech_s, 2), "hey_jarvis": round(float(seg_score), 2), "talking": talking,
                                     "after_quiet": seg_after_quiet, "behind_s": st["behind_s"], "level": round(float(np.sqrt(np.mean(audio ** 2))) * 32768)}
                             # every separate utterance gets the check: short ones whole, longer ones by their start
-                            second = not talking and seg_after_quiet and now >= cooldown_until and self._second.empty()
-                            stem = self._keep_wake_sample(audio, {**note, "personal": round(personal, 3)}) if speech_s <= 3.0 else None
+                            seg_personal = max(list(recent_personal)[-len(seg):], default=0.0)  # the peak over the segment
+                            # Every separate utterance gets the check while the checker is free. One the owner's voice model
+                            # half-recognised is checked even right after other speech (TV, family) and jumps the queue:
+                            # those were the calls lost while a slower check was still running.
+                            likely = seg_personal >= PERSONAL_CANDIDATE
+                            second = not talking and now >= cooldown_until and (likely or (seg_after_quiet and self._second.empty()))
+                            stem = self._keep_wake_sample(audio, {**note, "personal": round(seg_personal, 3)}) if speech_s <= 3.0 else None
                             if second:
-                                self._second.put_nowait((audio, stem))
-                            self.log("speech", second_chance=second, **note)
+                                if likely and self._second.full():
+                                    with contextlib.suppress(queue.Empty):
+                                        self._second.get_nowait()  # drop the waiting ordinary segment for this likely call
+                                with contextlib.suppress(queue.Full):
+                                    self._second.put_nowait((audio, stem, seg_personal))
+                            self.log("speech", second_chance=second, personal=round(seg_personal, 3), **note)
                         seg, seg_score, seg_quiet = [], 0.0, 0  # the spotter listens for "Jarvis"; no Whisper check per segment
                     if not trigger and seg and (seg_quiet >= SEG_END_FRAMES or len(seg) >= SEG_MAX_FRAMES):
                         candidate, cand_score = seg, seg_score

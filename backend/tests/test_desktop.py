@@ -327,3 +327,27 @@ def test_window_matching_and_routing(jarvis, monkeypatch):
     assert "Inbox - Outlook" in run(jarvis.chat("what windows are open", "c1"))["text"]
     r = run(jarvis.chat("switch to chrome", "c1"))
     assert r["pending_approvals"] and 'window matching "chrome"' in jarvis.db.one("SELECT preview FROM approvals WHERE status='pending'")["preview"]
+
+
+def test_started_without_a_console_output_goes_to_a_log(tmp_path, monkeypatch):
+    """The start-with-Windows launcher runs pythonw: stdout/stderr are None, and the server's logging setup crashed
+    JARVIS silently before it started (seen on the owner's laptop, 2026-11-27)."""
+    import sys
+
+    from jarvis import desktop_app
+
+    log = tmp_path / "jarvis" / "desktop.log"
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", None)
+    assert desktop_app.console_to_log(log)
+    print("hello from a windowless start")
+    sys.stderr.write("an error line\n")
+    text = log.read_text(encoding="utf-8")
+    assert "JARVIS started" in text and "hello from a windowless start" in text and "an error line" in text
+    sys.stdout.close()
+
+
+def test_with_a_console_nothing_is_redirected(tmp_path):
+    from jarvis import desktop_app
+
+    assert desktop_app.console_to_log(tmp_path / "desktop.log") is False and not (tmp_path / "desktop.log").exists()
