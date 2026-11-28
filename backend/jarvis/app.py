@@ -154,6 +154,9 @@ class Jarvis:
             self.voice.start(asyncio.get_running_loop())
         self._timer_task = asyncio.create_task(self._timers_loop(), name="jarvis-timers")
         if self.settings.watch_agents:
+            # also published for the agent control plane (D:\spideyy\agent-control-plane), which shows it as observed
+            # context next to hook-confirmed work - see WorkspaceWatcher.observation
+            self.workspace.publish_to = str(self.settings.data_dir / "observer" / "agents.json")
             self.workspace.start()
 
     def _own_agents(self) -> list[dict]:

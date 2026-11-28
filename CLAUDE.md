@@ -466,6 +466,12 @@ Since 2026-11-19 (Edge's online recogniser failed on the laptop with "Speech rec
     PrintWindow capture of the card drawn off-screen; live window lookup found Windows Terminal (EDIT2), the Claude app
     (Jarvis) and Antigravity (ALPHA). Not checked on the owner's screen: the card's look, clicking through to windows,
     pausing real speech.
+- **Observer for the agent control plane** (2026-11-28; `D:\spideyy\agent-control-plane`, the owner's WhatsApp status
+  agent): with `watch_agents` on, `WorkspaceWatcher` also writes `observation()` to `~/.jarvis/observer/agents.json`
+  after every scan (atomic): per agent process its kind, project, CPU yes/no and the app whose window it runs in
+  (`Agent.window_app`, the nearest ancestor with a visible top-level window). Metadata only - no window titles, screen
+  text, paths, pids or command lines - and HYATT folders are left out. The control plane shows it as "Seen by Jarvis (not
+  counted)"; only the AI apps' hooks confirm work there. Screen reading (OCR) and desktop control are not used for it.
 - **Floating icon** (`overlay.py`, tkinter, its own `pythonw` process started by the desktop app with
   `--parent PID`): a 46 px always-on-top circle, coloured by state; hover (or click to pin) shows a panel from
   `GET /api/overlay` - now/heard/last exchange, approvals with Approve/Deny, activity (`EventBus.activity`,

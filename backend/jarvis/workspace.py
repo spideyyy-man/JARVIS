@@ -15,9 +15,11 @@ JARVIS window's own command line does). Folders the user blocked (JARVIS_BLOCKED
 from __future__ import annotations
 
 import re
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
 from typing import Callable
 
@@ -192,6 +194,7 @@ class Agent:
     pid: int
     folder: str
     busy: bool = False
+    window_app: str = ""  # the app whose window the agent runs in (WindowsTerminal, Claude, Antigravity...), "" if none
 
 
 @dataclass
@@ -202,6 +205,7 @@ class WorkspaceWatcher:
     every: float = 10.0
     is_private: Callable[[str], bool] = lambda _p: False
     extra: Callable[[], list[dict]] = lambda: []  # JARVIS's own agents (app.agents.active), added per snapshot
+    publish_to: str = ""  # after each scan, write observation() here for other local tools (the agent control plane)
     _cache: dict = field(default_factory=dict)  # (pid, create_time) -> kind or None
     _cpu: dict = field(default_factory=dict)  # pid -> cpu seconds at the previous scan
     _latest: dict = field(default_factory=dict)
@@ -220,6 +224,8 @@ class WorkspaceWatcher:
         while not self._stop.is_set():
             try:
                 self.scan()
+                if self.publish_to:
+                    self.publish(self.publish_to)
             except Exception:  # noqa: BLE001 - the hover simply shows the previous result
                 pass
             self._stop.wait(self.every)
@@ -310,8 +316,55 @@ class WorkspaceWatcher:
                     continue
                 merged[k] = a
             out.append(a)
+        try:  # which app's window each agent runs in: the agent or its nearest ancestor that owns a visible window
+            windows = top_windows()
+        except (OSError, AttributeError):
+            windows = {}
+        for a in out:
+            p, hops = a.pid, 0
+            while p and hops < 10:
+                if p in windows:
+                    a.window_app = re.sub(r"\.exe$", "", procs.get(p, ("", 0))[0], flags=re.I)
+                    break
+                p, hops = procs.get(p, ("", 0))[1], hops + 1
         self._latest = {"agents": out, "at": time.time()}
         return out
+
+    def observation(self) -> dict:
+        """What JARVIS can see, for other local tools (schema 1, read by the agent control plane's observer adapter):
+        per agent process its kind, project, whether it used CPU since the last scan and which app's window it runs in.
+        Read-only, metadata only: no window titles, screen text, command lines, prompts or folder paths. A visible
+        window or CPU use is context, not proof that the agent is working - only the apps' own hooks confirm work.
+        HYATT company folders are left out (the owner's reporting rule)."""
+        agents = []
+        for a in list(self._latest.get("agents", [])):
+            if a.folder and re.search(r"hyatt", a.folder, re.I):
+                continue
+            if a.folder and self.is_private(a.folder):
+                project = "private folder"
+            elif not a.folder:
+                project = "no project folder"
+            else:
+                project = project_for(a.folder, self.roots, self.home, repo=repo_root)[0]
+            agents.append({"kind": a.kind, "project": project, "cpu_active": a.busy,
+                           "window_app": a.window_app, "window_visible": bool(a.window_app)})
+        at = self._latest.get("at")
+        return {"schema": 1, "observer": "jarvis",
+                "generated_at": datetime.fromtimestamp(at or time.time(), timezone.utc).isoformat(),
+                "scan_every_s": self.every,
+                "capabilities": {"process_scan": True, "window_presence": bool(sys.platform == "win32"), "screen_text": False},
+                "agents": agents}
+
+    def publish(self, path: str) -> None:
+        """Write observation() atomically (readers never see half a file)."""
+        import json
+        import os
+
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(target.name + ".tmp")
+        tmp.write_text(json.dumps(self.observation(), indent=1), encoding="utf-8")
+        os.replace(tmp, target)
 
     def _groups(self) -> dict[str, dict]:
         """key -> {name, group, agents, pids, folder} for the latest scan (pids/folder stay inside: see snapshot)."""

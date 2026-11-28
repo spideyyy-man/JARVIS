@@ -633,7 +633,8 @@ class Overlay:
             shown = elide(g["name"], 18)
             self._set_text(f"pname{i}", name, shown, fg=FG if g["working"] else MUTED)
             # name + AIs share one line: the AIs get what is left between the name and the dots (measured in pixels)
-            room = PANEL_W - 16 - 20 - (PIP_W + 4) - 6 - 6 - self._measure(BOLD, shown)
+            # the labels' own padding counts too: use the name label's real width and keep 6 px for the AI label's padding
+            room = PANEL_W - 16 - 20 - (PIP_W + 4) - 6 - 6 - name.winfo_reqwidth() - 6
             self._set_text(f"pkind{i}", kinds, self._fit(SMALL, who, room))
             sig = color + "".join("1" if a["busy"] else "0" for a in g["agents"])
             if self._texts.get(f"ppips{i}") != sig:

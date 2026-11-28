@@ -309,3 +309,31 @@ def test_the_icon_api_has_pause_sound_and_project_windows(jarvis):
 def test_an_ai_without_a_readable_folder_is_named_after_itself():
     snap = _watcher([Agent("Codex", 5, "", False)]).snapshot()
     assert snap["projects"][0]["name"] == "Codex" and snap["projects"][0]["group"] == "no project folder"
+
+
+def test_the_observation_for_the_control_plane_is_metadata_only(tmp_path):
+    """JARVIS publishes what it sees for the agent control plane (spideyy/agent-control-plane): kind, project, CPU use
+    and which app's window - no window titles, folder paths, command lines or pids - and never HYATT company folders."""
+    import json
+
+    w = _watcher([Agent("Claude Code", 11, r"D:\spideyy\Automation and Agents\Jarvis", True, window_app="Claude"),
+                  Agent("Codex", 12, r"D:\HYATT\distributor", True, window_app="ChatGPT"),
+                  Agent("Gemini CLI", 13, r"D:\spideyy\.account\x", False),
+                  Agent("Antigravity", 14, "", False)],
+                 private=lambda p: ".account" in p)
+    w._latest["at"] = 1764324000.0
+    obs = w.observation()
+    assert obs["schema"] == 1 and obs["observer"] == "jarvis" and obs["generated_at"].startswith("2025-11-28")
+    assert obs["capabilities"]["screen_text"] is False
+    kinds = {a["kind"]: a for a in obs["agents"]}
+    assert set(kinds) == {"Claude Code", "Gemini CLI", "Antigravity"}  # the HYATT folder is left out
+    assert kinds["Claude Code"] == {"kind": "Claude Code", "project": "Jarvis", "cpu_active": True, "window_app": "Claude", "window_visible": True}
+    assert kinds["Gemini CLI"]["project"] == "private folder"
+    assert kinds["Antigravity"]["project"] == "no project folder"
+    text = json.dumps(obs)
+    assert "spideyy" not in text.lower() and "hyatt" not in text.lower() and "pid" not in text  # no paths, no pids
+
+    target = tmp_path / "observer" / "agents.json"
+    w.publish(str(target))
+    assert json.loads(target.read_text(encoding="utf-8")) == obs
+    assert not list(target.parent.glob("*.tmp"))  # written atomically
