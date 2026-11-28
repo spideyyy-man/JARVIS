@@ -2,8 +2,8 @@
 
     python -m jarvis.overlay [--parent PID]      (the desktop app starts it; it exits when that process ends)
 
-The puck's bezel and colour show the state (orb.py: cyan ready, green listening, violet thinking, teal working, blue
-speaking, red error, grey when JARVIS is not reachable).
+The puck's bezel shows the state by its motion; JARVIS is always cyan (orb.py), red on an error, grey when not
+reachable, amber when an action waits for approval. Other colours are the projects'.
 - Hover (or click to keep it open): a compact panel that fades in - one status line, the projects AI agents are working
   on (one dot per AI: filled working, hollow idle), the last request and reply, a "Last 5" drop-down, a command box,
   and Talk / Window.
@@ -32,18 +32,19 @@ from .orb import COLORS as ORB_COLORS
 from .orb import SIZE, LayeredWindow, OrbState, ease_color, render
 
 ORB = SIZE  # the icon window (the orb itself is smaller; the rest is room for its glow)
-PANEL_W = 300
+PANEL_W = 272
+HOVER_OPEN_S, HOVER_CLOSE_S = 0.35, 0.45  # a deliberate hover opens the card; passing by does not
 BAR_W = 250
 KEY = "#010203"  # transparent colour around the circle
 BG, CARD, FG, MUTED, LINE, ACCENT, AMBER = "#0b1220", "#131c30", "#e2e8f0", "#8b98ad", "#1f2a44", "#22d3ee", "#f59e0b"
-COLORS = {"idle": "#22d3ee", "waiting": "#22d3ee", "listening": "#34d399", "recording": "#34d399", "transcribing": "#a3e635",  # = orb.COLORS
-          "thinking": "#a78bfa", "executing": "#2dd4bf", "speaking": "#60a5fa", "error": "#f87171", "offline": "#64748b", "loading": "#94a3b8", "following": "#4ade80"}
+COLORS = {k: "#%02x%02x%02x" % v for k, v in ORB_COLORS.items()}  # JARVIS is cyan; red error, grey off (see orb.COLORS)
 LABELS = {"idle": "Ready", "waiting": "Say “Jarvis”", "recording": "Listening…", "transcribing": "Understanding…",
           "thinking": "Thinking…", "executing": "Working…", "speaking": "Speaking", "error": "Something went wrong", "offline": "Not running",
           "loading": "Loading speech model…", "listening": "Listening…", "following": "Listening — just keep talking"}
-PROJECT_ROWS = 4  # projects listed in the panel; the rest are counted ("2 more")
-PIP_W = 64  # room for the per-AI dots
+PROJECT_ROWS = 5  # projects listed in the card; the rest are counted ("2 more")
+PIP_W = 60  # room for the per-AI dots
 FONT = ("Segoe UI", 9)
+ICON_FONT = ("Segoe UI Symbol", 11)  # the card's four control buttons
 SMALL = ("Segoe UI", 8)
 BOLD = ("Segoe UI Semibold", 9)
 FADE_STEP, FADE_MS, PANEL_ALPHA = 0.09, 12, 0.97  # ~0.13 s fade
@@ -146,10 +147,18 @@ class Pill(tk.Canvas):
         super().__init__(parent, width=w, height=h, bg=parent_bg, highlightthickness=0, bd=0, cursor="hand2")
         self._imgs = (rounded_image(w, h, h // 2, bg, parent_bg), rounded_image(w, h, h // 2, _lighter(bg), parent_bg))
         self._bgitem = self.create_image(0, 0, image=self._imgs[0], anchor="nw")
-        self.create_text(w // 2, h // 2, text=text, fill=fg, font=font)
+        self._text = self.create_text(w // 2, h // 2, text=text, fill=fg, font=font)
         self.bind("<Button-1>", lambda _e: cmd())
         self.bind("<Enter>", lambda _e: self.itemconfigure(self._bgitem, image=self._imgs[1]))
         self.bind("<Leave>", lambda _e: self.itemconfigure(self._bgitem, image=self._imgs[0]))
+
+    def set_text(self, text: str) -> None:
+        if self.itemcget(self._text, "text") != text:
+            self.itemconfigure(self._text, text=text)
+
+    def set_fg(self, color: str) -> None:
+        if self.itemcget(self._text, "fill") != color:
+            self.itemconfigure(self._text, fill=color)
 
 
 class RoundBox(tk.Canvas):
@@ -269,12 +278,9 @@ class Overlay:
                 self.pos_file.write_text(json.dumps({"x": self.root.winfo_x(), "y": self.root.winfo_y()}))
             except OSError:
                 pass
-        elif self.panel_fade.shown:  # a click just opens/closes it; only the pin keeps it open (clicks used to pin it,
-            self.pinned = False      # so it stayed after the pointer left - the owner's "it stays for a long time")
-            self._pin_color()
+        else:  # a click goes into the window (the card itself opens on hover)
             self._hide_panel()
-        else:
-            self._show_panel()
+            self._open_window()
 
     def _area(self) -> tuple[int, int, int, int]:
         return work_area() or (0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight())
@@ -295,7 +301,11 @@ class Overlay:
     def _button(self, parent, text: str, cmd, bg: str = "#1e293b", fg: str = FG, font=SMALL) -> Pill:
         return Pill(parent, text, cmd, bg=bg, fg=fg, font=font)
 
-    # -- the hover panel ----------------------------------------------------------------------------------------------------
+    # -- the hover card ------------------------------------------------------------------------------------------------------
+    # Compact on purpose (2026-11-27; the owner compared it with ChatGPT's companion: the old panel was big, wordy and
+    # popped up when the pointer merely passed by). It holds: the projects AIs are working on (each in its own colour -
+    # the same colour as its arc on the icon; click to jump to the window its AI runs in), a small chat box, the last
+    # reply folded under "˅", and four controls - talk, pause speaking, sound on/off, open the window.
     def _build_panel(self):
         p = self.panel = tk.Toplevel(self.root)
         p.overrideredirect(True)
@@ -303,107 +313,93 @@ class Overlay:
         p.configure(bg=BG, highlightthickness=0)
         p.withdraw()
         round_window(p, LINE)
-        self.panel_fade = Fader(p, on_step=lambda f: self._place_panel(slide=(1 - f) ** 2 * 18))  # eased slide
+        self.panel_fade = Fader(p, on_step=lambda f: self._place_panel(slide=(1 - f) ** 2 * 14))  # eased slide
 
-        head = tk.Frame(p, bg=BG)
-        head.pack(fill="x", padx=10, pady=(8, 0))
-        self.dot = tk.Canvas(head, width=10, height=10, bg=BG, highlightthickness=0)
-        self.dot.pack(side="left", pady=(2, 0))
-        self.status = tk.Label(head, text="", font=BOLD, fg=FG, bg=BG, anchor="w")
-        self.status.pack(side="left", padx=(6, 0))
-        self.pin = tk.Label(head, text="📌", font=SMALL, fg=MUTED, bg=BG, cursor="hand2")
-        self.pin.pack(side="right")
-        self.pin.bind("<Button-1>", lambda _e: self._toggle_pin())
-        self.meta = tk.Label(p, text="", font=SMALL, fg=MUTED, bg=BG, anchor="w")
-        self.meta.pack(fill="x", padx=10)
-        self.timer_row = tk.Label(p, text="", font=BOLD, fg=ACCENT, bg=BG, anchor="w")  # live countdowns; hidden when none
-
-        # Projects with AI agents working on them (workspace.py): one row per project, one dot per AI - filled while it
-        # works, hollow while it sits idle.
-        proj = tk.Frame(p, bg=BG)
-        proj.pack(fill="x", padx=10, pady=(8, 0))
-        head2 = tk.Frame(proj, bg=BG)
-        head2.pack(fill="x")
-        tk.Label(head2, text="Projects", font=BOLD, fg=FG, bg=BG, anchor="w").pack(side="left")
-        self.proj_count = tk.Label(head2, text="", font=SMALL, fg=MUTED, bg=BG, anchor="e")
-        self.proj_count.pack(side="right")
+        self.proj = tk.Frame(p, bg=BG)
+        self.proj.pack(fill="x", padx=8, pady=(8, 0))
         self.proj_rows = []
         for _ in range(PROJECT_ROWS):
-            row = tk.Frame(proj, bg=BG)
-            pips = tk.Canvas(row, width=PIP_W, height=14, bg=BG, highlightthickness=0)
-            pips.pack(side="right", pady=(1, 0))
-            name = tk.Label(row, text="", font=FONT, fg=FG, bg=BG, anchor="w")
+            row = tk.Frame(self.proj, bg=BG, cursor="hand2")
+            # the AI dots are packed first: pack gives space in packing order, so long names can no longer push them out
+            pips = tk.Canvas(row, width=PIP_W, height=16, bg=BG, highlightthickness=0)
+            pips.pack(side="right", padx=(0, 4))
+            dot = tk.Canvas(row, width=10, height=16, bg=BG, highlightthickness=0)
+            dot.pack(side="left", padx=(4, 6))
+            name = tk.Label(row, text="", font=BOLD, fg=FG, bg=BG, anchor="w")
             name.pack(side="left")
             kinds = tk.Label(row, text="", font=SMALL, fg=MUTED, bg=BG, anchor="w")
             kinds.pack(side="left", padx=(6, 0))
-            self.proj_rows.append((row, name, kinds, pips))
-        self.proj_more = tk.Label(proj, text="", font=SMALL, fg=MUTED, bg=BG, anchor="w")
-
-        card = RoundBox(p, PANEL_W - 20, fill=CARD, radius=10, pad=9)
-        card.pack(padx=10, pady=(6, 0))
-        self.you = tk.Label(card.inner, text="", font=SMALL, fg=MUTED, bg=CARD, anchor="w", justify="left")
-        self.you.pack(fill="x")
-        self.reply = tk.Label(card.inner, text="", font=FONT, fg=FG, bg=CARD, anchor="w", justify="left", wraplength=PANEL_W - 44)
-        self.reply.pack(fill="x", pady=(2, 0))
-
-        self.hist_toggle = tk.Label(p, text="▸ Last 5", font=SMALL, fg=ACCENT, bg=BG, anchor="w", cursor="hand2")
-        self.hist_toggle.pack(fill="x", padx=10, pady=(4, 0))
-        self.hist_toggle.bind("<Button-1>", lambda _e: self._toggle_history())
-        self.hist = tk.Frame(p, bg=BG)
-        self.hist_rows = []
-        for _ in range(5):
-            row = tk.Label(self.hist, text="", font=SMALL, fg=MUTED, bg=BG, anchor="w", justify="left", wraplength=PANEL_W - 24)
-            row.pack(fill="x", pady=(0, 3))
-            self.hist_rows.append(row)
+            widgets = (row, dot, name, kinds, pips)
+            for w in widgets:
+                w.bind("<Button-1>", lambda _e, r=row: self._open_project(r))
+                w.bind("<Enter>", lambda _e, ws=widgets: self._row_hover(ws, True))
+                w.bind("<Leave>", lambda _e, ws=widgets: self._row_hover(ws, False))
+            self.proj_rows.append(widgets)
+        self.proj_empty = tk.Label(self.proj, text="No AI agents running", font=SMALL, fg=MUTED, bg=BG, anchor="w")
+        self.proj_more = tk.Label(self.proj, text="", font=SMALL, fg=MUTED, bg=BG, anchor="w")
+        tk.Frame(p, bg=LINE, height=1).pack(fill="x", padx=10, pady=(6, 0))
 
         self.box = tk.Frame(p, bg=BG)
-        self.box.pack(fill="x", padx=10, pady=(6, 0))
-        field = RoundBox(self.box, PANEL_W - 20 - 40, fill=CARD, radius=14, pad=6)
+        self.box.pack(fill="x", padx=8, pady=(8, 0))
+        field = RoundBox(self.box, PANEL_W - 16 - 40, fill=CARD, radius=14, pad=6)
         field.pack(side="left")
         self.entry = tk.Entry(field.inner, font=FONT, bg=CARD, fg=FG, insertbackground=FG, relief="flat", highlightthickness=0, bd=0)
         self.entry.pack(fill="x", ipady=2, padx=4)
         self.entry.bind("<Return>", lambda _e: self._send())
         self._button(self.box, "➤", self._send, bg="#0e7490").pack(side="right")
 
+        self.last_toggle = tk.Label(p, text="˅  Last reply", font=SMALL, fg=MUTED, bg=BG, anchor="w", cursor="hand2")
+        self.last_toggle.pack(fill="x", padx=12, pady=(6, 0))
+        self.last_toggle.bind("<Button-1>", lambda _e: self._toggle_last())
+        self.last_card = RoundBox(p, PANEL_W - 16, fill=CARD, radius=10, pad=8)
+        self.you = tk.Label(self.last_card.inner, text="", font=SMALL, fg=MUTED, bg=CARD, anchor="w", justify="left", wraplength=PANEL_W - 40)
+        self.you.pack(fill="x")
+        self.reply = tk.Label(self.last_card.inner, text="", font=FONT, fg=FG, bg=CARD, anchor="w", justify="left", wraplength=PANEL_W - 40)
+        self.reply.pack(fill="x", pady=(2, 0))
+
         row = tk.Frame(p, bg=BG)
-        row.pack(fill="x", padx=10, pady=(7, 10))
-        self._button(row, "🎤 Talk", self._talk).pack(side="left")
-        self._button(row, "Window", self._open_window).pack(side="left", padx=5)
+        row.pack(fill="x", padx=8, pady=(6, 8))
+        self.talk_btn = self._button(row, "🎤", self._talk, font=ICON_FONT)
+        self.talk_btn.pack(side="left")
+        self.pause_btn = self._button(row, "⏸", self._pause, font=ICON_FONT)
+        self.pause_btn.pack(side="left", padx=(4, 0))
+        self.sound_btn = self._button(row, "🔊", self._toggle_sound, font=ICON_FONT)
+        self.sound_btn.pack(side="left", padx=(4, 0))
+        self._button(row, "↗", self._open_window, font=ICON_FONT).pack(side="left", padx=(4, 0))
         self.note = tk.Label(row, text="", font=SMALL, fg=MUTED, bg=BG, anchor="e")
         self.note.pack(side="right")
+        self.timer_row = self.note  # countdowns share the status spot
+        self.meta = self.note
         p.bind("<Enter>", lambda _e: setattr(self, "outside_since", None))
 
-    def _toggle_pin(self):
-        self.pinned = not self.pinned
-        self._pin_color()
+    def _row_hover(self, widgets, on: bool):
+        bg = CARD if on else BG
+        for w in widgets:
+            w.configure(bg=bg)
 
-    def _pin_color(self):
-        self.pin.configure(fg=ACCENT if self.pinned else MUTED)
+    def _toggle_last(self):
+        self.last_open = not getattr(self, "last_open", False)
+        self.last_toggle.configure(text=("˄  Last reply" if self.last_open else "˅  Last reply"))
+        if self.last_open:
+            self.last_card.pack(padx=8, pady=(4, 0), after=self.last_toggle)
+        else:
+            self.last_card.pack_forget()
+        self._place_panel()
 
     def _on_orb(self) -> bool:
-        """The pointer is over the visible orb (a circle), not just the square window around its glow."""
+        """The pointer is over the visible puck (a circle), not just the square window around its shadow."""
         try:
             px, py = self.root.winfo_pointerxy()
             cx, cy = self.root.winfo_rootx() + ORB / 2, self.root.winfo_rooty() + ORB / 2
         except tk.TclError:
             return False
-        return (px - cx) ** 2 + (py - cy) ** 2 <= 27 ** 2
-
-    def _toggle_history(self):
-        self.history_open = not self.history_open
-        self.hist_toggle.configure(text=("▾ Last 5" if self.history_open else "▸ Last 5"))
-        if self.history_open:
-            self.hist.pack(fill="x", padx=10, pady=(2, 0), before=self.box)
-        else:
-            self.hist.pack_forget()
-        self._place_panel()
+        return (px - cx) ** 2 + (py - cy) ** 2 <= 24 ** 2
 
     def _show_panel(self):
         self.outside_since = None
         self._render()
         self._place_panel()
         self.panel_fade.show()
-        self.pin.configure(fg=ACCENT if self.pinned else MUTED)
 
     def _hide_panel(self):
         self.panel_fade.hide()
@@ -547,7 +543,7 @@ class Overlay:
         if not self.panel_fade.shown:
             if on_orb:
                 self.hover_since = self.hover_since or time.time()
-                if time.time() - self.hover_since > 0.15:
+                if time.time() - self.hover_since > HOVER_OPEN_S:
                     self._show_panel()
             else:
                 self.hover_since = None
@@ -561,7 +557,7 @@ class Overlay:
             self.outside_since = None
         elif self.outside_since is None:
             self.outside_since = time.time()
-        elif time.time() - self.outside_since > 0.25:
+        elif time.time() - self.outside_since > HOVER_CLOSE_S:
             self.hover_since = None
             self._hide_panel()
 
@@ -598,53 +594,79 @@ class Overlay:
                 parts.append("⏰ " + time.strftime("%I:%M %p", time.localtime(t["due"])).lstrip("0") + (f" {t['label']}" if t["label"] else ""))
         return "   ·   ".join(parts[:3])
 
-    def _render_timers(self):
-        text = self._timer_text()
-        if text and not self.timer_row.winfo_manager():
-            self.timer_row.pack(fill="x", padx=10, pady=(2, 0), after=self.meta)
-        elif not text and self.timer_row.winfo_manager():
-            self.timer_row.pack_forget()
-        self._set_text("timers", self.timer_row, text)
+    def _measure(self, font, text: str) -> int:
+        import tkinter.font as tkfont
+
+        fonts = self.__dict__.setdefault("_fonts", {})
+        if font not in fonts:
+            fonts[font] = tkfont.Font(font=font)
+        return fonts[font].measure(text)
+
+    def _fit(self, font, text: str, px: int) -> str:
+        """The text, shortened with '…' until it fits in px pixels (empty when not even a few letters fit)."""
+        t = " ".join(str(text or "").split())
+        if self._measure(font, t) <= px:
+            return t
+        while len(t) > 3 and self._measure(font, t + "…") > px:
+            t = t[:-1].rstrip(" ,")
+        return t + "…" if len(t) > 3 else ""
 
     def _render_projects(self, snap: dict):
-        """One row per project with AIs on it: name, which AIs, and a dot per AI (filled = working, hollow = idle)."""
+        """One row per project with AIs on it, in the project's own colour: a dot, the name, which AIs, and one small dot
+        per AI (filled = working, hollow = idle). Clicking a row opens the window its AI runs in."""
         projects = snap.get("projects") or []
-        total, working = snap.get("agents", 0), snap.get("working", 0)
-        count = "No AI agents running" if not projects else (f"{working} of {total} working" if total else "")
-        if snap.get("at") is None:
-            count = "Looking…"
-        self._set_text("proj_count", self.proj_count, count)
-        for i, (row, name, kinds, pips) in enumerate(self.proj_rows):
+        self._projects = projects
+        for i, (row, dot, name, kinds, pips) in enumerate(self.proj_rows):
             g = projects[i] if i < len(projects) else None
             if g is None:
                 if row.winfo_manager():
                     row.pack_forget()
                 continue
             if not row.winfo_manager():
-                row.pack(fill="x", pady=(3, 0), before=self.proj_more) if self.proj_more.winfo_manager() else row.pack(fill="x", pady=(3, 0))
+                row.pack(fill="x", pady=(1, 0), before=self.proj_more) if self.proj_more.winfo_manager() else row.pack(fill="x", pady=(1, 0))
+            row.project_key = g.get("key", "")
+            color = g.get("color") or ACCENT
             tally: dict[str, int] = {}
             for a in g["agents"]:
                 tally[a["kind"]] = tally.get(a["kind"], 0) + 1
             who = ", ".join(f"{n} {k}" if n > 1 else k for k, n in tally.items())
-            self._set_text(f"pname{i}", name, elide(g["name"], 20), fg=FG if g["working"] else MUTED)
-            self._set_text(f"pkind{i}", kinds, elide(who, 24))
-            sig = "".join("1" if a["busy"] else "0" for a in g["agents"])
+            shown = elide(g["name"], 18)
+            self._set_text(f"pname{i}", name, shown, fg=FG if g["working"] else MUTED)
+            # name + AIs share one line: the AIs get what is left between the name and the dots (measured in pixels)
+            room = PANEL_W - 16 - 20 - (PIP_W + 4) - 6 - 6 - self._measure(BOLD, shown)
+            self._set_text(f"pkind{i}", kinds, self._fit(SMALL, who, room))
+            sig = color + "".join("1" if a["busy"] else "0" for a in g["agents"])
             if self._texts.get(f"ppips{i}") != sig:
                 self._texts[f"ppips{i}"] = sig
+                dot.delete("all")
+                dot.create_oval(1, 4, 9, 12, fill=color, outline="")
                 pips.delete("all")
-                for k, busy in enumerate(sig[:6]):
+                for k, busy in enumerate(sig[len(color):][:6]):
                     x = PIP_W - 6 - k * 10
                     if busy == "1":
-                        pips.create_oval(x - 4, 3, x + 4, 11, fill=ACCENT, outline="")
+                        pips.create_oval(x - 3.5, 4.5, x + 3.5, 11.5, fill=color, outline="")
                     else:
-                        pips.create_oval(x - 3.5, 3.5, x + 3.5, 10.5, outline=MUTED, width=1.4)
+                        pips.create_oval(x - 3, 5, x + 3, 11, outline=color, width=1.3)
+        empty = not projects
+        if empty and not self.proj_empty.winfo_manager():
+            self.proj_empty.pack(fill="x", padx=4, pady=(0, 2))
+        elif not empty and self.proj_empty.winfo_manager():
+            self.proj_empty.pack_forget()
         more = len(projects) - len(self.proj_rows)
         if more > 0:
             self._set_text("pmore", self.proj_more, f"{more} more project{'s' if more > 1 else ''}")
             if not self.proj_more.winfo_manager():
-                self.proj_more.pack(fill="x", pady=(2, 0))
+                self.proj_more.pack(fill="x", padx=4, pady=(1, 0))
         elif self.proj_more.winfo_manager():
             self.proj_more.pack_forget()
+
+    def _project_colors(self) -> tuple:
+        """((r, g, b), total, working) per project, for the coloured arcs on the resting icon."""
+        out = []
+        for g in ((self.data or {}).get("projects") or {}).get("projects") or []:
+            h = g.get("color") or "#22d3ee"
+            out.append(((int(h[1:3], 16), int(h[3:5], 16), int(h[5:7], 16)), g.get("total", 1), g.get("working", 0)))
+        return tuple(out)
 
     def _nearest_timer(self) -> float | None:
         """Fraction of the soonest countdown still to go (for the ring round the orb), or None."""
@@ -667,6 +689,7 @@ class Overlay:
         self._last = now
         self.orb.state, self.orb.approval = state, approval
         self.orb.timer = self._nearest_timer()
+        self.orb.projects = self._project_colors()
         if self.panel_fade.shown and self.orb.timer is not None:
             self._render_timers()  # the countdown ticks every second, not only when new data arrives
         self.orb.color = ease_color(self.orb.color, ORB_COLORS.get(state, ORB_COLORS["idle"]), 0.16)
@@ -682,36 +705,26 @@ class Overlay:
     def _render(self):
         d = self.data
         state = self._state()
-        color = COLORS.get(state, FG)
-        self.dot.delete("all")
-        self.dot.create_oval(1, 1, 9, 9, fill=color, outline="")
-        self._set_text("status", self.status, LABELS.get(state, state))
         if not d:
-            self._set_text("meta", self.meta, "Start JARVIS from the desktop shortcut - this reconnects by itself.")
+            self._set_text("note", self.note, "JARVIS isn't running")
             return
-        v = d.get("voice") or {}
-        last = v.get("last") or {}
-        bits = [] if v.get("running") else ["voice off" if not v.get("enabled") else (v.get("unavailable") or v.get("error") or "voice starting")]
-        if d.get("detail"):
-            bits.append(elide(d["detail"], 40))
-        if last.get("seconds") is not None and last.get("heard"):
-            bits.append(f"heard in {last['seconds']} s")
-        elif last.get("note"):
-            bits.append(elide(last["note"], 40))
-        self._set_text("meta", self.meta, " · ".join(bits))
-        self._render_timers()
         self._render_projects(d.get("projects") or {})
         ex = d.get("last") or {}
-        self._set_text("you", self.you, "You: " + elide(ex.get("request") or "-", 48))
-        self._set_text("reply", self.reply, elide(ex.get("reply") or "-", 170))
-        history = d.get("history") or []
-        for i, row in enumerate(self.hist_rows):
-            h = history[i] if i < len(history) else None
-            txt = (time.strftime("%H:%M ", time.localtime(h["at"])) + elide(h["request"], 40) + "\n  → " + elide(h["reply"] or "…", 70)) if h else ""
-            self._set_text(f"hist{i}", row, txt)
+        self._set_text("you", self.you, "You: " + elide(ex.get("request") or "-", 80))
+        self._set_text("reply", self.reply, elide(ex.get("reply") or "-", 360))
+        talking = state == "speaking" or bool((d.get("voice") or {}).get("talking"))
+        self.pause_btn.set_fg(FG if talking else "#475569")  # lit only while there is something to pause
+        self.sound_btn.set_text("🔊" if d.get("sound", True) else "🔇")
         if not self._texts.get("note_override"):
-            self._set_text("note", self.note, "")
+            timer = self._timer_text()
+            self._set_text("note", self.note, timer or LABELS.get(state, state), fg=ACCENT if timer else MUTED)
         self._place_panel()
+
+    def _render_timers(self):  # countdowns tick every second in the status spot
+        if not self._texts.get("note_override"):
+            timer = self._timer_text()
+            if timer:
+                self._set_text("note", self.note, timer, fg=ACCENT)
 
     # -- actions --------------------------------------------------------------------------------------------------------
     def _flash(self, text: str):
@@ -763,6 +776,40 @@ class Overlay:
                 self.root.after(3000, lambda: self.deciding.discard(aid))
         self._bg(go, "allowed" if approve else "denied")
 
+    def _pause(self):
+        """Stop JARVIS talking now (the rest of the current reply stays silent; the text still arrives)."""
+        self._bg(lambda: self.api.call("POST", "/api/voice/stop"), "paused")
+
+    def _toggle_sound(self):
+        """Spoken replies on/off (the voice setting speak_replies - the server and the window both follow it)."""
+        on = not (self.data or {}).get("sound", True)
+        self.sound_btn.set_text("🔊" if on else "🔇")
+        if self.data is not None:
+            self.data["sound"] = on
+
+        def go():
+            self.api.call("PUT", "/api/settings", {"voice": {"speak_replies": on}})
+            if not on:
+                self.api.call("POST", "/api/voice/stop")  # muting also silences what is being said now
+        self._bg(go, "sound on" if on else "sound off")
+
+    def _open_project(self, row):
+        """Bring forward the window the project's AI runs in (or open its folder when no window is found)."""
+        key = getattr(row, "project_key", "")
+        if not key:
+            return
+        import urllib.parse
+
+        def go():
+            r = self.api.call("GET", "/api/projects/window?key=" + urllib.parse.quote(key))
+            if r.get("hwnd") and focus_window(int(r["hwnd"])):
+                return
+            if r.get("folder") and os.path.isdir(r["folder"]):
+                os.startfile(r["folder"])  # noqa: S606 - the owner's own project folder
+            else:
+                raise RuntimeError("no window found")
+        self._bg(go)
+
     def _open_window(self):
         def go():
             from types import SimpleNamespace
@@ -774,6 +821,22 @@ class Overlay:
 
     def run(self):
         self.root.mainloop()
+
+
+def focus_window(hwnd: int) -> bool:
+    """Bring a top-level window forward (restored if minimised). Called by the icon process, which the owner just
+    clicked - Windows only lets that process take the foreground."""
+    if os.name != "nt":
+        return False
+    import ctypes
+
+    u = ctypes.windll.user32
+    if not u.IsWindow(hwnd):
+        return False
+    if u.IsIconic(hwnd):
+        u.ShowWindow(hwnd, 9)  # SW_RESTORE
+    u.SetForegroundWindow(hwnd)
+    return True
 
 
 def _lighter(color: str) -> str:

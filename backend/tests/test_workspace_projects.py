@@ -132,13 +132,17 @@ def test_the_hover_panel_lists_projects_with_a_dot_per_ai():
                          Agent("Codex", 3, r"D:\spideyy\Automation and Agents\EDIT2", False)]
                         + [Agent("Gemini CLI", 10 + i, rf"D:\spideyy\Research\p{i}", False) for i in range(4)]).snapshot()
         o._render_projects(snap)
-        assert o.proj_count.cget("text") == "1 of 7 working"
-        row, name, kinds, pips = o.proj_rows[0]
+        row, dot, name, kinds, pips = o.proj_rows[0]
         assert name.cget("text") == "Jarvis" and kinds.cget("text") == "2 Claude Code"
+        jarvis = next(g for g in snap["projects"] if g["name"] == "Jarvis")
+        assert row.project_key == jarvis["key"]  # a click opens this project's window
+        assert dot.itemcget(dot.find_all()[0], "fill") == jarvis["color"]  # the row wears the project's colour
         assert len(pips.find_all()) == 2  # one dot per AI
-        assert o.proj_more.cget("text") == f"{snap['projects_count'] - PROJECT_ROWS} more projects"
+        assert {o.proj_rows[i][1].itemcget(o.proj_rows[i][1].find_all()[0], "fill") for i in range(3)} == \
+            {g["color"] for g in snap["projects"][:3]}  # different colours for different projects
+        assert o.proj_more.cget("text") == f"{snap['projects_count'] - PROJECT_ROWS} more project" + ("s" if snap["projects_count"] - PROJECT_ROWS > 1 else "")
         o._render_projects(_watcher([]).snapshot())
-        assert o.proj_count.cget("text") == "No AI agents running" and not o.proj_rows[0][0].winfo_manager()
+        assert o.proj_empty.winfo_manager() and not o.proj_rows[0][0].winfo_manager()
     finally:
         root.destroy()
 
@@ -164,3 +168,144 @@ def test_the_new_icon_is_solid_and_its_bezel_carries_the_state():
     assert max(off) < 0.1  # offline: no light at all
     speak, extra = tick_levels("speaking", 1.0)
     assert max(extra) > 0.5  # speaking: the ticks reach inward like an equaliser
+
+
+def test_each_project_keeps_its_own_colour():
+    from jarvis.workspace import PROJECT_COLORS, assign_colors
+
+    keys = [r"d:\spideyy\a\jarvis", r"d:\spideyy\a\edit2", r"d:\spideyy\s\alpha", r"c:\users\god"]
+    first = assign_colors(keys)
+    assert len(set(first.values())) == 4 and set(first.values()) <= set(PROJECT_COLORS)
+    assert assign_colors(list(reversed(keys))) == first  # the scan order does not change colours
+    assert "#22d3ee" not in PROJECT_COLORS  # JARVIS's own cyan is never a project's colour
+
+
+def _hue_sat(hex_or_rgb):
+    import colorsys
+
+    rgb = tuple(int(hex_or_rgb[i:i + 2], 16) for i in (1, 3, 5)) if isinstance(hex_or_rgb, str) else hex_or_rgb
+    h, _l, s = colorsys.rgb_to_hls(*(v / 255 for v in rgb))
+    return h * 360, s
+
+
+def test_project_colours_never_look_like_a_jarvis_state():
+    """The owner: 'our colour choice is wrong somewhere'. Six of the ten project colours were exactly JARVIS's state
+    colours (amber = approval, violet = thinking, green = listening...), so a project's arc read as a state. Now JARVIS
+    is one cyan (motion shows the state), the alarms keep red and amber, and projects get the other hues."""
+    from jarvis.orb import AMBER, COLORS
+    from jarvis.overlay import COLORS as CARD_COLORS
+    from jarvis.workspace import CORE_COLORS, PROJECT_COLORS, assign_colors
+
+    live = {k: v for k, v in COLORS.items() if k not in ("error", "offline", "loading")}
+    assert set(live.values()) == {COLORS["waiting"]}  # every working state is the same cyan
+    assert CARD_COLORS["thinking"] == CARD_COLORS["idle"] == "#22d3ee"  # the card follows the icon
+    reserved = [COLORS["waiting"], COLORS["error"], AMBER]
+    for c in PROJECT_COLORS:
+        h, s = _hue_sat(c)
+        assert s > 0.5, c  # a real colour, not a grey
+        for r in reserved:
+            rh, _ = _hue_sat(r)
+            assert min(abs(h - rh), 360 - abs(h - rh)) >= 12, (c, r)  # never the hue of cyan, red or amber
+    six = assign_colors([f"p{i}" for i in range(6)])
+    assert set(six.values()) == set(PROJECT_COLORS[:CORE_COLORS])  # six projects get the six bold colours
+    eight = assign_colors([f"p{i}" for i in range(8)])
+    assert len(set(eight.values())) == 8
+
+
+def test_long_project_names_no_longer_push_the_ai_dots_off_the_card():
+    import tkinter as tk
+
+    from jarvis.overlay import PANEL_W, Overlay
+
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("no display")
+    root.withdraw()
+    try:
+        o = Overlay.__new__(Overlay)
+        o.root, o._texts, o.data, o.outside_since = root, {}, {}, None
+        o.pinned = o.history_open = False
+        o._build_panel()
+        o._render_projects({"projects": [{"key": "a", "name": "Automation and Agents", "color": "#a78bfa", "working": 1,
+                                          "agents": [{"kind": "Claude Code", "busy": True}, {"kind": "Gemini CLI", "busy": False}]}]})
+        o.panel.geometry(f"{PANEL_W}x300+-4000+0")
+        o.panel.deiconify()
+        o.panel.update()
+        row, _dot, _name, _kinds, pips = o.proj_rows[0]
+        assert pips.winfo_ismapped() and pips.winfo_width() >= 50  # full width, not squeezed
+        assert row.winfo_x() + pips.winfo_x() + pips.winfo_width() <= PANEL_W  # inside the card
+        kinds = o.proj_rows[0][3]
+        assert kinds.cget("text").endswith("…")  # the AI names are shortened with '…', not cut off by the dots
+        assert kinds.winfo_x() + kinds.winfo_reqwidth() <= pips.winfo_x()
+    finally:
+        root.destroy()
+
+
+def test_the_resting_icon_shows_projects_as_coloured_arcs():
+    from jarvis.orb import COLORS, TICKS, OrbState, project_ticks, render
+
+    projects = (((245, 158, 11), 2, 1), ((167, 139, 250), 1, 0), ((52, 211, 153), 1, 1))
+    ticks = project_ticks(projects, 1.0)
+    assert len(ticks) == TICKS
+    colours = [c for c, _v in ticks if c]
+    assert colours.count((245, 158, 11)) > colours.count((167, 139, 250))  # arcs are sized by their AIs
+    assert sum(1 for c, _v in ticks if c is None) == 3  # a gap between arcs
+    idle = [v for c, v in ticks if c == (167, 139, 250)]
+    assert max(idle) == min(idle)  # an idle project's arc does not move...
+    busy = [v for c, v in ticks if c == (52, 211, 153)]
+    assert max(busy) > min(busy)  # ...a working one shimmers
+    img = render(OrbState(state="waiting", t=1.0, color=COLORS["waiting"], projects=projects))
+    assert img.size[0] > 0
+    # while JARVIS is busy its own state takes the bezel back
+    assert render(OrbState(state="thinking", t=1.0, color=COLORS["thinking"], projects=projects)).tobytes() == \
+        render(OrbState(state="thinking", t=1.0, color=COLORS["thinking"])).tobytes()
+
+
+def test_pause_stops_talking_and_keeps_the_rest_of_the_reply_silent(jarvis):
+    said, events = [], []
+
+    class FakeSpeaker:
+        speaking = True
+
+        def idle(self):
+            return False
+
+        def stop(self):
+            said.append("STOP")
+
+        def say(self, text, lang=None):
+            said.append(text)
+            return True
+
+    jarvis.voice.speaker = FakeSpeaker()
+    jarvis.voice.conversation = "c_1"
+    q = jarvis.bus.subscribe()
+    assert jarvis.voice.stop_speaking() is True
+    assert said == ["STOP"] and "c_1" in jarvis.voice._hushed
+    while not q.empty():
+        events.append(q.get_nowait()["type"])
+    assert "voice.stop" in events  # the window stops its own speech too
+
+
+def test_the_icon_api_has_pause_sound_and_project_windows(jarvis):
+    from fastapi.testclient import TestClient
+
+    from jarvis.api import create_app
+
+    h = {"Authorization": f"Bearer {jarvis.settings.api_token()}"}
+    with TestClient(create_app(jarvis)) as c:
+        assert c.post("/api/voice/stop", headers=h).json()["ok"] is True
+        assert c.get("/api/overlay", headers=h).json()["sound"] is True
+        c.put("/api/settings", json={"voice": {"speak_replies": False}}, headers=h)
+        assert c.get("/api/overlay", headers=h).json()["sound"] is False  # the icon's sound button follows the setting
+        jarvis.workspace._latest = {"agents": [Agent("Claude Code", 4242424, r"D:\spideyy\Automation and Agents\Jarvis", True)], "at": 1.0}
+        key = c.get("/api/projects", headers=h).json()["projects"][0]["key"]
+        r = c.get("/api/projects/window", params={"key": key}, headers=h).json()
+        assert r["hwnd"] is None and r["folder"].endswith("Jarvis")  # no such process: the folder is the fallback
+        assert c.get("/api/projects/window", params={"key": "nope"}, headers=h).json() == {"hwnd": None, "folder": ""}
+
+
+def test_an_ai_without_a_readable_folder_is_named_after_itself():
+    snap = _watcher([Agent("Codex", 5, "", False)]).snapshot()
+    assert snap["projects"][0]["name"] == "Codex" and snap["projects"][0]["group"] == "no project folder"

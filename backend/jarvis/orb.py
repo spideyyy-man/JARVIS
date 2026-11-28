@@ -5,8 +5,8 @@ light edge and a soft drop shadow, so it reads on dark AND light desktops (the o
 light one); 36 short ticks round the face carry the state - a single tick travelling slowly while waiting, a ripple while
 listening, comets chasing while thinking, a stepping hand while working, a round equaliser while speaking. A small lit
 core sits in the middle. A timer is a thin bright arc just outside the edge; an action waiting for approval turns the edge
-amber and adds a badge. Colours follow the 3D core of the window (cyan ready, green listening, violet thinking, teal
-working, blue speaking, red error) and ease from one state to the next.
+amber and adds a badge. JARVIS itself is always cyan - the motion carries the state - with red for an error and grey
+when off; the other hues belong to the projects, whose arcs ring the bezel at rest.
 
 Static layers (shadow, puck, halo, core) are drawn once and cached; a frame draws 36 ticks and downsamples (~1-2 ms).
 `render(state)` is pure (unit-tested); `LayeredWindow` only presents a finished frame.
@@ -22,10 +22,13 @@ SIZE = 72  # window size in px (puck + room for its shadow, halo and the timer a
 ORB_R = 22  # puck radius in px
 SS = 3  # supersampling factor
 
-COLORS = {"idle": (34, 211, 238), "waiting": (34, 211, 238), "listening": (52, 211, 153), "recording": (52, 211, 153),
-          "transcribing": (163, 230, 53), "thinking": (167, 139, 250), "executing": (45, 212, 191), "speaking": (96, 165, 250),
-          "error": (248, 113, 113), "offline": (100, 116, 139), "loading": (148, 163, 184),
-          "following": (74, 222, 128)}  # conversation mode: listening without the wake word
+# JARVIS is one colour, cyan: what it is doing is shown by the motion of the ticks (ripple, comets, stepping hand,
+# equaliser), not by a hue. Only the alarms have colours of their own - red error, amber approval - and grey means off.
+# Every other hue is left to the projects (workspace.PROJECT_COLORS), so a project's arc never looks like a state.
+CYAN = (34, 211, 238)
+COLORS = {"idle": CYAN, "waiting": CYAN, "listening": CYAN, "recording": CYAN, "transcribing": CYAN, "thinking": CYAN,
+          "executing": CYAN, "speaking": CYAN, "following": CYAN,  # following = conversation mode (no wake word needed)
+          "error": (248, 113, 113), "offline": (100, 116, 139), "loading": (148, 163, 184)}
 AMBER = (245, 158, 11)
 TICKS = 36
 TICK_OUT, TICK_IN = 19.0, 15.6  # tick radii in px (inside the puck's face)
@@ -39,6 +42,36 @@ class OrbState:
     color: tuple[float, float, float] = COLORS["waiting"]  # current (eased) colour
     approval: bool = False
     timer: float | None = None  # fraction of the soonest timer still to go: a thin arc that shrinks as it runs down
+    # projects with AIs working on them, as ((r, g, b), total AIs, working AIs): shown as coloured arcs while resting
+    projects: tuple = ()
+
+
+def project_ticks(projects, t: float) -> list[tuple[tuple[int, int, int] | None, float]]:
+    """(colour or None for a gap, brightness) per tick: the bezel split into one arc per project, sized by its AIs,
+    starting at the top. An arc whose AIs are working has a shimmer running through it; an idle one glows softly."""
+    projects = list(projects)[:9]
+    n = TICKS
+    gaps = len(projects) if len(projects) > 1 else 0
+    room = n - gaps
+    weights = [max(1, p[1]) for p in projects]
+    sizes = [max(2, round(room * w / sum(weights))) for w in weights]
+    while sum(sizes) > room:  # rounding: trim the biggest arcs
+        sizes[sizes.index(max(sizes))] -= 1
+    while sum(sizes) < room:
+        sizes[sizes.index(max(sizes))] += 1
+    out: list[tuple[tuple[int, int, int] | None, float]] = []
+    for k, ((rgb, _total, working), size) in enumerate(zip(projects, sizes)):
+        head = (t * 0.45 + k * 0.37) % 1.0 * size  # each arc's shimmer runs at its own phase
+        for i in range(size):
+            if working:
+                behind = (head - i) % size
+                v = 0.55 + 0.45 * max(0.0, 1 - behind / max(2.0, size * 0.6)) ** 1.5
+            else:
+                v = 0.45
+            out.append((rgb, v))
+        if gaps:
+            out.append((None, 0.0))
+    return out[:n] + [(None, 0.0)] * (n - len(out))
 
 
 def ease_color(current, target, k: float = 0.12) -> tuple[float, float, float]:
@@ -181,12 +214,18 @@ def render(o: OrbState) -> Image.Image:
     layer = Image.new("RGBA", (s, s), (0, 0, 0, 0))  # lines are blended on, never drawn straight onto the puck (see _puck)
     d = ImageDraw.Draw(layer)
     lv, ln = tick_levels(o.state, t)
+    # resting with projects running: the bezel shows them as coloured arcs (JARVIS's own states take it back when busy)
+    arcs = project_ticks(o.projects, t) if o.projects and o.state in ("waiting", "idle") and not o.approval else None
     for i in range(TICKS):
         a = -math.pi / 2 + 2 * math.pi * i / TICKS
         v = lv[i]
+        tick_col = col
+        if arcs:
+            tick_col, v = arcs[i]
+            tick_col = tick_col or DIM
         ri = (TICK_IN - 2.6 * ln[i]) * SS
         ro = TICK_OUT * SS
-        lit = tuple(min(255, int(col[k] + (255 - col[k]) * 0.35 * max(0.0, v - 0.7) / 0.3)) for k in range(3))  # hottest ticks go towards white
+        lit = tuple(min(255, int(tick_col[k] + (255 - tick_col[k]) * 0.35 * max(0.0, v - 0.7) / 0.3)) for k in range(3))  # hottest ticks go towards white
         tint = tuple(int(DIM[k] + (lit[k] - DIM[k]) * v) for k in range(3))
         alpha = int(70 + 185 * v ** 0.8) if active else 70
         w = (1.15 + 0.85 * v) * SS

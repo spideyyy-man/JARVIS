@@ -97,6 +97,7 @@ export class VoiceEngine {
   private ttsBuf = "";
   private ttsPending = 0;
   private ttsGen = 0;
+  private hushed = false; // the owner pressed pause: nothing more of the current reply is spoken
   private spoken = ""; // normalised text spoken this turn (echo guard)
   private pulse = 0; // speech-activity envelope while speaking
   private pulseAt = 0;
@@ -118,6 +119,7 @@ export class VoiceEngine {
     deps.on("voice.state", (e) => this.onLocalState(e));
     deps.on("voice.heard", (e) => this.onLocalHeard(e));
     deps.on("voice.say", (e) => this.say(String(e.text ?? ""))); // text the server has no voice for (e.g. Tamil)
+    deps.on("voice.stop", () => this.silence()); // the icon's pause button
   }
 
   // -- offline listener (server side) --------------------------------------------------
@@ -152,6 +154,7 @@ export class VoiceEngine {
     const text = String(e.text ?? "").trim();
     const cid = String(e.conversation_id ?? "");
     if (!text || !cid) return;
+    this.hushed = false; // a new request: its reply may be spoken again
     if (this.busy) this.interrupt();
     this.serverSpeaks = !!e.server_speaks;
     this.capture = "none";
@@ -255,6 +258,23 @@ export class VoiceEngine {
     void this.deps.listenLocal?.().then((ok) => {
       if (!ok) this.set({ phase: "idle", interim: "", capturing: false, error: "The offline listener is not running." });
     });
+  }
+  /** Pause (the icon's button): stop speaking now and keep the rest of this reply silent. Unlike interrupt(), the
+   *  answer itself keeps arriving as text. */
+  silence() {
+    this.hushed = true;
+    this.ttsGen++;
+    this.ttsBuf = "";
+    this.ttsPending = 0;
+    try {
+      synth()?.cancel();
+    } catch {
+      /* ignore */
+    }
+    if (this.s.phase === "speaking") {
+      this.set({ phase: "idle" });
+      this.deps.report("idle");
+    }
   }
   /** Barge-in / stop: silence speech output and cancel the running turn on the backend. */
   interrupt() {
@@ -460,6 +480,7 @@ export class VoiceEngine {
   // -- conversation turn ---------------------------------------------------------
   private submit(text: string) {
     if (this.busy) this.interrupt();
+    this.hushed = false;
     this.serverSpeaks = false;
     const cid = this.s.conversationId ?? this.deps.newConversationId();
     this.activeTurn = true;
@@ -527,7 +548,7 @@ export class VoiceEngine {
     this.serverSpeaks = was;
   }
   private speak(text: string) {
-    if (this.serverSpeaks) return; // the server is saying it: two voices at once would be worse than one
+    if (this.serverSpeaks || this.hushed) return; // the server is saying it / the owner paused this reply
     const engine = synth();
     const Utter = win().SpeechSynthesisUtterance;
     if (!this.cfg.speak_replies || !engine || !Utter) return;

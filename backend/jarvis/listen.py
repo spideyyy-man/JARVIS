@@ -1208,6 +1208,7 @@ class VoiceService:
         self.last_used = 0.0
         self._tasks: set = set()
         self._follow_pending = False
+        self._hushed: set[str] = set()  # conversations whose current reply the owner paused (stop_speaking)
         self.speaker = speaker  # made in start(): only the desktop app speaks out loud (never tests or the bare server)
 
     def enabled(self) -> bool:
@@ -1263,6 +1264,19 @@ class VoiceService:
             self.speaker.stop()
         if self.listener:
             self.listener.stop()
+
+    def stop_speaking(self) -> bool:
+        """The icon's pause button: stop talking now and keep the rest of the current reply silent (the answer itself
+        still arrives as text). The JARVIS window is told to stop its own speech too (`voice.stop`).
+        Returns True when something was being said."""
+        talking = bool(self.speaker and (self.speaker.speaking or not self.speaker.idle()))
+        if self.conversation:
+            self._hushed.add(self.conversation)
+        self._follow_pending = False
+        if self.speaker:
+            self.speaker.stop()
+        self.app.bus.emit("voice.stop")
+        return talking
 
     def listen_now(self) -> bool:
         if not (self.listener and self.listener.running()):
@@ -1402,13 +1416,14 @@ class VoiceService:
                 if e["type"] == "chat.delta" and e.get("conversation_id") == cid:
                     streamed.append(e.get("text", ""))
                     for sentence in split.feed(e.get("text", "")):
-                        self.speaker.say(sentence)
+                        if cid not in self._hushed:  # the owner pressed pause: the rest of this reply stays silent
+                            self.speaker.say(sentence)
 
         async def hold_on():
             # The local model can take a minute on the busy laptop (64 s on 2026-11-21): say at once that it was heard,
             # so silence is never the only answer.
             await asyncio.sleep(HOLD_ON_AFTER)
-            if not streamed:
+            if not streamed and cid not in self._hushed:
                 self.speaker.say(HOLD_ON.get(lang, HOLD_ON["en"]))
 
         follower = asyncio.create_task(follow())
@@ -1422,6 +1437,9 @@ class VoiceService:
             self.app.bus.unsubscribe(events)
         if result.get("enroll"):
             return result  # the instructions were already said by enroll(); the beeps follow
+        if cid in self._hushed:  # paused: say nothing more and do not open the conversation window either
+            self._hushed.discard(cid)
+            return result
         so_far = "".join(streamed)
         final = result.get("text", "")
         rest = split.rest() + (final[len(so_far):] if final.startswith(so_far) else ("" if so_far else final))

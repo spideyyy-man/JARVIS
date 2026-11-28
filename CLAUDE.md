@@ -434,6 +434,38 @@ Since 2026-11-19 (Edge's online recogniser failed on the laptop with "Speech rec
     (READ, fast path) + rule ("what projects are running", "how many AIs are working", "is claude working"; commands
     like "open claude" are not taken). Live scan (2026-11-27): Claude Code in EDIT2, Jarvis, linkedin; Antigravity in
     forge-ai; Gemini CLI in the home folder; a Codex task.
+- **Compact companion card, project colours, pause and sound** (2026-11-27, same day; the owner compared it with
+  ChatGPT's floating companion: generic colour, static icon, a hover panel that "irritates", no way to stop it talking):
+  - Each project has its own colour (`workspace.assign_colors`, `PROJECT_COLORS` - hash of the project key into the six
+    core colours, next free one on a clash, then the two extras - stable while the set of projects is stable; a new
+    project whose colour clashes with one sorted after it can move that one to the next free colour).
+  - Colour rules (2026-11-28; the owner: "our colour choice is wrong somewhere" - 6 of the 10 project colours were
+    exactly JARVIS's state colours, so an amber project arc read as "approval waiting", violet as "thinking"):
+    JARVIS itself is one cyan in every working state (`orb.COLORS`; the tick motion shows the state), red = error,
+    amber = approval, grey = off. Projects get violet, lime, pink, emerald, yellow, blue (CIEDE2000 >= 19 apart and
+    >= 14 from every reserved colour), then fuchsia and indigo. The window's 2D orb / 3D core still use the old
+    per-state colours. The card's AI dots are packed first (long names used to push them off the card) and the AI
+    names are shortened to the pixels left (`Overlay._fit`). An AI whose folder could not be read is
+    a row named after the AI ("Codex", group "no project folder"). The resting icon shows
+    the projects as coloured arcs on the bezel (`orb.project_ticks`: sized by AIs, a shimmer runs through a working
+    project's arc, an idle one glows steadily at 0.45); JARVIS's own busy states take the bezel back.
+  - Hover card (`overlay._build_panel`, 272 px): project rows (colour dot, name, which AIs, one dot per AI in the
+    project's colour - filled working, hollow idle; click = `GET /api/projects/window` -> the window of the app the AI
+    runs in, found by walking up from the agent process to the nearest process with a visible top-level window -
+    Windows Terminal for a CLI, the Claude app for desktop sessions, Antigravity, the ChatGPT app for Codex; the icon
+    process brings it forward itself (`focus_window`), the folder opens when no window is found), a small chat box,
+    the last reply folded under "˅", and 🎤 talk / ⏸ pause (lit while talking) / 🔊🔇 sound / ↗ window plus a status.
+    Opens after a 0.35 s hover, closes 0.45 s after leaving; a click on the puck opens the JARVIS window. The old
+    header, "Last 5" list and pin are gone.
+  - Pause: `POST /api/voice/stop` -> `VoiceService.stop_speaking`: the speaker stops, the current conversation is
+    "hushed" (no more sentences of that reply, no hold-on line, no conversation window) and `voice.stop` makes the
+    window's own speech stop (`voice.ts silence()`, which unlike interrupt() lets the answer keep arriving as text).
+    Sound on/off = the existing voice setting `speak_replies` (server and window both follow it); `/api/overlay` has
+    `sound`. Muting also stops what is being said now.
+  - Checked: tests (projects window lookup with a missing process, pause/hush, sound, colours, arcs, card rows) and a
+    PrintWindow capture of the card drawn off-screen; live window lookup found Windows Terminal (EDIT2), the Claude app
+    (Jarvis) and Antigravity (ALPHA). Not checked on the owner's screen: the card's look, clicking through to windows,
+    pausing real speech.
 - **Floating icon** (`overlay.py`, tkinter, its own `pythonw` process started by the desktop app with
   `--parent PID`): a 46 px always-on-top circle, coloured by state; hover (or click to pin) shows a panel from
   `GET /api/overlay` - now/heard/last exchange, approvals with Approve/Deny, activity (`EventBus.activity`,

@@ -313,26 +313,123 @@ class WorkspaceWatcher:
         self._latest = {"agents": out, "at": time.time()}
         return out
 
-    def snapshot(self) -> dict:
-        """{"projects": [{name, group, agents: [{kind, busy}], working, total}], "projects_count", "agents", "working", "at"}"""
-        agents = list(self._latest.get("agents", []))
+    def _groups(self) -> dict[str, dict]:
+        """key -> {name, group, agents, pids, folder} for the latest scan (pids/folder stay inside: see snapshot)."""
         groups: dict[str, dict] = {}
-        for a in agents:
-            name, group, key = (("private folder", "", "private") if a.folder and self.is_private(a.folder)
-                                else project_for(a.folder, self.roots, self.home, repo=repo_root))
-            g = groups.setdefault(key, {"name": name, "group": group, "agents": []})
+        for a in list(self._latest.get("agents", [])):
+            private = bool(a.folder) and self.is_private(a.folder)
+            if private:
+                name, group, key = "private folder", "", "private"
+            elif not a.folder:  # its folder could not be read: name the row after the AI, not "No folder"
+                name, group, key = a.kind, "no project folder", "nofolder:" + a.kind.lower()
+            else:
+                name, group, key = project_for(a.folder, self.roots, self.home, repo=repo_root)
+            g = groups.setdefault(key, {"name": name, "group": group, "agents": [], "pids": [], "folder": "" if private else a.folder})
             g["agents"].append({"kind": a.kind, "busy": a.busy})
+            g["pids"].append(a.pid)
+        return groups
+
+    def snapshot(self) -> dict:
+        """{"projects": [{key, name, group, color, agents: [{kind, busy}], working, total}], "projects_count", "agents",
+        "working", "at"} - every project keeps the same colour while it runs (icon arcs and hover rows match)."""
+        groups = {k: {kk: v for kk, v in g.items() if kk not in ("pids", "folder")} for k, g in self._groups().items()}
         for extra in self.extra():
             g = groups.setdefault("jarvis:" + extra.get("name", "JARVIS"), {"name": extra.get("name", "JARVIS"), "group": "this assistant", "agents": []})
             g["agents"].append({"kind": extra.get("kind", "JARVIS agent"), "busy": True})
+        colors = assign_colors(list(groups))
         projects = []
-        for g in groups.values():
+        for key, g in groups.items():
+            g["key"], g["color"] = key, colors[key]
             g["total"] = len(g["agents"])
             g["working"] = sum(x["busy"] for x in g["agents"])
             projects.append(g)
         projects.sort(key=lambda g: (-g["working"], -g["total"], g["name"].lower()))
         return {"projects": projects, "projects_count": len(projects), "agents": sum(g["total"] for g in projects),
                 "working": sum(g["working"] for g in projects), "at": self._latest.get("at")}
+
+    def window_for(self, key: str) -> dict:
+        """Where clicking a project in the icon's list should take the owner: the top-level window of the app its AI
+        runs in - the agent process itself or the nearest ancestor that owns a window (Windows Terminal for a CLI, the
+        Claude app for a desktop session, Antigravity, the ChatGPT app for Codex). {"hwnd", "folder"}; the icon brings
+        the window forward itself (Windows only lets the process the owner clicked do that)."""
+        g = self._groups().get(key)
+        if not g:
+            return {"hwnd": None, "folder": ""}
+        try:
+            procs = process_table()
+            windows = top_windows()
+        except OSError:
+            return {"hwnd": None, "folder": g["folder"]}
+        for pid in g["pids"]:
+            p, hops = pid, 0
+            while p and hops < 10:
+                if p in windows:
+                    return {"hwnd": windows[p], "folder": g["folder"]}
+                p, hops = procs.get(p, ("", 0))[1], hops + 1
+        return {"hwnd": None, "folder": g["folder"]}
+
+
+# Project colours (hex). Reserved and never used here: JARVIS's cyan, red (error), amber/orange (approval) and grey
+# (off) - see orb.COLORS. The first six are bold and clearly apart (CIEDE2000 >= 19 from each other, >= 14 from every
+# reserved colour); the last two are only used once all six are taken, as they sit closer to pink and blue.
+PROJECT_COLORS = ["#a78bfa", "#a3e635", "#f472b6", "#34d399", "#fde047", "#60a5fa", "#e879f9", "#818cf8"]
+CORE_COLORS = 6
+
+
+def assign_colors(keys: list[str]) -> dict[str, str]:
+    """A colour per project that stays the same while it runs: picked from the key's hash among the six core colours,
+    moving on to the next free one when two projects would share one (keys in sorted order, so the result does not
+    depend on scan order); the two extra colours come next, then colours repeat."""
+    import zlib
+
+    taken: set[int] = set()
+    out = {}
+    for key in sorted(keys):
+        free = [i for i in range(CORE_COLORS) if i not in taken]
+        if free:
+            i = zlib.crc32(key.encode("utf-8")) % CORE_COLORS
+            while i in taken:
+                i = (i + 1) % CORE_COLORS
+        else:
+            extra = [i for i in range(CORE_COLORS, len(PROJECT_COLORS)) if i not in taken]
+            i = extra[0] if extra else None
+            if i is None:  # more projects than colours: start reusing
+                taken.clear()
+                i = zlib.crc32(key.encode("utf-8")) % CORE_COLORS
+        taken.add(i)
+        out[key] = PROJECT_COLORS[i]
+    return out
+
+
+def top_windows() -> dict[int, int]:
+    """{pid: hwnd} of visible, titled, ownerless top-level windows (the largest per process) - Windows only."""
+    import os
+
+    if os.name != "nt":
+        return {}
+    import ctypes
+    from ctypes import wintypes
+
+    u = ctypes.windll.user32
+    found: dict[int, tuple[int, int]] = {}
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def visit(hwnd, _):
+        if not u.IsWindowVisible(hwnd) or u.GetWindow(hwnd, 4) or not u.GetWindowTextLengthW(hwnd):  # GW_OWNER
+            return True
+        if u.GetWindowLongW(hwnd, -20) & 0x00000080:  # WS_EX_TOOLWINDOW (floating helpers, like JARVIS's own icon)
+            return True
+        pid = wintypes.DWORD()
+        u.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        r = wintypes.RECT()
+        u.GetWindowRect(hwnd, ctypes.byref(r))
+        area = max(0, r.right - r.left) * max(0, r.bottom - r.top)
+        if pid.value not in found or area > found[pid.value][1]:
+            found[pid.value] = (int(hwnd), area)
+        return True
+
+    u.EnumWindows(visit, 0)
+    return {pid: h for pid, (h, _a) in found.items()}
 
 
 def describe(snap: dict) -> str:

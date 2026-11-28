@@ -157,6 +157,16 @@ def create_app(jarvis: Jarvis | None = None) -> FastAPI:
         ok = j.voice.listen_now()
         return {"ok": ok, **({} if ok else {"reason": j.voice.available() or "the offline listener is not running"})}
 
+    @app.post("/api/voice/stop")
+    async def voice_stop():
+        """The icon's pause button: stop talking now; the rest of the current reply stays silent (the text still arrives)."""
+        return {"ok": True, "was_talking": j.voice.stop_speaking()}
+
+    @app.get("/api/projects/window")
+    async def project_window(key: str):
+        """The window to bring forward for a project in the icon's list (the app its AI runs in), or its folder."""
+        return await asyncio.to_thread(j.workspace.window_for, key)
+
     @app.get("/api/connector")
     async def connector_status():
         """The browser extension's state, and the key to paste into it (shown in Settings to the signed-in UI only)."""
@@ -226,7 +236,8 @@ def create_app(jarvis: Jarvis | None = None) -> FastAPI:
                 "approvals": [{**a, "preview": (a["preview"] or "").strip()[:300]} for a in pending],
                 "activity": list(j.bus.activity)[-14:], "selftest": j.selftest.summary() if j.selftest else last,
                 "capabilities": j.capabilities(), "model": j.llm.current().name, "windows": len(j.bus._subscribers),
-                "projects": j.workspace.snapshot()}
+                "projects": j.workspace.snapshot(),
+                "sound": j.db.get_setting("voice", {}).get("speak_replies", True)}  # the icon's sound on/off button
 
     @app.get("/api/projects")
     async def projects():
